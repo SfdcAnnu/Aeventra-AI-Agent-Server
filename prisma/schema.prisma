@@ -1,0 +1,255 @@
+// Synapse AI — connector storage
+//
+// PostgreSQL (Render free tier in prod; local dev can point at the same
+// instance via the External connection string). SQLite era ended — deploys
+// were wiping the token store on every push.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// One row per (SF org × provider). The org_id comes from the JWT the Apex
+// callouts mint, so the server never has to trust the caller's claim.
+model Connector {
+  id                  String    @id @default(uuid())
+  orgId               String    // 15/18 char SF org Id
+  providerKey         String    // 'salesforce_mcp' for now; gdrive/slack/... later
+  displayName         String
+  status              String    @default("Pending") // Pending / Connected / Disconnected / Error
+  authType            String    @default("OAuth2")  // OAuth2 / ApiKey / ClientCredentials
+
+  // OAuth credentials (encrypted at the disk level when this moves to managed Postgres;
+  // for dev SQLite we rely on file-system perms).
+  accessToken         String?
+  refreshToken        String?
+  tokenExpiresAt      DateTime?
+  scopes              String?
+  instanceUrl         String?   // SF-specific — token response includes it
+
+  // Display / identity bits
+  accountEmail        String?
+  externalAccountId   String?   // SF user id parsed out of the `id` URL
+  apiKey              String?   // For ApiKey-auth providers (not used by SF MCP)
+
+  // Bookkeeping
+  configuredBy        String?   // SF user id
+  lastConnectedAt     DateTime?
+  lastErrorMessage    String?
+  configJson          String?   // free-form provider extras
+
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([orgId, providerKey, configuredBy])
+  @@index([orgId])
+}
+
+// Short-lived rows that anchor an OAuth round-trip. State (a UUID) is the
+// only thing the provider sends back to us in the redirect; we look it up
+// here to find the org + return URL.
+model PendingOAuth {
+  state             String    @id   // UUID we put in the authorize URL
+  orgId             String
+  providerKey       String
+  displayName       String
+  returnUrl         String              // SF Lightning page to send the user back to
+  connectorId       String?             // existing connector if this is a re-auth
+  createdAt         DateTime  @default(now())
+
+  @@index([orgId])
+}
+
+// Single-use, short-lived ticket that lets the BROWSER open a WebSocket
+// directly to this server without ever holding SessionKey__c — Apex mints
+// one via a server-to-server callout (POST /api/ws/ticket, sessionAuth-
+// guarded, same as every other Apex->Node call), hands only the ticket id
+// back to the client, and the gateway redeems it atomically on upgrade
+// (delete-where-not-expired, so a replay after redemption always misses).
+// TTL is short (seconds, not minutes) since it's used within the same
+// page load that minted it — no sweep interval needed, just an
+// opportunistic cleanup alongside each mint (mirrors installs.repo.ts's
+// sweepStalePending pattern).
+model WsTicket {
+  id             String    @id @default(uuid())
+  orgId          String
+  userId         String
+  agentApiName   String
+  sessionId      String
+  // JSON-serialized EngineOverrideInput ({engineType, apiKey, endpoint,
+  // defaultModel, connectionId}), resolved by Apex at mint time so the
+  // gateway can bind it into ConnectionContext on redemption — never
+  // trusted from a client-sent WS message. Same bounded-exposure window
+  // as the rest of this row: single-use, deleted on redemption, TTL
+  // seconds not minutes.
+  engineOverride String?
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime
+
+  @@index([orgId])
+}
+
+// One row per SF org that has completed the Synapse Setup OAuth dance.
+// `sessionKey` is what every subsequent Apex→server callout uses as Bearer.
+// The SF tokens give the server identity-of-the-org guarantees and can be
+// reused for back-channel callouts into the customer's SF org.
+model OrgInstall {
+  orgId             String    @id   // SF org Id (15/18 char)
+  sessionKey        String    @unique
+  sfAccessToken     String
+  sfRefreshToken    String?
+  sfInstanceUrl     String
+  sfUserId          String?           // user who completed setup
+  sfUserEmail       String?
+  tokenExpiresAt    DateTime?
+  scopes            String?
+  configuredAt      DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+// One row per app-level setup attempt. Created when Apex calls
+// /api/setup/authorize-url; deleted by /api/setup/callback after the
+// sessionKey is promoted into OrgInstall. `sessionKey` is generated
+// upfront and returned to Apex immediately — but the server only
+// recognises it as valid AFTER it lives on an OrgInstall row.
+model PendingSetup {
+  state             String    @id   // UUID we put in the authorize URL
+  orgId             String              // SF org Id of the admin who started setup
+  userId            String
+  returnUrl         String              // Lightning page to send the user back to
+  sessionKey        String              // pre-minted; promoted to OrgInstall on success
+  createdAt         DateTime  @default(now())
+
+  @@index([orgId])
+}
+
+// ── Durable runs (Wait / Approval / Loop) ───────────────────────────
+//
+// Every agent run gets a row here now, not just ones that pause — cheap
+// audit trail, and it means pause/resume is a natural extension of the
+// normal path rather than a special one. contextState/frontier/visited
+// are the serialized ExecutionContext + BFS queue the engine needs to
+// pick up exactly where it left off (see orchestrator/engine.ts
+// runLoop/resumeRun and orchestrator/context.ts toJSON/fromJSON).
+model AgentRun {
+  id            String    @id @default(uuid())
+  orgId         String
+  agentApiName  String
+  correlationId String    @unique
+  recordId      String?
+  userId        String?
+  // RUNNING | WAITING | WAITING_APPROVAL | SUCCESS | ERROR
+  status        String    @default("RUNNING")
+  contextState  Json      // ExecutionContext.state, serialized
+  aliases       Json      // ExecutionContext aliases, serialized
+  frontier      Json      // node ids still queued to run
+  visited       Json      // node ids already run (BFS de-dupe)
+  resumeAt      DateTime?          // wait — when the poller should resume this run
+  approvalToken String?   @unique  // approval — matched on decide()
+  // The node that actually paused (wait OR approval) — its downstream port
+  // was never queued at pause time (we returned before computing it), so
+  // resume needs this to know where to continue from: 'out' for wait,
+  // the decision ('approved'/'rejected') for approval.
+  pausedNodeId  String?
+  timeoutAt     DateTime?          // approval — auto-reject after this
+  lastError     String?
+  engineOverrideJson Json?         // persisted so resume doesn't need a fresh Apex round-trip
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  steps         RunStep[]
+
+  @@index([orgId, agentApiName])
+  @@index([status, resumeAt])
+}
+
+model RunStep {
+  id          String    @id @default(uuid())
+  runId       String
+  run         AgentRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  nodeId      String
+  nodeLabel   String?   // human-readable label as configured on the canvas — nodeId alone isn't meaningful in the UI
+  nodeSubType String
+  input       Json?     // the node's config as saved (pre-interpolation) — what it was asked to do
+  success     Boolean
+  output      Json?
+  error       String?
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([runId])
+}
+
+// ── RAG Knowledge Base ──────────────────────────────────────────────
+//
+// A customer's KB content can live in one of three places — the admin
+// picks per org (see kb/backends/*.ts for the pluggable interface this
+// backs):
+//   'archon'      — chunks + embeddings stored right here, in KbChunk.
+//                   Simplest, fastest to set up, default.
+//   'external_pg' — chunks + embeddings stored in the CUSTOMER's OWN
+//                   Postgres (their connection string lives in
+//                   connectionUrl below — nothing else about their
+//                   documents ever touches this database). Requires the
+//                   `vector` extension on their instance too.
+//   'salesforce'  — chunk TEXT is written as records into the customer's
+//                   own Salesforce org (AgentKbChunk__c) — Archon never
+//                   persists the content at all. Retrieval degrades to
+//                   SOSL keyword search (no true vector math) unless the
+//                   org has Data Cloud vector search.
+//
+// KbDocument is bookkeeping ONLY (title/status/chunk count) and always
+// lives here regardless of backend — it never holds the customer's
+// actual content when backend != 'archon'.
+model KbStorageConfig {
+  id            String    @id @default(uuid())
+  orgId         String    @unique         // one storage policy per org for v1
+  backend       String    @default("archon")  // archon | external_pg | salesforce
+  connectionUrl String?                   // external_pg only
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model KbDocument {
+  id           String     @id @default(uuid())
+  orgId        String
+  agentApiName String
+  title        String
+  sourceType   String     @default("upload")  // upload | agent_field (synced KnowledgeBase__c notes)
+  status       String     @default("Indexing") // Indexing | Ready | Error
+  chunkCount   Int        @default(0)
+  errorMessage String?
+  contentHash  String?    // agent_field sync only — skip re-indexing unchanged text
+  // Original text, ONLY cached when backend == 'archon' (reindex convenience).
+  // For external_pg/salesforce backends this stays null — caching it here
+  // would quietly break the "your content never lands in Archon's DB"
+  // promise those backends exist for.
+  rawText      String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  chunks       KbChunk[]
+
+  @@index([orgId, agentApiName])
+}
+
+// Archon-hosted backend's own storage. `embedding` is Unsupported because
+// Prisma Client has no native vector type — every read/write on that
+// column goes through raw SQL (see kb/backends/archon.ts); the other
+// columns on this model still work through the normal Prisma Client.
+model KbChunk {
+  id           String      @id @default(uuid())
+  documentId   String
+  document     KbDocument  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  orgId        String
+  agentApiName String
+  chunkIndex   Int
+  content      String
+  embedding    Unsupported("vector(1536)")?
+
+  @@index([orgId, agentApiName])
+}
