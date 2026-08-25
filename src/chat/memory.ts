@@ -22,6 +22,7 @@
  *  4. Failures degrade to today's behavior. Any error here means "send the
  *     full raw history like before" — memory can never break a turn.
  */
+import { traceable } from 'langsmith/traceable';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { logger } from '../logger';
 import type { ChatHistoryMessage, EngineOverrideInput } from './adapters/types';
@@ -194,7 +195,13 @@ async function summarize(
   if (!engine?.apiKey) return null;
   const user = `EXISTING SUMMARY:\n${input.existingSummary || '(none)'}\n\nEXISTING FACTS:\n${input.existingFacts}\n\nNEW TURNS:\n${input.transcript}`;
   try {
-    const raw = await callCheapModel(engine, SUMMARIZER_SYSTEM, user);
+    // Traced as its own LangSmith run (raw fetch — invisible otherwise).
+    // The engine object (API key) is closured, never a traced input.
+    const tracedCall = traceable(
+      (sys: string, usr: string) => callCheapModel(engine, sys, usr),
+      { name: 'memory-summarizer', run_type: 'llm' },
+    );
+    const raw = await tracedCall(SUMMARIZER_SYSTEM, user);
     if (!raw) return null;
     const jsonText = raw.replace(/^```(?:json)?/m, '').replace(/```\s*$/m, '').trim();
     const parsed = JSON.parse(jsonText) as { summary?: unknown; facts?: unknown };

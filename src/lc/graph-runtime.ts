@@ -168,7 +168,20 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     const t0 = Date.now();
     let state = await compiled.invoke(
       { messages: baseMessages },
-      { recursionLimit: MAX_GRAPH_STEPS },
+      {
+        recursionLimit: MAX_GRAPH_STEPS,
+        // LangSmith trace identity — with LANGSMITH_TRACING=true every model
+        // call, tool execution and graph step lands under this named run,
+        // filterable by agent/org/session in the LangSmith UI.
+        runName: `chat-turn ${req.agent.apiName}`,
+        tags: ['chat-turn', req.agent.apiName],
+        metadata: {
+          orgId: req.context.orgId,
+          sessionId: req.sessionId,
+          agentApiName: req.agent.apiName,
+          userId: req.context.userId,
+        },
+      },
     );
 
     let usedModel = modelName;
@@ -302,7 +315,20 @@ async function runSubagentTurn(
       .addEdge('tools', 'agent')
       .compile();
 
-    const out = await compiled.invoke({ messages: baseMessages }, { recursionLimit: MAX_GRAPH_STEPS });
+    const out = await compiled.invoke(
+      { messages: baseMessages },
+      {
+        recursionLimit: MAX_GRAPH_STEPS,
+        runName: `subagent ${subagentNode.name}`,
+        tags: ['subagent-turn', req.agent.apiName],
+        metadata: {
+          orgId: req.context.orgId,
+          sessionId: req.sessionId,
+          agentApiName: req.agent.apiName,
+          subagentName: subagentNode.name,
+        },
+      },
+    );
     return { messages: out.messages.slice(baseMessages.length), modelName };
   } finally {
     await loaded.close();
