@@ -15,7 +15,7 @@
 import { logger } from '../../logger';
 import type { AgentNode } from '../../types';
 import { InstallsRepo } from '../../db/installs.repo';
-import { buildSystemPrompt, resolveMcpServers, type ResolvedMcpServer } from './shared';
+import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry, type ResolvedMcpServer } from './shared';
 import { loadAttachments, type LoadedAttachment } from './attachments';
 import { resolveEngine } from '../engine-resolver';
 import type { HandoffToolDef } from '../subagent-router';
@@ -239,14 +239,19 @@ export async function runClaudeAdapter(
   // the user.
   const content = json.content ?? [];
   const lastBlock = content[content.length - 1];
-  const endsWithText = content.length > 0 && lastBlock?.type === 'text' &&
-    typeof lastBlock.text === 'string' && lastBlock.text.trim().length > 0;
-  if (content.length > 0 && !endsWithText) {
-    logger.warn({ orgId: req.context.orgId }, 'claude_adapter_narration_only_continuation');
+  const lastBlockText = lastBlock?.type === 'text' && typeof lastBlock.text === 'string' ? lastBlock.text.trim() : '';
+  const endsWithText = content.length > 0 && lastBlockText.length > 0;
+  // Semantic case — text that ends on a promise of future work ("let me
+  // calculate… one moment") is a dead end for the customer even though it
+  // is structurally a complete reply. Same fix as the OpenAI adapter.
+  const endsOnDeferral = endsWithText && isDeferralText(lastBlockText);
+  let continuationText: string | null = null;
+  if (content.length > 0 && (!endsWithText || endsOnDeferral)) {
+    logger.warn({ orgId: req.context.orgId, endsOnDeferral }, 'claude_adapter_narration_only_continuation');
     const continuationMessages = [
       ...messages,
       { role: 'assistant' as const, content },
-      { role: 'user' as const, content: 'Continue — that was not a complete reply, the customer cannot see it. Finish responding now with a real answer based on what you just found or did.' },
+      { role: 'user' as const, content: 'Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.' },
     ];
     const json2 = await callAnthropic(baseBody, continuationMessages, apiKey);
     tokensIn  += json2.usage?.input_tokens  ?? 0;
@@ -255,8 +260,14 @@ export async function runClaudeAdapter(
       debugRequests.push(redactDebugRequest({ ...baseBody, messages: continuationMessages }));
       debugResponses.push(json2);
     }
-    // Merge: keep the original narration + tool calls for the transcript,
-    // but the continuation's content is what actually has the closing text.
+    // Merge for tool-call extraction, but the continuation's text REPLACES
+    // the narration prefix — concatenating them bakes the stall pattern
+    // into persisted history, which later turns imitate (live-confirmed).
+    continuationText = (json2.content ?? [])
+      .filter(b => b.type === 'text' && typeof b.text === 'string')
+      .map(b => b.text)
+      .join('\n')
+      .trim() || null;
     json = { ...json2, content: [...content, ...(json2.content ?? [])] };
   }
 
@@ -272,8 +283,9 @@ export async function runClaudeAdapter(
     ms: Date.now() - t0,
   }, 'claude_adapter_response');
 
-  // Extract final assistant text + tool call summaries
-  const assistantText = (json.content ?? [])
+  // Extract final assistant text (continuation text wins when one ran —
+  // see the guard above) + tool call summaries
+  const assistantText = continuationText ?? (json.content ?? [])
     .filter(b => b.type === 'text' && typeof b.text === 'string')
     .map(b => b.text)
     .join('\n')
@@ -344,7 +356,19 @@ function mapHistoryForClaude(
       out.push({ role: 'assistant', content: m.content });
       continue;
     }
-    // tool-role messages are absorbed as continuation blocks in the prior assistant turn.
+    if (m.role === 'tool') {
+      // Same fix as the OpenAI mapper: persisted tool RESULTS carry the
+      // exact record Ids/values later turns must reuse — fold each into the
+      // preceding assistant message instead of dropping it.
+      const summary = summarizeToolHistoryEntry(m);
+      if (!summary) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === 'assistant' && typeof prev.content === 'string') {
+        prev.content = `${prev.content}\n\n${summary}`;
+      } else {
+        out.push({ role: 'assistant', content: summary });
+      }
+    }
   }
 
   // Build the new user message. If there are attachments, use content blocks;

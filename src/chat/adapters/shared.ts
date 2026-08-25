@@ -361,6 +361,36 @@ async function buildKbBlock(
   }
 }
 
+/** Semantic deferral detector — catches replies that END on a promise of
+ *  future work ("let me calculate… one moment, please") with nothing behind
+ *  it. The structural narration guard can't see these (the response DOES
+ *  end in a text block), yet to the customer they are a dead end — live-
+ *  confirmed on the WhatsApp revival flow, where a "One moment, please."
+ *  stall killed a negotiation. Checked against the trailing sentence only,
+ *  so a reply that defers AND THEN answers doesn't false-positive. */
+const DEFERRAL_TAIL_RE = /((one|just a) moment|hold on|please (hold|wait)|bear with me|let me (calculate|check|review|look|see|pull|find|get)|i(?:'|’)?ll (check|calculate|look|review|find|get back)|give me a (moment|second|minute))[^a-zA-Z0-9]*$/i;
+
+export function isDeferralText(text: string): boolean {
+  const tail = text.trim().slice(-160);
+  return DEFERRAL_TAIL_RE.test(tail);
+}
+
+/** Compact, model-facing summary of a persisted tool-result history row —
+ *  folded into the adjacent assistant message by both adapters' history
+ *  mappers so exact record Ids/values survive into later turns (the same
+ *  cure ChatPanel applies client-side on the WS path). */
+export function summarizeToolHistoryEntry(m: { content: string; toolCallsJson?: string | null; toolResultsJson?: string | null }): string | null {
+  let name = 'tool';
+  try {
+    const j = JSON.parse(m.toolCallsJson ?? '{}') as { name?: string };
+    if (j.name) name = j.name;
+  } catch { /* keep default */ }
+  const output = (m.content ?? '').trim() || (m.toolResultsJson ?? '').trim();
+  if (!output) return null;
+  const clipped = output.length > 600 ? output.slice(0, 600) + '…' : output;
+  return `[Earlier tool result — ${name}: ${clipped}\nReuse exact Ids/values from here in later turns; never invent or truncate them.]`;
+}
+
 export async function buildSystemPrompt(
   agent: AgentDefinition,
   aiNode: AgentNode,
@@ -373,6 +403,11 @@ export async function buildSystemPrompt(
   const parts: string[] = [];
 
   parts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
+
+  // Models have no clock — without this, any "tomorrow"/"next week" they
+  // compute (Task due dates, Event start times) lands on a training-era
+  // date (live-confirmed: an Event scheduled for 2023).
+  parts.push(`Current date and time (UTC): ${new Date().toISOString()}`);
 
   // Business Rules/Knowledge (the agent's own Notes field) and uploaded/
   // indexed KB documents are different kinds of content — hand-written

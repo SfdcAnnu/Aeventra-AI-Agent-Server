@@ -51,7 +51,7 @@ import {
   toSyntheticAiNode,
   type HandoffToolDef,
 } from '../chat/subagent-router';
-import { buildSystemPrompt, resolveMcpServers } from '../chat/adapters/shared';
+import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from '../chat/adapters/shared';
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
 import { generateSessionTitleAsync } from '../chat/title-generator';
@@ -197,15 +197,17 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     }
 
     // ── Narration guard: LangGraph's cycle already refuses to stop on a
-    // tool call, but a model can still emit whitespace-only text. One
-    // bounded nudge, same wording as the original.
+    // tool call, but a model can still emit empty text OR end on a
+    // semantic deferral ("let me calculate… one moment") — a dead end for
+    // the customer either way. One bounded nudge; its answer REPLACES the
+    // stall (lastAssistantText picks the newest non-empty message).
     let assistantText = lastAssistantText(state.messages);
-    if (!assistantText) {
-      logger.warn({ orgId: req.context.orgId }, 'lc_narration_only_continuation');
+    if (!assistantText || isDeferralText(assistantText)) {
+      logger.warn({ orgId: req.context.orgId, deferral: Boolean(assistantText) }, 'lc_narration_only_continuation');
       const followup = (await routerModel.invoke([
         new SystemMessage(systemPrompt),
         ...state.messages,
-        new HumanMessage('Continue — that was not a complete reply, the customer cannot see it. Finish responding now with a real answer based on what you just found or did.'),
+        new HumanMessage('Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.'),
       ])) as AIMessage;
       state = { ...state, messages: [...state.messages, followup] };
       assistantText = lastAssistantText(state.messages);
@@ -316,7 +318,22 @@ function toLangchainMessages(
 ): BaseMessage[] {
   const out: BaseMessage[] = [];
   for (const m of history) {
-    if (m.role === 'system' || m.role === 'tool') continue; // same rule as both original adapters
+    if (m.role === 'system') continue;
+    if (m.role === 'tool') {
+      // Persisted tool RESULTS carry the exact record Ids/values later
+      // turns must reuse — fold each into the preceding assistant message
+      // (same fix as both original adapters; dropping them caused invented
+      // record Ids, live-confirmed on the WhatsApp path).
+      const summary = summarizeToolHistoryEntry(m);
+      if (!summary) continue;
+      const prev = out[out.length - 1];
+      if (prev instanceof AIMessage && typeof prev.content === 'string') {
+        out[out.length - 1] = new AIMessage(`${prev.content}\n\n${summary}`);
+      } else {
+        out.push(new AIMessage(summary));
+      }
+      continue;
+    }
     out.push(m.role === 'assistant' ? new AIMessage(m.content) : new HumanMessage(m.content));
   }
   if (attachments.length === 0) {

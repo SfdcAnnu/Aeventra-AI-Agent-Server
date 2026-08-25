@@ -12,7 +12,7 @@
 import { logger } from '../../logger';
 import type { AgentNode } from '../../types';
 import { InstallsRepo } from '../../db/installs.repo';
-import { buildSystemPrompt, resolveMcpServers } from './shared';
+import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from './shared';
 import { loadAttachments, type LoadedAttachment } from './attachments';
 import { resolveEngine } from '../engine-resolver';
 import type { HandoffToolDef } from '../subagent-router';
@@ -203,16 +203,26 @@ export async function runOpenAiAdapter(
     ? lastItem.content.map(c => c.text ?? '').join('').trim()
     : '';
   const endsWithText = output.length > 0 && lastItem?.type === 'message' && lastText.length > 0;
+  // Semantic case: the response DOES end in text, but the text is a promise
+  // of future work with no follow-through ("let me calculate… one moment").
+  const endsOnDeferral = endsWithText && isDeferralText(lastText);
 
-  if (output.length > 0 && !endsWithText && json.id) {
-    logger.warn({ orgId: req.context.orgId }, 'openai_adapter_narration_only_continuation');
+  // Text captured from the continuation ONLY — when a continuation runs,
+  // its answer replaces (never concatenates onto) the narration prefix.
+  // The old merge produced artifacts like "One moment, please.I appreciate
+  // your patience…" in persisted history, which then TAUGHT the model the
+  // stall pattern on later turns (live-confirmed).
+  let continuationText: string | null = null;
+
+  if (output.length > 0 && (!endsWithText || endsOnDeferral) && json.id) {
+    logger.warn({ orgId: req.context.orgId, endsOnDeferral }, 'openai_adapter_narration_only_continuation');
     const continuationBody = {
       ...baseBody,
       input: [{
         role: 'user',
         content: [{
           type: 'input_text',
-          text: 'Continue — that was not a complete reply, the customer cannot see it. Finish responding now with a real answer based on what you just found or did.',
+          text: 'Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.',
         }],
       }],
       previous_response_id: json.id,
@@ -224,6 +234,16 @@ export async function runOpenAiAdapter(
       debugRequests.push(redactDebugRequest(continuationBody));
       debugResponses.push(json2);
     }
+    continuationText = (json2.output_text ?? '').trim() || null;
+    if (!continuationText) {
+      for (const b of json2.output ?? []) {
+        if (b.type === 'message' && Array.isArray(b.content)) {
+          continuationText = ((continuationText ?? '') + b.content.map(c => c.text ?? '').join('')).trim() || null;
+        }
+      }
+    }
+    // Merge outputs so already-executed tool calls from BOTH rounds are
+    // still extracted below — only the TEXT selection prefers json2.
     json = { ...json2, output: [...output, ...(json2.output ?? [])] };
   }
 
@@ -246,8 +266,10 @@ export async function runOpenAiAdapter(
     logger.warn({ orgId: req.context.orgId, err }, 'openai_adapter_log_response_failed');
   }
 
-  // Preferred: use the flattened output_text field OpenAI provides
-  let assistantText = json.output_text?.trim() ?? '';
+  // When a continuation ran, its text IS the reply (see continuationText
+  // above). Otherwise: prefer OpenAI's flattened output_text, fall back to
+  // walking blocks.
+  let assistantText = continuationText ?? json.output_text?.trim() ?? '';
   if (!assistantText) {
     // Fallback — walk output blocks and collect any text content
     for (const b of json.output ?? []) {
@@ -324,7 +346,23 @@ function mapHistoryForOpenAi(
   const out: Array<{ role: string; content: Array<Record<string, unknown>> }> = [];
   out.push({ role: 'system', content: [{ type: 'input_text', text: systemPrompt }] });
   for (const m of history) {
-    if (m.role === 'system' || m.role === 'tool') continue;
+    if (m.role === 'system') continue;
+    // Tool rows carry the ACTUAL data past turns retrieved — record Ids,
+    // amounts, line items. Dropping them (the old behavior) meant the model
+    // re-derived or INVENTED those values on later turns (live-confirmed:
+    // a hallucinated '006g...abcdEF' Opportunity Id on the WhatsApp path).
+    // Fold each into the preceding assistant message as pinned context.
+    if (m.role === 'tool') {
+      const summary = summarizeToolHistoryEntry(m);
+      if (!summary) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === 'assistant' && prev.content[0]?.type === 'output_text') {
+        prev.content[0].text = `${prev.content[0].text as string}\n\n${summary}`;
+      } else {
+        out.push({ role: 'assistant', content: [{ type: 'output_text', text: summary }] });
+      }
+      continue;
+    }
     out.push({
       role: m.role,
       content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }],
