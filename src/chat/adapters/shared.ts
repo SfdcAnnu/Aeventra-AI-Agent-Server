@@ -370,9 +370,19 @@ async function buildKbBlock(
  *  so a reply that defers AND THEN answers doesn't false-positive. */
 const DEFERRAL_TAIL_RE = /((one|just a) moment|hold on|please (hold|wait)|bear with me|let me (calculate|check|review|look|see|pull|find|get)|i(?:'|’)?ll (check|calculate|look|review|find|get back)|give me a (moment|second|minute))[^a-zA-Z0-9]*$/i;
 
+// Broader promise-of-action detector for SHORT replies that are nothing
+// but a deferral with trailing words — "Let me get that information for
+// you." / "I will need to retrieve the line items…" slipped past the
+// tail-anchored pattern above (live-confirmed: customer had to repeat
+// their question). Deliberately excludes the customer-facing idiom
+// "let me know". Only applied to short replies, so a long answer that
+// happens to say "let me pull up X — here it is: …" never false-positives.
+const DEFERRAL_PROMISE_RE = /\b(let me|allow me|i(?:'|’)?ll|i will( need to)?|i am going to|going to)\s+(retriev\w*|fetch\w*|calculat\w*|check\w*|review\w*|look\w*|pull\w*|find\w*|gather\w*|prepar\w*|get\b)/i;
+
 export function isDeferralText(text: string): boolean {
-  const tail = text.trim().slice(-160);
-  return DEFERRAL_TAIL_RE.test(tail);
+  const trimmed = text.trim();
+  if (DEFERRAL_TAIL_RE.test(trimmed.slice(-160))) return true;
+  return trimmed.length < 260 && DEFERRAL_PROMISE_RE.test(trimmed);
 }
 
 /** Compact, model-facing summary of a persisted tool-result history row —
