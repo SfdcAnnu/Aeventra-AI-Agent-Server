@@ -408,6 +408,7 @@ export async function buildSystemPrompt(
   query: string,
   engineOverride?: EngineOverrideInput | null,
   memoryPreamble?: string | null,
+  extraContext?: string | null,
 ): Promise<string> {
   const config = (aiNode.config as { systemPrompt?: string }) ?? {};
   const parts: string[] = [];
@@ -433,6 +434,12 @@ export async function buildSystemPrompt(
   }
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     parts.push(config.systemPrompt);
+  }
+  // System-computed facts (e.g. the ALLOWED PRICING block from
+  // chat/pricing-guardrails.ts) — deterministic values the model must use
+  // verbatim instead of computing its own.
+  if (extraContext && extraContext.trim().length > 0) {
+    parts.push(extraContext);
   }
   // Session memory (facts + summary of older turns) — see chat/memory.ts.
   // Placed right after the agent's own instructions so exact record Ids and

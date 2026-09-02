@@ -52,6 +52,13 @@ import {
   type HandoffToolDef,
 } from '../chat/subagent-router';
 import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from '../chat/adapters/shared';
+import {
+  loadOpportunityPricing,
+  buildPricingBlock,
+  findGuardrailViolations,
+  scrubReply,
+  formatUsd,
+} from '../chat/pricing-guardrails';
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
 import { generateSessionTitleAsync } from '../chat/title-generator';
@@ -89,6 +96,15 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
   const assembled = assembleMemory(req.history, memory);
 
+  // Deterministic pricing (chat/pricing-guardrails.ts): computed in code and
+  // injected into every prompt this turn builds, so the model quotes system
+  // numbers instead of doing its own discount arithmetic. Null when the
+  // session isn't Opportunity-anchored or the org lacks the customization.
+  const pricing = await loadOpportunityPricing(
+    req.context.orgId, req.context.recordContextId, req.context.recordContextType,
+  );
+  const pricingBlock = pricing ? buildPricingBlock(pricing) : null;
+
   logger.info({
     orgId: req.context.orgId,
     agentApiName: req.agent.apiName,
@@ -113,6 +129,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     const systemPrompt = await buildSystemPrompt(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
+      pricingBlock,
     );
 
     const attachments = (req.attachments && req.attachments.length > 0)
@@ -207,7 +224,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       } else {
         activeSubagentName = subagentNode.name;
         try {
-          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages);
+          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages, pricingBlock);
           usedModel = sub.modelName;
           state = { ...state, messages: [...state.messages, ...sub.messages], handoffNodeId: state.handoffNodeId };
         } catch (err) {
@@ -235,6 +252,41 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       ])) as AIMessage;
       state = { ...state, messages: [...state.messages, followup] };
       assistantText = lastAssistantText(state.messages);
+    }
+
+    // ── Output guardrails (chat/pricing-guardrails.ts): for customer-facing
+    // agents only (root AI node config `customerFacing: true`), internal
+    // vocabulary and below-floor offers are ENFORCED, not requested — one
+    // corrective regeneration, then a mechanical scrub as the last resort.
+    const customerFacing = Boolean((aiNode.config as { customerFacing?: boolean })?.customerFacing);
+    if (customerFacing && assistantText) {
+      const violations = findGuardrailViolations(assistantText, pricing);
+      if (violations.length > 0) {
+        logger.warn({ orgId: req.context.orgId, violations }, 'lc_output_guardrail_regen');
+        const floorNote = pricing
+          ? ` Never state any full-deal price below ${formatUsd(pricing.floorTotal)}.`
+          : '';
+        try {
+          const corrected = (await routerModel.invoke([
+            new SystemMessage(systemPrompt),
+            ...sanitizeToolPairs(state.messages),
+            new HumanMessage(
+              'REWRITE your last reply to the customer. It broke hard rules: ' + violations.join('; ') + '. ' +
+              'Keep the same meaning, warmth and forward motion, but use customer language only — no internal ' +
+              'vocabulary (floor, concession, policy, matrix), no systems, records, tasks or stages.' + floorNote +
+              ' Respond with ONLY the corrected customer message.',
+            ),
+          ])) as AIMessage;
+          state = { ...state, messages: [...state.messages, corrected] };
+          const retext = lastAssistantText(state.messages);
+          assistantText = findGuardrailViolations(retext, pricing).length > 0
+            ? scrubReply(retext, pricing)
+            : retext;
+        } catch (err) {
+          logger.error({ orgId: req.context.orgId, err: err instanceof Error ? err.message : err }, 'lc_output_guardrail_regen_failed');
+          assistantText = scrubReply(assistantText, pricing);
+        }
+      }
     }
 
     const { tokensIn, tokensOut } = sumUsage(state.messages);
@@ -292,6 +344,7 @@ async function runSubagentTurn(
   sfAccessToken: string,
   assembled: { preamble: string | null },
   baseMessages: BaseMessage[],
+  pricingBlock: string | null,
 ): Promise<{ messages: BaseMessage[]; modelName: string }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
@@ -306,6 +359,7 @@ async function runSubagentTurn(
     );
     const systemPrompt = await buildSystemPrompt(
       req.agent, synthetic, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
+      pricingBlock,
     );
     if (!model.bindTools) throw new Error(`Model for ${synthetic.nodeSubType} does not support tool binding.`);
     const bound = model.bindTools(loaded.tools);
