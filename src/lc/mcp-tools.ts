@@ -21,7 +21,47 @@ export interface LoadedMcpTools {
   close: () => Promise<void>;
 }
 
+// ── Connection/tool cache ────────────────────────────────────────────
+// Connecting per turn opened 2+ fresh MCP sessions every message (root +
+// subagent) — enough for the MCP host's rate limiter to answer 429 on a
+// busy conversation (live-confirmed). Cache the loaded toolset per exact
+// server config (url+token+allowedTools) for a few minutes; expired
+// entries close their clients in the background. Single-instance host, so
+// an in-process Map is the right size of solution.
+const CACHE_TTL_MS = 4 * 60 * 1000;
+interface CacheEntry { loaded: LoadedMcpTools; realClose: () => Promise<void>; createdAt: number }
+const toolCache = new Map<string, CacheEntry>();
+
+function cacheKey(servers: ResolvedMcpServer[]): string {
+  return servers
+    .map(s => `${s.name}|${s.url}|${s.token.slice(-12)}|${[...s.allowedTools].sort().join(',')}`)
+    .sort()
+    .join('||');
+}
+
 export async function loadMcpTools(servers: ResolvedMcpServer[]): Promise<LoadedMcpTools> {
+  const key = cacheKey(servers);
+  const hit = toolCache.get(key);
+  if (hit && Date.now() - hit.createdAt < CACHE_TTL_MS) {
+    return hit.loaded;
+  }
+  if (hit) {
+    toolCache.delete(key);
+    void hit.realClose().catch(() => { /* stale client cleanup only */ });
+  }
+
+  const fresh = await connectAndLoad(servers);
+  // Only cache loads that actually produced tools — caching a rate-limited
+  // empty result would blind every turn for the TTL window.
+  if (fresh.tools.length > 0) {
+    const entry: CacheEntry = { loaded: { ...fresh, close: async () => { /* cached — lifecycle owned by the cache */ } }, realClose: fresh.close, createdAt: Date.now() };
+    toolCache.set(key, entry);
+    return entry.loaded;
+  }
+  return fresh;
+}
+
+async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTools> {
   const tools: StructuredToolInterface[] = [];
   const serverByTool = new Map<string, string>();
   const clients: MultiServerMCPClient[] = [];

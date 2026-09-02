@@ -147,9 +147,20 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       const handoff = calls.find(c => handoffByName.has(c.name));
       if (handoff) {
         const matched = handoffByName.get(handoff.name)!;
+        // EVERY tool_call in the response needs a ToolMessage answer — not
+        // just the chosen handoff. An orphaned tool_call_id poisons the
+        // history: the next model invoke over it (e.g. the narration
+        // guard's continuation) is rejected by the provider with a 400
+        // (live-confirmed: INVALID_TOOL_RESULTS killed a WhatsApp turn).
+        const answers = calls.map(c => new ToolMessage({
+          content: c.id === handoff.id
+            ? `Transferred to ${matched.subagentNodeId}.`
+            : 'Skipped — routing to a specialist instead.',
+          tool_call_id: c.id ?? '',
+        }));
         return new Command({
           goto: END,
-          update: { messages: [response], handoffNodeId: matched.subagentNodeId },
+          update: { messages: [response, ...answers], handoffNodeId: matched.subagentNodeId },
         });
       }
       if (calls.length > 0) {
@@ -219,7 +230,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       logger.warn({ orgId: req.context.orgId, deferral: Boolean(assistantText) }, 'lc_narration_only_continuation');
       const followup = (await routerModel.invoke([
         new SystemMessage(systemPrompt),
-        ...state.messages,
+        ...sanitizeToolPairs(state.messages),
         new HumanMessage('Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.'),
       ])) as AIMessage;
       state = { ...state, messages: [...state.messages, followup] };
@@ -407,6 +418,35 @@ function sumUsage(messages: BaseMessage[]): { tokensIn: number; tokensOut: numbe
     }
   }
   return { tokensIn, tokensOut };
+}
+
+/** Belt-and-braces for any model invoke over raw state: every AIMessage
+ *  tool_call must have a ToolMessage answering it (providers hard-reject
+ *  otherwise). Inserts a synthetic answer right after the call's existing
+ *  siblings for any orphan — regardless of which code path produced it. */
+function sanitizeToolPairs(messages: BaseMessage[]): BaseMessage[] {
+  const answered = new Set<string>();
+  for (const m of messages) {
+    if (m instanceof ToolMessage && m.tool_call_id) answered.add(m.tool_call_id);
+  }
+  const out: BaseMessage[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    out.push(m);
+    if (m instanceof AIMessage && (m.tool_calls?.length ?? 0) > 0) {
+      // Skip past the ToolMessages that already follow this message, then
+      // patch in any missing answers so the pairing stays adjacent.
+      const orphans = m.tool_calls!.filter(c => c.id && !answered.has(c.id));
+      if (orphans.length === 0) continue;
+      while (i + 1 < messages.length && messages[i + 1] instanceof ToolMessage) {
+        out.push(messages[++i]);
+      }
+      for (const c of orphans) {
+        out.push(new ToolMessage({ content: '(no output recorded)', tool_call_id: c.id! }));
+      }
+    }
+  }
+  return out;
 }
 
 /** Pair each AIMessage tool call with its ToolMessage result — same
