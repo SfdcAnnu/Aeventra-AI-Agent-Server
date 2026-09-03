@@ -378,7 +378,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       });
     }
 
-    logger.info({ orgId: req.context.orgId, tokensIn, tokensOut, toolCallCount: toolCalls.length, ms: Date.now() - t0 }, 'lc_turn_complete');
+    logger.info({
+      orgId: req.context.orgId, tokensIn, tokensOut, toolCallCount: toolCalls.length, ms: Date.now() - t0,
+      subagent: activeSubagentName,
+      reply: assistantText.slice(0, 400),
+    }, 'lc_turn_complete');
 
     const result: ChatTurnResult = {
       status: 'complete',

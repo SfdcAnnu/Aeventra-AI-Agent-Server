@@ -31,7 +31,8 @@ const PREFILTER_VENDOR = /\b(?:vendor|competitor|market|another|other|elsewhere|
 const SAFE_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,60}$/;
 
 const DEFAULT_LISTEN_FOR =
-  'The customer references a competing vendor/provider offer (a name, or clearly "another vendor") with a price or terms.';
+  'The customer references a competing offer — a named vendor, "another vendor", "the market", or "someone else" — ' +
+  'with a price or terms.';
 const DEFAULT_EXTRACT = ['Vendor', 'Price', 'Includes'];
 
 function buildExtractSystem(listenFor: string, extract: string[]): string {
@@ -40,8 +41,9 @@ function buildExtractSystem(listenFor: string, extract: string[]): string {
     'You extract structured information from ONE customer message in a business conversation. ' +
     `Look for: ${listenFor} ` +
     `Reply as JSON: {"found": boolean, ${keys}}. ` +
-    'found=true ONLY if the message actually contains that information. Normalize amounts to digits ' +
-    '(e.g. "40,000" for 40k). Use null for values not present. No commentary — JSON only.'
+    'found=true when the message actually contains that information. A NAMED source is NOT required — ' +
+    '"I checked the market and can get this for 40k" counts (use "(unnamed)" for the missing name). ' +
+    'Normalize amounts to digits (e.g. "40,000" for 40k). Use null for values not present. No commentary — JSON only.'
   );
 }
 
