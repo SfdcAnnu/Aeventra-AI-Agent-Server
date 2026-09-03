@@ -335,6 +335,8 @@ export const ACTION_CLAIM_CORRECTION =
   'question instead — no claims. ' +
   '(3) Otherwise perform the required actions RIGHT NOW with your tools, following your own instructions for this ' +
   'situation — look up any real Ids you need first; never pass placeholder values. Do not transfer to anyone else. ' +
+  'THIS RESPONSE MUST CONTAIN TOOL CALLS, not another promise — any "let me…" / "I\'ll…" sentence without tool calls ' +
+  'is a repeat of the same violation. ' +
   'Then reply to the customer in their language confirming ONLY what is actually done. If a tool fails, say the team ' +
   'will confirm shortly — never claim success.';
 
