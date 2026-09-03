@@ -22,7 +22,9 @@ const requestSchema = z.object({
     id: z.string(),
     label: z.string(),
     nodeType: z.string(),
-    nodeSubType: z.string(),
+    // Tool nodes legitimately carry a null NodeSubType__c — coalesce
+    // instead of rejecting the whole request (live-confirmed 400).
+    nodeSubType: z.string().nullish().transform(v => v ?? ''),
     config: z.record(z.string(), z.unknown()),
   })),
   connections: z.array(z.object({
