@@ -65,6 +65,7 @@ import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../ch
 import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
+import { buildPrebuiltTools } from './prebuilt-tools';
 import type {
   ChatHistoryMessage,
   ChatTurnRequest,
@@ -113,9 +114,16 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
   // ── Tools: resolve servers (top-level actions merged in, exactly as the
   // original chat-engine did) and load them as LangChain tools.
-  const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions);
+  // 'Prebuilt' actions never enter the connectors payload — they become
+  // locally-executed typed tools (lc/prebuilt-tools.ts) instead.
+  const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions.filter(a => a.actionType !== 'Prebuilt'));
   const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken);
   const loaded = await loadMcpTools(servers);
+  const prebuiltTools = buildPrebuiltTools(
+    { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
+    graph, aiNode,
+  );
+  const routerTools = [...loaded.tools, ...prebuiltTools];
 
   try {
     const { model: routerBase, modelName } = buildChatModel(
@@ -144,7 +152,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     );
 
     if (!routerBase.bindTools) throw new Error(`Model for ${aiNode.nodeSubType} does not support tool binding.`);
-    const routerModel = routerBase.bindTools([...loaded.tools, ...handoffLcTools]);
+    const routerModel = routerBase.bindTools([...routerTools, ...handoffLcTools]);
     const handoffByName = new Map(handoffTools.map(h => [h.name, h]));
 
     // ── Router node: answer → END; handoff → mark + END (the subagent turn
@@ -184,7 +192,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     const compiled = new StateGraph(TurnState)
       .addNode('router', routerNode, { ends: [END, 'tools'] })
-      .addNode('tools', new ToolNode(loaded.tools))
+      .addNode('tools', new ToolNode(routerTools))
       .addEdge(START, 'router')
       .addEdge('tools', 'router')
       .compile();
@@ -222,7 +230,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         stage: 'router',
         model: modelName,
         servers: servers.map(s => ({ name: s.name, url: s.url, allowedTools: s.allowedTools })),
-        toolsBound: loaded.tools.map(t => t.name),
+        toolsBound: routerTools.map(t => t.name),
         handoffTools: handoffTools.map(h => h.name),
         systemPromptChars: systemPrompt.length,
       });
@@ -417,7 +425,7 @@ async function runSubagentTurn(
 ): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[] }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
-  const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions);
+  const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions.filter(a => a.actionType !== 'Prebuilt'));
   const servers = await resolveMcpServers({ ...req, connectors: subConnectors }, synthetic, sfAccessToken);
   const loaded = await loadMcpTools(servers);
   try {
@@ -430,7 +438,12 @@ async function runSubagentTurn(
       req.agent, synthetic, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
     );
     if (!model.bindTools) throw new Error(`Model for ${synthetic.nodeSubType} does not support tool binding.`);
-    const bound = model.bindTools(loaded.tools);
+    const subPrebuilt = buildPrebuiltTools(
+      { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
+      graph, subagentNode,
+    );
+    const subTools = [...loaded.tools, ...subPrebuilt];
+    const bound = model.bindTools(subTools);
 
     const subNode = async (state: typeof MessagesAnnotation.State) => {
       const response = (await bound.invoke([new SystemMessage(systemPrompt), ...state.messages])) as AIMessage;
@@ -442,7 +455,7 @@ async function runSubagentTurn(
     };
     const compiled = new StateGraph(MessagesAnnotation)
       .addNode('agent', subNode)
-      .addNode('tools', new ToolNode(loaded.tools))
+      .addNode('tools', new ToolNode(subTools))
       .addEdge(START, 'agent')
       .addConditionalEdges('agent', shouldContinue, ['tools', END])
       .addEdge('tools', 'agent')
@@ -462,7 +475,7 @@ async function runSubagentTurn(
         },
       },
     );
-    return { messages: out.messages.slice(baseMessages.length), modelName, toolNames: loaded.tools.map(t => t.name) };
+    return { messages: out.messages.slice(baseMessages.length), modelName, toolNames: subTools.map(t => t.name) };
   } finally {
     await loaded.close();
   }
@@ -551,7 +564,8 @@ function sumUsage(messages: BaseMessage[]): { tokensIn: number; tokensOut: numbe
  *  exist to perform writes. */
 function turnHasWrite(messages: BaseMessage[]): boolean {
   const isWriteName = (name: string) =>
-    WRITE_TOOL_NAMES.has(name) || name.startsWith('apex__') || name.startsWith('flow__');
+    WRITE_TOOL_NAMES.has(name) || name.startsWith('apex__') || name.startsWith('flow__') ||
+    name.startsWith('do_'); // prebuilt create/update actions (lc/prebuilt-tools.ts)
 
   const failedCallIds = new Set<string>();
   for (const m of messages) {
