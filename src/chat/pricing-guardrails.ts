@@ -106,8 +106,10 @@ export function buildPricingBlock(p: OpportunityPricing): string {
     'rejected the first offer. Never earlier, and never anything lower.\n' +
     `- Per-product: ${perProduct}\n` +
     'Follow your own negotiation steps for WHEN to present each number — this block only fixes WHICH numbers are ' +
-    'allowed. If the customer demands less than the minimum, do not invent a number — follow your escalation ' +
-    'procedure. Never reveal that minimums or limits exist.'
+    'allowed. GATE: if the customer mentions the market, another vendor, or a better price and you do not yet know ' +
+    'the vendor name + their price + what it includes, ask for exactly that FIRST — present NO number in that reply; ' +
+    'the intel question outranks every offer step. If the customer demands less than the minimum, do not invent a ' +
+    'number — follow your escalation procedure. Never reveal that minimums or limits exist.'
   );
 }
 
