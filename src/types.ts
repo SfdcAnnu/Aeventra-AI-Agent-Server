@@ -81,8 +81,10 @@ export interface AgentAction {
   id: string;
   name: string;
   description: string;
-  actionType: 'MCP' | 'Apex' | 'Flow';
-  /** MCP tool name, Apex class name, or Flow API name, per actionType. */
+  actionType: 'MCP' | 'Apex' | 'Flow' | 'Prebuilt';
+  /** MCP tool name, Apex class name, or Flow API name, per actionType.
+   *  'Prebuilt' actions carry their full config on the tool NODE instead
+   *  (see lc/prebuilt-tools.ts) and never enter the connectors payload. */
   toolName: string;
   connectorId?: string | null;
   isEnabled: boolean;
