@@ -64,6 +64,7 @@ import {
 } from '../chat/pricing-guardrails';
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
+import { maybeStoreCompetitorIntelAsync } from '../chat/competitor-intel';
 import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
@@ -287,7 +288,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     const customerFacing = Boolean((aiNode.config as { customerFacing?: boolean })?.customerFacing);
     if (customerFacing && assistantText) {
       const claim = findActionClaim(assistantText);
-      if (claim && !conversationHasWrite(state.messages, req.history)) {
+      if (claim && !turnHasWrite(state.messages)) {
         logger.warn({ orgId: req.context.orgId, claim }, 'lc_action_claim_without_write');
         try {
           const correction = new HumanMessage(ACTION_CLAIM_CORRECTION);
@@ -377,7 +378,17 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       ...(req.debugMode ? { debugRequest, debugResponse } : {}),
     };
 
-    // Post-reply hooks — identical to the original server.
+    // Post-reply hooks — identical to the original server, plus the
+    // deterministic competitor-intel capture for customer-facing
+    // Opportunity-anchored sessions (chat/competitor-intel.ts).
+    if (customerFacing && req.context.recordContextType === 'Opportunity' && req.context.recordContextId) {
+      maybeStoreCompetitorIntelAsync({
+        orgId: req.context.orgId,
+        opportunityId: req.context.recordContextId,
+        userMessage: req.newUserMessage,
+        engineOverride: req.engineOverride,
+      });
+    }
     maybeUpdateMemoryAsync({
       orgId: req.context.orgId,
       sessionId: req.sessionId,
@@ -547,10 +558,14 @@ function sumUsage(messages: BaseMessage[]): { tokensIn: number; tokensOut: numbe
   return { tokensIn, tokensOut };
 }
 
-/** Did any successful write-tool call happen this turn (graph messages) or
- *  earlier in the session (persisted tool history)? Custom Apex/Flow
- *  actions (apex__ and flow__ prefixes) count — they exist to perform writes. */
-function conversationHasWrite(messages: BaseMessage[], history: ChatHistoryMessage[]): boolean {
+/** Did a successful write-tool call happen THIS turn? Turn-scoped on
+ *  purpose: an earlier turn's write must not license new claims forever
+ *  (live-confirmed evasion: "I've conveyed your preference" after an
+ *  earlier intel write, with the promised booking never made). Restating a
+ *  genuinely completed action is handled inside the correction prompt.
+ *  Custom Apex/Flow actions (apex__ and flow__ prefixes) count — they
+ *  exist to perform writes. */
+function turnHasWrite(messages: BaseMessage[]): boolean {
   const isWriteName = (name: string) =>
     WRITE_TOOL_NAMES.has(name) || name.startsWith('apex__') || name.startsWith('flow__');
 
@@ -563,13 +578,6 @@ function conversationHasWrite(messages: BaseMessage[], history: ChatHistoryMessa
     for (const call of m.tool_calls ?? []) {
       if (isWriteName(call.name) && !(call.id && failedCallIds.has(call.id))) return true;
     }
-  }
-  for (const h of history) {
-    if (h.role !== 'tool' || !h.toolCallsJson) continue;
-    try {
-      const j = JSON.parse(h.toolCallsJson) as { name?: string };
-      if (j.name && isWriteName(j.name)) return true;
-    } catch { /* unparseable row — ignore */ }
   }
   return false;
 }

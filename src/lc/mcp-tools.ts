@@ -10,6 +10,7 @@
  * bind to OpenAI, Anthropic, or Gemini models unchanged.
  */
 import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import { tool } from '@langchain/core/tools';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { logger } from '../logger';
 import type { ResolvedMcpServer } from '../chat/adapters/shared';
@@ -61,6 +62,27 @@ export async function loadMcpTools(servers: ResolvedMcpServer[]): Promise<Loaded
   return fresh;
 }
 
+/** A string argument that is exactly a template placeholder — the model
+ *  copying "<Opportunity OwnerId>" / "<tomorrow's date>" out of its own
+ *  instructions into a real write (live-confirmed on a Task create). */
+const PLACEHOLDER_VALUE_RE = /"<[^">]{1,60}>"/;
+
+/** Wrap a loaded MCP tool so placeholder-valued calls bounce back to the
+ *  model as a self-correctable error instead of creating garbage records. */
+function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterface {
+  return tool(
+    async (args: unknown) => {
+      if (PLACEHOLDER_VALUE_RE.test(JSON.stringify(args))) {
+        return 'REJECTED: one or more arguments are template placeholders like "<Contact Id>" or "<tomorrow\'s date>". ' +
+          'Look up the real values first (soqlQuery / getRelatedRecords, and compute real dates from the current date ' +
+          'in your instructions), then call this tool again with actual values.';
+      }
+      return t.invoke(args as never);
+    },
+    { name: t.name, description: t.description, schema: t.schema },
+  ) as StructuredToolInterface;
+}
+
 async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTools> {
   const tools: StructuredToolInterface[] = [];
   const serverByTool = new Map<string, string>();
@@ -96,7 +118,7 @@ async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTo
           continue;
         }
         serverByTool.set(t.name, s.name);
-        tools.push(t);
+        tools.push(rejectPlaceholderArgs(t));
         kept++;
       }
       logger.info({ server: s.name, total: loaded.length, kept }, 'mcp_tools_loaded');

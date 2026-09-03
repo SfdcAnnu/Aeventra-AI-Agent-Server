@@ -137,12 +137,17 @@ export function findActionClaim(text: string): string | null {
 }
 
 export const ACTION_CLAIM_CORRECTION =
-  'STOP — your reply claims or promises that something was registered, booked, or updated, but NO record has actually ' +
-  'been created or updated in this conversation. Claims must NEVER precede the real action. Using your tools RIGHT NOW, ' +
-  'perform the actions your instructions require for this situation (for an escalation: update the stage, create the ' +
-  'follow-up Task and the Event with the agreed time). Do not transfer to anyone else. Then reply to the customer in ' +
-  'their language confirming ONLY what you actually completed. If you are missing information the action needs, ask for ' +
-  'it instead of claiming. If a tool fails, say the team will confirm within 24 hours — never claim success.';
+  'STOP — your reply claims or promises that something was registered, booked, or updated, but no record was created ' +
+  'or updated THIS turn. Claims must NEVER precede the real action. Resolve it now, in this order: ' +
+  '(1) If the action was already completed EARLIER in this conversation (you can see its tool results in the ' +
+  'transcript), simply restate the confirmation naturally. ' +
+  '(2) If your procedure requires asking the customer something first (like their preferred meeting time), ask that ' +
+  'question instead — no claims. ' +
+  '(3) Otherwise perform the required actions RIGHT NOW with your tools (for an escalation: update the stage, create ' +
+  'the follow-up Task and the Event with the agreed time — look up any real Ids you need first; never pass placeholder ' +
+  'values). Do not transfer to anyone else. ' +
+  'Then reply to the customer in their language confirming ONLY what is actually done. If a tool fails, say the team ' +
+  'will confirm within 24 hours — never claim success.';
 
 // ── Output guardrails ────────────────────────────────────────────────
 
