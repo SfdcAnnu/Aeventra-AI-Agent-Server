@@ -215,6 +215,24 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     let usedModel = modelName;
     let activeSubagentName: string | null = null;
 
+    // Debug capture (AgentDefinition__c.DebugMode__c) — the LangGraph
+    // equivalent of the original adapters' raw request/response dumps:
+    // which servers resolved, which tools actually bound, what the graph
+    // did. Apex persists these verbatim on the assistant ChatMessage__c.
+    const debugRequest: unknown[] = [];
+    const debugResponse: unknown[] = [];
+    if (req.debugMode) {
+      debugRequest.push({
+        stage: 'router',
+        model: modelName,
+        servers: servers.map(s => ({ name: s.name, url: s.url, allowedTools: s.allowedTools })),
+        toolsBound: loaded.tools.map(t => t.name),
+        handoffTools: handoffTools.map(h => h.name),
+        pricing: pricing ? { listTotal: pricing.listTotal, firstOffer: pricing.firstOffer, floorTotal: pricing.floorTotal } : null,
+        systemPromptChars: systemPrompt.length,
+      });
+    }
+
     // ── Subagent handoff: second graph as that subagent's own turn — its
     // own prompt/model/tool subset; no handoff tools (the depth cap).
     if (state.handoffNodeId) {
@@ -225,6 +243,9 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         activeSubagentName = subagentNode.name;
         try {
           const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages, pricingBlock);
+          if (req.debugMode) {
+            debugRequest.push({ stage: 'subagent', subagent: subagentNode.name, model: sub.modelName, toolsBound: sub.toolNames });
+          }
           usedModel = sub.modelName;
           state = { ...state, messages: [...state.messages, ...sub.messages], handoffNodeId: state.handoffNodeId };
         } catch (err) {
@@ -292,6 +313,18 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     const { tokensIn, tokensOut } = sumUsage(state.messages);
     const toolCalls = extractToolCalls(state.messages, loaded);
 
+    if (req.debugMode) {
+      debugResponse.push({
+        stage: 'turn',
+        handoff: activeSubagentName,
+        messages: state.messages.map(m => ({
+          type: m.constructor.name,
+          toolCalls: m instanceof AIMessage ? (m.tool_calls ?? []).map(c => c.name) : undefined,
+          chars: typeof m.content === 'string' ? m.content.length : -1,
+        })),
+      });
+    }
+
     logger.info({ orgId: req.context.orgId, tokensIn, tokensOut, toolCallCount: toolCalls.length, ms: Date.now() - t0 }, 'lc_turn_complete');
 
     const result: ChatTurnResult = {
@@ -302,6 +335,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       tokensIn,
       tokensOut,
       ...(activeSubagentName !== null ? { activeTopicName: activeSubagentName } : {}),
+      ...(req.debugMode ? { debugRequest, debugResponse } : {}),
     };
 
     // Post-reply hooks — identical to the original server.
@@ -345,7 +379,7 @@ async function runSubagentTurn(
   assembled: { preamble: string | null },
   baseMessages: BaseMessage[],
   pricingBlock: string | null,
-): Promise<{ messages: BaseMessage[]; modelName: string }> {
+): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[] }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
   const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions);
@@ -394,7 +428,7 @@ async function runSubagentTurn(
         },
       },
     );
-    return { messages: out.messages.slice(baseMessages.length), modelName };
+    return { messages: out.messages.slice(baseMessages.length), modelName, toolNames: loaded.tools.map(t => t.name) };
   } finally {
     await loaded.close();
   }
