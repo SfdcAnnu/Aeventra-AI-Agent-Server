@@ -30,61 +30,78 @@ const PREFILTER_VENDOR = /\b(?:vendor|competitor|market|another|other|elsewhere|
  *  though readGuardrailsConfig already validated the field name. */
 const SAFE_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,60}$/;
 
-const EXTRACT_SYSTEM =
-  'You extract competitor intelligence from ONE customer message in a sales negotiation. Reply as JSON: ' +
-  '{"found": boolean, "vendor": string|null, "price": string|null, "includes": string|null}. ' +
-  'found=true ONLY if the message references a competing vendor/provider offer (a name, or clearly "another vendor") ' +
-  'with a price or terms. vendor: the vendor name, or "(unnamed)". price: the amount as stated, normalized to digits ' +
-  '(e.g. "40,000" for 40k). includes: what their offer covers, or null. No commentary — JSON only.';
+const DEFAULT_LISTEN_FOR =
+  'The customer references a competing vendor/provider offer (a name, or clearly "another vendor") with a price or terms.';
+const DEFAULT_EXTRACT = ['Vendor', 'Price', 'Includes'];
+
+function buildExtractSystem(listenFor: string, extract: string[]): string {
+  const keys = extract.map(e => `"${e}": string|null`).join(', ');
+  return (
+    'You extract structured information from ONE customer message in a business conversation. ' +
+    `Look for: ${listenFor} ` +
+    `Reply as JSON: {"found": boolean, ${keys}}. ` +
+    'found=true ONLY if the message actually contains that information. Normalize amounts to digits ' +
+    '(e.g. "40,000" for 40k). Use null for values not present. No commentary — JSON only.'
+  );
+}
 
 export function maybeStoreCompetitorIntelAsync(args: {
   orgId: string;
   recordId: string;
   recordType: string;
-  field: string;
+  cfg: { field: string; listenFor?: string; extract?: string[]; keywords?: string[] };
   userMessage: string;
   engineOverride?: EngineOverrideInput | null;
 }): void {
-  const { orgId, recordId, recordType, field, userMessage, engineOverride } = args;
+  const { orgId, recordId, recordType, cfg, engineOverride } = args;
+  const userMessage = args.userMessage;
   if (!engineOverride?.apiKey) return;
-  if (!SAFE_NAME_RE.test(field) || !SAFE_NAME_RE.test(recordType)) return;
-  if (!PREFILTER_MONEY.test(userMessage) || !PREFILTER_VENDOR.test(userMessage)) return;
+  if (!SAFE_NAME_RE.test(cfg.field) || !SAFE_NAME_RE.test(recordType)) return;
+
+  // Prefilter — configured keywords when given, else the built-in
+  // vendor+money heuristic. Keeps the cheap-model call off ordinary turns.
+  if (cfg.keywords && cfg.keywords.length > 0) {
+    const lower = userMessage.toLowerCase();
+    if (!cfg.keywords.some(k => lower.includes(k.toLowerCase()))) return;
+  } else if (!PREFILTER_MONEY.test(userMessage) || !PREFILTER_VENDOR.test(userMessage)) {
+    return;
+  }
+
+  const extract = (cfg.extract && cfg.extract.length > 0 ? cfg.extract : DEFAULT_EXTRACT).slice(0, 10);
+  const listenFor = cfg.listenFor?.trim() || DEFAULT_LISTEN_FOR;
 
   void (async () => {
     try {
       const traced = traceable(
         (sys: string, usr: string) => callCheapModel(engineOverride, sys, usr),
-        { name: 'competitor-intel-extract', run_type: 'llm' },
+        { name: 'data-capture-extract', run_type: 'llm' },
       );
-      const raw = await traced(EXTRACT_SYSTEM, userMessage);
+      const raw = await traced(buildExtractSystem(listenFor, extract), userMessage);
       if (!raw) return;
-      const parsed = JSON.parse(raw.replace(/^```(?:json)?/m, '').replace(/```\s*$/m, '').trim()) as {
-        found?: boolean; vendor?: unknown; price?: unknown; includes?: unknown;
-      };
-      if (!parsed.found) return;
+      const parsed = JSON.parse(raw.replace(/^```(?:json)?/m, '').replace(/```\s*$/m, '').trim()) as Record<string, unknown>;
+      if (parsed.found !== true) return;
 
-      const vendor = String(parsed.vendor ?? '(unnamed)').slice(0, 80);
-      const price = String(parsed.price ?? 'n/a').slice(0, 40);
-      const includes = String(parsed.includes ?? 'n/a').slice(0, 200);
+      const segments = extract.map(key => `${key}: ${String(parsed[key] ?? 'n/a').slice(0, 200)}`);
+      const line = `${segments.join(' | ')} | Captured: ${new Date().toISOString().slice(0, 10)}`;
+      const lineKey = segments.join(' | ');
 
       const conn = await getOrgConnection(orgId);
       const safeId = recordId.replace(/[^a-zA-Z0-9]/g, '');
       const rows = await conn.query<Record<string, unknown>>(
-        `SELECT Id, ${field} FROM ${recordType} WHERE Id = '${safeId}'`,
+        `SELECT Id, ${cfg.field} FROM ${recordType} WHERE Id = '${safeId}'`,
       );
       const row = rows.records[0];
       if (!row) return;
-      const existing = typeof row[field] === 'string' ? (row[field] as string) : '';
-      // Append-only field; skip only an exact same-vendor-same-price repeat.
-      if (existing.includes(`Vendor: ${vendor}`) && existing.includes(`Price: ${price}`)) return;
-      const line = `Vendor: ${vendor} | Price: ${price} | Includes: ${includes} | Captured: ${new Date().toISOString().slice(0, 10)}`;
+      const existing = typeof row[cfg.field] === 'string' ? (row[cfg.field] as string) : '';
+      // Append-only field; skip an exact repeat of the same captured values.
+      if (existing.includes(lineKey)) return;
       await conn.sobject(recordType).update({
         Id: recordId,
-        [field]: existing ? `${existing}\n${line}` : line,
+        [cfg.field]: existing ? `${existing}\n${line}` : line,
       });
-      logger.info({ orgId, recordId, vendor }, 'competitor_intel_stored');
+      logger.info({ orgId, recordId, field: cfg.field }, 'data_capture_stored');
     } catch (err) {
-      logger.warn({ orgId, err: err instanceof Error ? err.message : err }, 'competitor_intel_skipped');
+      logger.warn({ orgId, err: err instanceof Error ? err.message : err }, 'data_capture_skipped');
     }
   })();
 }
