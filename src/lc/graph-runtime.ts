@@ -291,26 +291,28 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     // ── Action-claim guardrail: a reply that asserts "booked/registered/
     // updated" (or promises "let me update…") backed by ZERO successful
-    // write-tool calls in this conversation is a fabrication. One corrective
-    // pass WITH TOOLS LIVE — through the active subagent when a handoff
+    // write-tool calls in this conversation is a fabrication. Corrective
+    // passes WITH TOOLS LIVE — through the active subagent when a handoff
     // happened (its prompt carries the procedure and its toolset the write
-    // tools), else through the router graph.
+    // tools), else through the router graph. Two attempts, because a single
+    // pass was live-confirmed to sometimes produce ANOTHER promise instead
+    // of tool calls; the recheck between attempts catches that.
     const customerFacing = guardrails.customerFacing;
     if (customerFacing && assistantText) {
-      const claim = findActionClaim(assistantText);
-      if (claim && !turnHasWrite(state.messages)) {
-        logger.warn({ orgId: req.context.orgId, claim }, 'lc_action_claim_without_write');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const claim = findActionClaim(assistantText);
+        if (!claim || turnHasWrite(state.messages)) break;
+        logger.warn({ orgId: req.context.orgId, claim, attempt }, 'lc_action_claim_without_write');
         try {
           const correction = new HumanMessage(ACTION_CLAIM_CORRECTION);
           if (state.handoffNodeId) {
             const subagentNode = req.agent.nodes.find(n => n.id === state.handoffNodeId);
-            if (subagentNode) {
-              const fix = await runSubagentTurn(
-                req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
-                [...sanitizeToolPairs(state.messages), correction], pricingBlock,
-              );
-              state = { ...state, messages: [...state.messages, correction, ...fix.messages] };
-            }
+            if (!subagentNode) break;
+            const fix = await runSubagentTurn(
+              req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
+              [...sanitizeToolPairs(state.messages), correction], pricingBlock,
+            );
+            state = { ...state, messages: [...state.messages, correction, ...fix.messages] };
           } else {
             const input = [...sanitizeToolPairs(state.messages), correction];
             const fix = await compiled.invoke(
@@ -322,6 +324,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           assistantText = lastAssistantText(state.messages);
         } catch (err) {
           logger.error({ orgId: req.context.orgId, err: err instanceof Error ? err.message : err }, 'lc_action_claim_correction_failed');
+          break;
         }
       }
     }
