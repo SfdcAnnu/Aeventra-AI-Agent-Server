@@ -67,17 +67,56 @@ export async function loadMcpTools(servers: ResolvedMcpServer[]): Promise<Loaded
  *  instructions into a real write (live-confirmed on a Task create). */
 const PLACEHOLDER_VALUE_RE = /"<[^">]{1,60}>"/;
 
-/** Wrap a loaded MCP tool so placeholder-valued calls bounce back to the
- *  model as a self-correctable error instead of creating garbage records. */
+/** Pre-flight argument checks that turn cryptic Salesforce integrity
+ *  errors into self-correctable instructions (standard-object semantics,
+ *  nothing agent-specific). Live-confirmed: an Account Id (001…) passed as
+ *  WhoId killed an Event create with FIELD_INTEGRITY_EXCEPTION. */
+function argProblem(args: unknown): string | null {
+  const s = JSON.stringify(args);
+  if (PLACEHOLDER_VALUE_RE.test(s)) {
+    return 'REJECTED: one or more arguments are template placeholders like "<Contact Id>" or "<tomorrow\'s date>". ' +
+      'Look up the real values first (soqlQuery / getRelatedRecords, and compute real dates from the current date ' +
+      'in your instructions), then call this tool again with actual values.';
+  }
+  const body = (args as { body?: Record<string, unknown> })?.body;
+  if (body) {
+    const whoId = body.WhoId;
+    if (typeof whoId === 'string' && whoId.length >= 15 && !/^(003|00Q)/.test(whoId)) {
+      return `REJECTED: WhoId "${whoId}" is not a Contact (003…) or Lead (00Q…) Id — it looks like a different object ` +
+        '(001… is an Account). Query the Opportunity\'s ContactId or OpportunityContactRole for the real Contact Id, ' +
+        'then call this tool again.';
+    }
+    const ownerId = body.OwnerId;
+    if (typeof ownerId === 'string' && ownerId.length >= 15 && !/^005/.test(ownerId)) {
+      return `REJECTED: OwnerId "${ownerId}" is not a User Id (005…). Use the record's real OwnerId, then retry.`;
+    }
+  }
+  return null;
+}
+
+/** Wrap a loaded MCP tool: pre-flight arg checks bounce bad calls back to
+ *  the model as self-correctable errors, and every call is logged
+ *  (truncated) so Render shows exactly what each tool was asked and
+ *  answered. */
 function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterface {
   return tool(
     async (args: unknown) => {
-      if (PLACEHOLDER_VALUE_RE.test(JSON.stringify(args))) {
-        return 'REJECTED: one or more arguments are template placeholders like "<Contact Id>" or "<tomorrow\'s date>". ' +
-          'Look up the real values first (soqlQuery / getRelatedRecords, and compute real dates from the current date ' +
-          'in your instructions), then call this tool again with actual values.';
+      const problem = argProblem(args);
+      const argsLog = JSON.stringify(args).slice(0, 600);
+      if (problem) {
+        logger.warn({ tool: t.name, args: argsLog, problem: problem.slice(0, 200) }, 'mcp_tool_call_rejected');
+        return problem;
       }
-      return t.invoke(args as never);
+      const t0 = Date.now();
+      try {
+        const result = await t.invoke(args as never);
+        const resultLog = (typeof result === 'string' ? result : JSON.stringify(result)).slice(0, 600);
+        logger.info({ tool: t.name, ms: Date.now() - t0, args: argsLog, result: resultLog }, 'mcp_tool_call');
+        return result;
+      } catch (err) {
+        logger.error({ tool: t.name, ms: Date.now() - t0, args: argsLog, err: err instanceof Error ? err.message : String(err) }, 'mcp_tool_call_failed');
+        throw err;
+      }
     },
     { name: t.name, description: t.description, schema: t.schema },
   ) as StructuredToolInterface;
