@@ -65,6 +65,7 @@ import {
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
 import { maybeStoreCompetitorIntelAsync } from '../chat/competitor-intel';
+import { maybeReconcileEscalationAsync } from '../chat/escalation-reconciler';
 import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
@@ -387,6 +388,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         opportunityId: req.context.recordContextId,
         userMessage: req.newUserMessage,
         engineOverride: req.engineOverride,
+      });
+      maybeReconcileEscalationAsync({
+        orgId: req.context.orgId,
+        opportunityId: req.context.recordContextId,
+        toolCalls,
       });
     }
     maybeUpdateMemoryAsync({

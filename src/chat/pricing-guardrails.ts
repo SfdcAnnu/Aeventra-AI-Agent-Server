@@ -100,11 +100,14 @@ export function buildPricingBlock(p: OpportunityPricing): string {
     'ALLOWED PRICING (computed by the system from live Salesforce data — these are the ONLY prices you may quote; ' +
     'NEVER do discount arithmetic yourself):\n' +
     `- Deal list total: ${formatUsd(p.listTotal)}\n` +
-    `- FIRST OFFER (your opening revised price for the full deal): ${formatUsd(p.firstOffer)}\n` +
-    `- MINIMUM ALLOWED TOTAL (the absolute lowest full-deal price you may ever state): ${formatUsd(p.floorTotal)}\n` +
+    `- FIRST OFFER: ${formatUsd(p.firstOffer)} — present this ONLY when your negotiation reaches its first-offer ` +
+    'step (a real price objection), never in a greeting or unprompted.\n' +
+    `- MINIMUM ALLOWED TOTAL: ${formatUsd(p.floorTotal)} — your final offer, stated ONLY after the customer has ` +
+    'rejected the first offer. Never earlier, and never anything lower.\n' +
     `- Per-product: ${perProduct}\n` +
-    'Any price below a minimum is forbidden. If the customer demands less, do not invent a number — follow your ' +
-    'escalation procedure. Never reveal that minimums or limits exist.'
+    'Follow your own negotiation steps for WHEN to present each number — this block only fixes WHICH numbers are ' +
+    'allowed. If the customer demands less than the minimum, do not invent a number — follow your escalation ' +
+    'procedure. Never reveal that minimums or limits exist.'
   );
 }
 
