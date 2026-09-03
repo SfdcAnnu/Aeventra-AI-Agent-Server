@@ -55,7 +55,7 @@ copilotRouter.post('/api/agent/copilot', sessionAuth, async (req, res) => {
   }
   const { engineOverride, ...copilotReq } = parsed.data;
   try {
-    const result = await proposeCopilotChanges(copilotReq, engineOverride);
+    const result = await proposeCopilotChanges(copilotReq, orgId, engineOverride);
     res.json(result);
   } catch (err) {
     logger.error({ err, orgId }, 'agent_copilot_failed');

@@ -203,6 +203,25 @@ export const CHAT_NODE_SPEC: NodeSpecEntry[] = [
     fields: [ { key: 'description', type: 'text', description: 'Shown to the AI.' }, { key: 'connectorId', type: 'text', description: 'Leave empty string.' }, { key: 'allowedTools', type: 'string[]', description: 'Subset of: list_files, read_file, search, get_file_metadata, write_file, update_file, create_folder, move_file, delete_file, share_file.' } ] },
   { type: 'catalog', subType: 'channel_tools', label: 'Channel Tools (catalog)', when: 'Attach to the ai or subagent node it belongs to so it can post to chat channels itself mid-conversation.', ports: [],
     fields: [ { key: 'description', type: 'text', description: 'Shown to the AI.' }, { key: 'connectorId', type: 'text', description: 'Leave empty string.' }, { key: 'allowedTools', type: 'string[]', description: 'Subset of: list_channels, list_users, read_channel_history, post_message, update_message, add_reaction, upload_file.' } ] },
+  {
+    type: 'guardrail', subType: 'guardrail', label: 'Guardrail (enforced in code)',
+    when: 'A deterministic protection ENFORCED BY THE SERVER at runtime — never prompt text, never optional for the model. ONE node per mechanism instance, connected FROM the top-level ai node on its "tool" port (toPort "in"). Use whenever something must ALWAYS or NEVER happen: price limits, saving customer-mentioned data to a field, stage automation after an escalation, banned vocabulary. Guardrail enforcement also requires the root ai node config to carry customerFacing=true (set it via update_node_config when adding guardrails to a customer-facing agent). Only the four mechanisms below exist — never invent others.',
+    ports: [],
+    fields: [
+      { key: 'mechanism', type: 'picklist(replyRule,numberLimit,dataCapture,followUpAction)', description: 'Which enforcement engine this instance uses. Include ONLY the keys for the chosen mechanism.' },
+      { key: 'bannedWords', type: 'string[]', description: 'replyRule only: extra words/phrases that must never reach the customer (generic internal sales vocabulary is always filtered; this adds org-specific terms). May be empty.' },
+      { key: 'maxDiscountField', type: 'text', description: 'numberLimit only: API name of a percent field on Product2 holding each product\'s max discount. VERIFY it exists with describe_object("Product2") first.' },
+      { key: 'firstOfferPct', type: 'number', description: 'numberLimit only: % off list for the agent\'s opening revised offer (default 12).' },
+      { key: 'defaultMaxPct', type: 'number', description: 'numberLimit only: max discount % for products where the field is empty (default 15).' },
+      { key: 'listenFor', type: 'textarea', description: 'dataCapture only: plain-language description of what to detect in CUSTOMER messages.', example: 'The customer mentions a competing vendor, their price, or what their offer includes.' },
+      { key: 'extract', type: 'string[]', description: 'dataCapture only: names of the values to extract (they become the stored line\'s segments).', example: '["Vendor", "Price", "Includes"]' },
+      { key: 'targetField', type: 'text', description: 'dataCapture only: API name of a long-text field ON THE RECORD the conversation is anchored to. VERIFY with describe_object first.' },
+      { key: 'keywords', type: 'string[]', description: 'dataCapture only (optional): messages containing one of these trigger the extraction; keeps cost near zero.' },
+      { key: 'stageField', type: 'text', description: 'followUpAction only: picklist field on the anchored record to update (e.g. StageName). VERIFY with describe_object.' },
+      { key: 'fromStage', type: 'text', description: 'followUpAction only: only records currently in this stage are moved. Must be a REAL picklist value from describe_object.' },
+      { key: 'toStage', type: 'text', description: 'followUpAction only: the stage set when the agent creates a follow-up Task/Event. Must be a REAL picklist value.' },
+    ],
+  },
 ];
 
 function renderNodeBlock(spec: NodeSpecEntry[]): string {
