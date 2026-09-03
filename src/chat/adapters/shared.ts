@@ -436,7 +436,7 @@ export async function buildSystemPrompt(
     parts.push(config.systemPrompt);
   }
   // System-computed facts (e.g. the ALLOWED PRICING block from
-  // chat/pricing-guardrails.ts) — deterministic values the model must use
+  // e.g. system-computed facts) — deterministic values the model must use
   // verbatim instead of computing its own.
   if (extraContext && extraContext.trim().length > 0) {
     parts.push(extraContext);

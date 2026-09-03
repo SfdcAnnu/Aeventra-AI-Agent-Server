@@ -53,20 +53,15 @@ import {
 } from '../chat/subagent-router';
 import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from '../chat/adapters/shared';
 import {
-  readGuardrailsFromAgent,
-  loadOpportunityPricing,
-  buildPricingBlock,
+  readGuardrailsConfig,
   findGuardrailViolations,
   scrubReply,
-  formatUsd,
   findActionClaim,
   ACTION_CLAIM_CORRECTION,
   WRITE_TOOL_NAMES,
-} from '../chat/pricing-guardrails';
+} from '../chat/output-guardrails';
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
-import { maybeStoreCompetitorIntelAsync } from '../chat/competitor-intel';
-import { maybeReconcileEscalationAsync } from '../chat/escalation-reconciler';
 import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
@@ -102,22 +97,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
   const assembled = assembleMemory(req.history, memory);
 
-  // Per-agent guardrails — guardrail NODES on the canvas (one per
-  // mechanism instance, the shape GuardrailForm.tsx saves) merged over any
-  // legacy root-node config. Every feature below is config-driven and off
-  // when unconfigured; the server carries no agent-, org-, or
-  // field-specific values.
-  const guardrails = readGuardrailsFromAgent(req.agent, aiNode.config);
-
-  // Deterministic pricing (chat/pricing-guardrails.ts): computed in code and
-  // injected into every prompt this turn builds, so the model quotes system
-  // numbers instead of doing its own discount arithmetic.
-  const pricing = guardrails.priceFloor
-    ? await loadOpportunityPricing(
-        req.context.orgId, req.context.recordContextId, req.context.recordContextType, guardrails.priceFloor,
-      )
-    : null;
-  const pricingBlock = pricing ? buildPricingBlock(pricing) : null;
+  // Universal customer-facing protections (chat/output-guardrails.ts),
+  // armed by ONE root-node config flag. Use-case behavior lives in agent
+  // data (prompts/KB/config) — the server carries none of it.
+  const guardrails = readGuardrailsConfig(aiNode.config);
 
   logger.info({
     orgId: req.context.orgId,
@@ -143,7 +126,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     const systemPrompt = await buildSystemPrompt(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
-      pricingBlock,
     );
 
     const attachments = (req.attachments && req.attachments.length > 0)
@@ -242,7 +224,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         servers: servers.map(s => ({ name: s.name, url: s.url, allowedTools: s.allowedTools })),
         toolsBound: loaded.tools.map(t => t.name),
         handoffTools: handoffTools.map(h => h.name),
-        pricing: pricing ? { listTotal: pricing.listTotal, firstOffer: pricing.firstOffer, floorTotal: pricing.floorTotal } : null,
         systemPromptChars: systemPrompt.length,
       });
     }
@@ -256,7 +237,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       } else {
         activeSubagentName = subagentNode.name;
         try {
-          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages, pricingBlock);
+          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages);
           if (req.debugMode) {
             debugRequest.push({ stage: 'subagent', subagent: subagentNode.name, model: sub.modelName, toolsBound: sub.toolNames });
           }
@@ -310,7 +291,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
             if (!subagentNode) break;
             const fix = await runSubagentTurn(
               req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
-              [...sanitizeToolPairs(state.messages), correction], pricingBlock,
+              [...sanitizeToolPairs(state.messages), correction],
             );
             state = { ...state, messages: [...state.messages, correction, ...fix.messages] };
           } else {
@@ -329,17 +310,15 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       }
     }
 
-    // ── Output guardrails (chat/pricing-guardrails.ts): for customer-facing
+    // ── Output guardrails (chat/output-guardrails.ts): for customer-facing
     // agents only (root AI node config `customerFacing: true`), internal
     // vocabulary and below-floor offers are ENFORCED, not requested — one
     // corrective regeneration, then a mechanical scrub as the last resort.
     if (customerFacing && assistantText) {
-      const violations = findGuardrailViolations(assistantText, pricing, guardrails.bannedPhrases);
+      const violations = findGuardrailViolations(assistantText, guardrails.bannedPhrases);
       if (violations.length > 0) {
         logger.warn({ orgId: req.context.orgId, violations }, 'lc_output_guardrail_regen');
-        const floorNote = pricing
-          ? ` Never state any full-deal price below ${formatUsd(pricing.floorTotal)}.`
-          : '';
+        
         try {
           const corrected = (await routerModel.invoke([
             new SystemMessage(systemPrompt),
@@ -347,18 +326,18 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
             new HumanMessage(
               'REWRITE your last reply to the customer. It broke hard rules: ' + violations.join('; ') + '. ' +
               'Keep the same meaning, warmth and forward motion, but use customer language only — no internal ' +
-              'vocabulary (floor, concession, policy, matrix), no systems, records, tasks or stages.' + floorNote +
+              'vocabulary (floor, concession, policy, matrix), no systems, records, tasks or stages.' +
               ' Respond with ONLY the corrected customer message.',
             ),
           ])) as AIMessage;
           state = { ...state, messages: [...state.messages, corrected] };
           const retext = lastAssistantText(state.messages);
-          assistantText = findGuardrailViolations(retext, pricing, guardrails.bannedPhrases).length > 0
-            ? scrubReply(retext, pricing, guardrails.bannedPhrases)
+          assistantText = findGuardrailViolations(retext, guardrails.bannedPhrases).length > 0
+            ? scrubReply(retext, guardrails.bannedPhrases)
             : retext;
         } catch (err) {
           logger.error({ orgId: req.context.orgId, err: err instanceof Error ? err.message : err }, 'lc_output_guardrail_regen_failed');
-          assistantText = scrubReply(assistantText, pricing, guardrails.bannedPhrases);
+          assistantText = scrubReply(assistantText, guardrails.bannedPhrases);
         }
       }
     }
@@ -395,31 +374,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       ...(req.debugMode ? { debugRequest, debugResponse } : {}),
     };
 
-    // Post-reply hooks — identical to the original server, plus the
-    // config-driven deterministic invariants for record-anchored sessions
-    // (chat/competitor-intel.ts, chat/escalation-reconciler.ts). Each runs
-    // only when the agent's own guardrails config enables it.
-    if (customerFacing && req.context.recordContextId && req.context.recordContextType) {
-      if (guardrails.competitorIntel) {
-        maybeStoreCompetitorIntelAsync({
-          orgId: req.context.orgId,
-          recordId: req.context.recordContextId,
-          recordType: req.context.recordContextType,
-          cfg: guardrails.competitorIntel,
-          userMessage: req.newUserMessage,
-          engineOverride: req.engineOverride,
-        });
-      }
-      if (guardrails.escalation) {
-        maybeReconcileEscalationAsync({
-          orgId: req.context.orgId,
-          recordId: req.context.recordContextId,
-          recordType: req.context.recordContextType,
-          toolCalls,
-          cfg: guardrails.escalation,
-        });
-      }
-    }
+    // Post-reply hooks — identical to the original server.
     maybeUpdateMemoryAsync({
       orgId: req.context.orgId,
       sessionId: req.sessionId,
@@ -459,7 +414,6 @@ async function runSubagentTurn(
   sfAccessToken: string,
   assembled: { preamble: string | null },
   baseMessages: BaseMessage[],
-  pricingBlock: string | null,
 ): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[] }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
@@ -474,7 +428,6 @@ async function runSubagentTurn(
     );
     const systemPrompt = await buildSystemPrompt(
       req.agent, synthetic, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
-      pricingBlock,
     );
     if (!model.bindTools) throw new Error(`Model for ${synthetic.nodeSubType} does not support tool binding.`);
     const bound = model.bindTools(loaded.tools);
