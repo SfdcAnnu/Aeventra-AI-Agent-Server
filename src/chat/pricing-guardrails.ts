@@ -108,6 +108,42 @@ export function buildPricingBlock(p: OpportunityPricing): string {
   );
 }
 
+// ── Action-claim guardrail ───────────────────────────────────────────
+// Live-confirmed failure (debug-verified): with createSobjectRecord bound
+// and callable, the model replied "The revival request has been successfully
+// registered. The follow-up task is set, and your call is booked" — zero
+// tool calls. Detection is deterministic: a completed-action claim (or a
+// first-person write promise) in the reply with no successful write tool
+// call anywhere in the conversation is a fabrication; graph-runtime then
+// forces ONE corrective pass with tools live.
+
+export const WRITE_TOOL_NAMES = new Set([
+  'createSobjectRecord',
+  'updateSobjectRecord',
+  'updateRelatedRecord',
+  'bulkUpdateSobjectRecords',
+]);
+
+const COMPLETED_CLAIM_RE =
+  /\b(?:i(?:'|’)?ve|i\s+have|has\s+been|have\s+been|is\s+now|are\s+now)\s+(?:successfully\s+|officially\s+|now\s+)?(?:scheduled|booked|arranged|registered|logged|created|updated|recorded|set(?:\s+up)?)\b|\byour\s+(?:request|case|meeting|call)\s+is\s+(?:registered|booked|scheduled|logged|confirmed)\b/i;
+
+const WRITE_PROMISE_RE =
+  /\b(?:let\s+me|i(?:'|’)ll|i\s+will|i\s+am\s+going\s+to|going\s+to)\s+(?:update|register|log|record|note|create|book|schedule)\b/i;
+
+/** True when the reply asserts or promises a system action. */
+export function findActionClaim(text: string): string | null {
+  const m = COMPLETED_CLAIM_RE.exec(text) ?? WRITE_PROMISE_RE.exec(text);
+  return m ? m[0] : null;
+}
+
+export const ACTION_CLAIM_CORRECTION =
+  'STOP — your reply claims or promises that something was registered, booked, or updated, but NO record has actually ' +
+  'been created or updated in this conversation. Claims must NEVER precede the real action. Using your tools RIGHT NOW, ' +
+  'perform the actions your instructions require for this situation (for an escalation: update the stage, create the ' +
+  'follow-up Task and the Event with the agreed time). Do not transfer to anyone else. Then reply to the customer in ' +
+  'their language confirming ONLY what you actually completed. If you are missing information the action needs, ask for ' +
+  'it instead of claiming. If a tool fails, say the team will confirm within 24 hours — never claim success.';
+
 // ── Output guardrails ────────────────────────────────────────────────
 
 /** Internal negotiation vocabulary — replaced in place by scrubReply(). */
