@@ -272,9 +272,22 @@ function validateOperations(ops: CopilotOperation[], req: CopilotRequest): { ops
 
       if (nodeType === 'guardrail') {
         const cfg = (op.input.config ?? {}) as Record<string, unknown>;
-        const mech = String(cfg.mechanism ?? '');
+        let mech = String(cfg.mechanism ?? '');
+        // Deterministic repair: infer a missing mechanism from which keys
+        // are present before giving up on the node.
         if (!GUARDRAIL_MECHANISMS.has(mech)) {
-          notes.push(`Dropped guardrail "${String(op.input.label ?? '')}" — unknown mechanism "${mech}".`);
+          if (cfg.maxDiscountField) mech = 'numberLimit';
+          else if (cfg.targetField || cfg.listenFor) mech = 'dataCapture';
+          else if (cfg.stageField || cfg.toStage) mech = 'followUpAction';
+          else if (cfg.bannedWords) mech = 'replyRule';
+          if (GUARDRAIL_MECHANISMS.has(mech)) {
+            cfg.mechanism = mech;
+            op.input.config = cfg;
+            notes.push(`Filled in mechanism "${mech}" for guardrail "${String(op.input.label ?? '')}".`);
+          }
+        }
+        if (!GUARDRAIL_MECHANISMS.has(mech)) {
+          notes.push(`Dropped guardrail "${String(op.input.label ?? '')}" — no recognizable mechanism in its config.`);
           continue;
         }
         const missing = GUARDRAIL_REQUIRED_KEYS[mech].filter(k => cfg[k] === undefined || cfg[k] === null || cfg[k] === '');
@@ -350,6 +363,11 @@ ORG GROUNDING (lookup tools — describe_object, list_custom_actions, list_conne
 GUARDRAILS (nodeType "guardrail"):
 - Guardrails are ENFORCED IN CODE by the server — use them for anything that must ALWAYS or NEVER happen (price limits, capturing customer-mentioned data, stage automation, banned vocabulary). Instructions in a systemPrompt are judgment; guardrails are guarantees.
 - One guardrail node per mechanism instance, wired FROM the top-level ai node with fromPort="tool", toPort="in".
+- The node's config MUST carry a "mechanism" key plus that mechanism's own keys. EXACT config shapes (copy these, filling real values):
+    replyRule:       {"mechanism":"replyRule","bannedWords":["cost price"]}
+    numberLimit:     {"mechanism":"numberLimit","maxDiscountField":"<verified % field on Product2>","firstOfferPct":12,"defaultMaxPct":15}
+    dataCapture:     {"mechanism":"dataCapture","listenFor":"<plain-language description>","extract":["Vendor","Price","Includes"],"targetField":"<verified field on the anchored record>","keywords":["vendor","price","offer"]}
+    followUpAction:  {"mechanism":"followUpAction","stageField":"<verified picklist field>","fromStage":"<real picklist value>","toStage":"<real picklist value>"}
 - When adding guardrails to a customer-facing agent, also ensure the root ai node's config has customerFacing=true (update_node_config) — it arms the always-on reply protections.
 - Verify every field/stage value with describe_object before writing it into a guardrail config.
 
