@@ -53,7 +53,7 @@ import {
 } from '../chat/subagent-router';
 import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from '../chat/adapters/shared';
 import {
-  readGuardrailsConfig,
+  readGuardrailsFromAgent,
   loadOpportunityPricing,
   buildPricingBlock,
   findGuardrailViolations,
@@ -102,11 +102,12 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
   const assembled = assembleMemory(req.history, memory);
 
-  // Per-agent guardrails — parsed from the root AI node's ConfigJson (the
-  // JSON the drag-and-drop builder saves). Every feature below is
-  // config-driven and off when its block is absent; the server carries no
-  // agent-, org-, or field-specific values.
-  const guardrails = readGuardrailsConfig(aiNode.config);
+  // Per-agent guardrails — guardrail NODES on the canvas (one per
+  // mechanism instance, the shape GuardrailForm.tsx saves) merged over any
+  // legacy root-node config. Every feature below is config-driven and off
+  // when unconfigured; the server carries no agent-, org-, or
+  // field-specific values.
+  const guardrails = readGuardrailsFromAgent(req.agent, aiNode.config);
 
   // Deterministic pricing (chat/pricing-guardrails.ts): computed in code and
   // injected into every prompt this turn builds, so the model quotes system
@@ -397,7 +398,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           orgId: req.context.orgId,
           recordId: req.context.recordContextId,
           recordType: req.context.recordContextType,
-          field: guardrails.competitorIntel.field,
+          cfg: guardrails.competitorIntel,
           userMessage: req.newUserMessage,
           engineOverride: req.engineOverride,
         });

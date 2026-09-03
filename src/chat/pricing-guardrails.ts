@@ -46,6 +46,14 @@ export interface PriceFloorConfig {
 
 export interface CompetitorIntelConfig {
   field: string;
+  /** Plain-language description of what to listen for in customer
+   *  messages; drives the cheap-model extraction prompt. */
+  listenFor?: string;
+  /** Names of the values to extract (become the stored line's segments). */
+  extract?: string[];
+  /** Optional prefilter: only messages containing one of these run the
+   *  extraction. Empty/absent = built-in vendor+money prefilter. */
+  keywords?: string[];
 }
 
 export interface EscalationConfig {
@@ -120,6 +128,73 @@ export function readGuardrailsConfig(nodeConfig: unknown): GuardrailsConfig {
     competitorIntel,
     escalation,
   };
+}
+
+/** The drag-and-drop shape: one guardrail NODE per mechanism instance
+ *  (NodeType__c='guardrail', ConfigJson holds `mechanism` + its fields —
+ *  the contract GuardrailForm.tsx saves). Merged ON TOP of any legacy
+ *  root-config guardrails, so both authoring styles work. */
+export function readGuardrailsFromAgent(
+  agent: { nodes: Array<{ nodeType: string; isEnabled: boolean; config?: unknown }> },
+  aiNodeConfig: unknown,
+): GuardrailsConfig {
+  const merged = readGuardrailsConfig(aiNodeConfig);
+
+  for (const node of agent.nodes) {
+    if (node.nodeType !== 'guardrail' || !node.isEnabled) continue;
+    const g = (node.config ?? {}) as {
+      mechanism?: string;
+      bannedWords?: unknown;
+      maxDiscountField?: unknown; firstOfferPct?: unknown; defaultMaxPct?: unknown;
+      listenFor?: unknown; extract?: unknown; targetField?: unknown; keywords?: unknown;
+      stageField?: unknown; fromStage?: unknown; toStage?: unknown;
+    };
+    switch (g.mechanism) {
+      case 'replyRule': {
+        if (Array.isArray(g.bannedWords)) {
+          const words = g.bannedWords.filter((w): w is string => typeof w === 'string' && w.trim().length > 1);
+          merged.bannedPhrases = [...new Set([...merged.bannedPhrases, ...words])].slice(0, 50);
+        }
+        break;
+      }
+      case 'numberLimit': {
+        const field = safeField(g.maxDiscountField);
+        if (field) {
+          merged.priceFloor = {
+            maxDiscountField: field,
+            firstOfferPct: clampPct(g.firstOfferPct, 12),
+            defaultMaxPct: clampPct(g.defaultMaxPct, 15),
+          };
+        }
+        break;
+      }
+      case 'dataCapture': {
+        const field = safeField(g.targetField);
+        if (field) {
+          merged.competitorIntel = {
+            field,
+            listenFor: typeof g.listenFor === 'string' && g.listenFor.trim() ? g.listenFor.trim().slice(0, 500) : undefined,
+            extract: Array.isArray(g.extract)
+              ? g.extract.filter((e): e is string => typeof e === 'string' && e.trim().length > 0).slice(0, 10)
+              : undefined,
+            keywords: Array.isArray(g.keywords)
+              ? g.keywords.filter((k): k is string => typeof k === 'string' && k.trim().length > 0).slice(0, 30)
+              : undefined,
+          };
+        }
+        break;
+      }
+      case 'followUpAction': {
+        const stageField = safeField(g.stageField);
+        if (stageField && typeof g.fromStage === 'string' && typeof g.toStage === 'string') {
+          merged.escalation = { stageField, fromStage: g.fromStage, toStage: g.toStage };
+        }
+        break;
+      }
+      default: break; // liveFacts/customLogic: designed, not yet enforced
+    }
+  }
+  return merged;
 }
 
 // ── Deal pricing (priceFloor config) ─────────────────────────────────
