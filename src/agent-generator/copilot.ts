@@ -270,20 +270,26 @@ export async function proposeCopilotChanges(
 // (the known fromPort:'tool' trap), malformed guardrails are dropped with
 // an explanatory note instead of reaching the user's preview.
 
-const GUARDRAIL_MECHANISMS = new Set(['replyRule', 'numberLimit', 'dataCapture', 'followUpAction']);
-const GUARDRAIL_REQUIRED_KEYS: Record<string, string[]> = {
-  replyRule: ['bannedWords'],
-  numberLimit: ['maxDiscountField'],
+const RULE_KINDS = new Set(['bannedWords', 'numberLimit']);
+const AUTOMATION_MECHANISMS = new Set(['dataCapture', 'followUpAction']);
+const AUTOMATION_REQUIRED_KEYS: Record<string, string[]> = {
   dataCapture: ['listenFor', 'extract', 'targetField'],
   followUpAction: ['stageField', 'fromStage', 'toStage'],
 };
 const SAFE_FIELD_RE = /^[A-Za-z][A-Za-z0-9_]{0,60}$/;
 const FIELD_KEYS = ['maxDiscountField', 'targetField', 'stageField'];
 
+function badFieldIn(cfg: Record<string, unknown>): string | null {
+  const key = FIELD_KEYS.find(k => cfg[k] !== undefined && !SAFE_FIELD_RE.test(String(cfg[k])));
+  return key ? String(cfg[key]) : null;
+}
+
 function validateOperations(ops: CopilotOperation[], req: CopilotRequest): { ops: CopilotOperation[]; notes: string[] } {
   const notes: string[] = [];
   const typeByRef = new Map<string, string>(req.nodes.map(n => [n.id, n.nodeType]));
+  const existingGuardrail = req.nodes.find(n => n.nodeType === 'guardrail');
   const out: CopilotOperation[] = [];
+  let batchGuardrailRef: string | null = null;
 
   for (const op of ops) {
     if (op.tool === 'add_node') {
@@ -292,39 +298,57 @@ function validateOperations(ops: CopilotOperation[], req: CopilotRequest): { ops
 
       if (nodeType === 'guardrail') {
         const cfg = (op.input.config ?? {}) as Record<string, unknown>;
-        let mech = String(cfg.mechanism ?? '');
-        // Deterministic repair: infer a missing mechanism from which keys
-        // are present before giving up on the node.
-        if (!GUARDRAIL_MECHANISMS.has(mech)) {
-          if (cfg.maxDiscountField) mech = 'numberLimit';
-          else if (cfg.targetField || cfg.listenFor) mech = 'dataCapture';
-          else if (cfg.stageField || cfg.toStage) mech = 'followUpAction';
-          else if (cfg.bannedWords) mech = 'replyRule';
-          if (GUARDRAIL_MECHANISMS.has(mech)) {
-            cfg.mechanism = mech;
-            op.input.config = cfg;
-            notes.push(`Filled in mechanism "${mech}" for guardrail "${String(op.input.label ?? '')}".`);
-          }
-        }
-        if (!GUARDRAIL_MECHANISMS.has(mech)) {
-          notes.push(`Dropped guardrail "${String(op.input.label ?? '')}" — no recognizable mechanism in its config.`);
+        const rules = (Array.isArray(cfg.rules) ? cfg.rules : []) as Array<Record<string, unknown>>;
+        const validRules = rules.filter(r => {
+          if (!r || !RULE_KINDS.has(String(r.kind))) return false;
+          if (badFieldIn(r)) { notes.push(`Skipped a rule with invalid field name "${badFieldIn(r)}".`); return false; }
+          if (String(r.kind) === 'numberLimit' && !r.maxDiscountField) return false;
+          return true;
+        });
+        if (validRules.length === 0) {
+          notes.push(`Dropped guardrail "${String(op.input.label ?? '')}" — no valid rules in config.rules.`);
           continue;
         }
-        const missing = GUARDRAIL_REQUIRED_KEYS[mech].filter(k => cfg[k] === undefined || cfg[k] === null || cfg[k] === '');
+        // ONE guardrail node per agent — merge into an existing node (or an
+        // earlier add in this same batch) instead of adding a second.
+        if (existingGuardrail) {
+          const existingRules = Array.isArray((existingGuardrail.config as Record<string, unknown>).rules)
+            ? ((existingGuardrail.config as Record<string, unknown>).rules as unknown[])
+            : [];
+          out.push({ tool: 'update_node_config', input: { nodeId: existingGuardrail.id, configPatch: { rules: [...existingRules, ...validRules] } } });
+          notes.push('Merged new rules into the agent\'s existing Guardrails node (one per agent).');
+          continue;
+        }
+        if (batchGuardrailRef) {
+          notes.push('Skipped a second Guardrails node — an agent has exactly one; add rules to it instead.');
+          continue;
+        }
+        batchGuardrailRef = typeof op.input.localId === 'string' ? op.input.localId : 'guardrail';
+        op.input.config = { rules: validRules };
+      }
+
+      if (nodeType === 'automation') {
+        const cfg = (op.input.config ?? {}) as Record<string, unknown>;
+        const mech = String(cfg.mechanism ?? '');
+        if (!AUTOMATION_MECHANISMS.has(mech)) {
+          notes.push(`Dropped automation "${String(op.input.label ?? '')}" — unknown mechanism "${mech}".`);
+          continue;
+        }
+        const missing = AUTOMATION_REQUIRED_KEYS[mech].filter(k => cfg[k] === undefined || cfg[k] === null || cfg[k] === '');
         if (missing.length > 0) {
-          notes.push(`Dropped guardrail "${String(op.input.label ?? '')}" (${mech}) — missing required config: ${missing.join(', ')}.`);
+          notes.push(`Dropped automation "${String(op.input.label ?? '')}" (${mech}) — missing required config: ${missing.join(', ')}.`);
           continue;
         }
-        const badField = FIELD_KEYS.find(k => cfg[k] !== undefined && !SAFE_FIELD_RE.test(String(cfg[k])));
-        if (badField) {
-          notes.push(`Dropped guardrail "${String(op.input.label ?? '')}" — "${String(cfg[badField])}" is not a valid field API name.`);
+        const bad = badFieldIn(cfg);
+        if (bad) {
+          notes.push(`Dropped automation "${String(op.input.label ?? '')}" — "${bad}" is not a valid field API name.`);
           continue;
         }
       }
 
-      // The fromPort:'tool' trap — a subagent/tool/guardrail wired on any
-      // other port renders connected but is invisible at runtime.
-      if (['subagent', 'tool', 'catalog', 'guardrail'].includes(nodeType) &&
+      // The fromPort:'tool' trap — a subagent/tool/guardrail/automation
+      // wired on any other port renders connected but is invisible at runtime.
+      if (['subagent', 'tool', 'catalog', 'guardrail', 'automation'].includes(nodeType) &&
           typeof op.input.connectFromNodeId === 'string' && op.input.connectFromPort !== 'tool') {
         op.input.connectFromPort = 'tool';
         notes.push(`Corrected wiring for "${String(op.input.label ?? '')}" to the required "tool" port.`);
@@ -333,7 +357,7 @@ function validateOperations(ops: CopilotOperation[], req: CopilotRequest): { ops
 
     if (op.tool === 'add_connection') {
       const targetType = typeByRef.get(String(op.input.toNodeId ?? ''));
-      if (targetType && ['subagent', 'tool', 'catalog', 'guardrail'].includes(targetType) && op.input.fromPort !== 'tool') {
+      if (targetType && ['subagent', 'tool', 'catalog', 'guardrail', 'automation'].includes(targetType) && op.input.fromPort !== 'tool') {
         op.input.fromPort = 'tool';
         notes.push('Corrected a connection to the required "tool" port.');
       }
@@ -380,16 +404,16 @@ ORG GROUNDING (lookup tools — describe_object, list_custom_actions, list_conne
 - NEVER invent Salesforce field names, picklist values, action names, or tool names. Before any config that references one (a guardrail's targetField/maxDiscountField/stageField/fromStage/toStage, a tool node's toolName, catalog allowedTools), CALL the lookup tools first and use the exact API names and real picklist values they return.
 - Lookups run immediately and their results come back to you in this same conversation — do lookups first, then propose the mutations. If a lookup shows the thing doesn't exist, say so instead of wiring a guess.
 
-GUARDRAILS (nodeType "guardrail"):
-- Guardrails are ENFORCED IN CODE by the server — use them for anything that must ALWAYS or NEVER happen (price limits, capturing customer-mentioned data, stage automation, banned vocabulary). Instructions in a systemPrompt are judgment; guardrails are guarantees.
-- One guardrail node per mechanism instance, wired FROM the top-level ai node with fromPort="tool", toPort="in".
-- The node's config MUST carry a "mechanism" key plus that mechanism's own keys. EXACT config shapes (copy these, filling real values):
-    replyRule:       {"mechanism":"replyRule","bannedWords":["cost price"]}
-    numberLimit:     {"mechanism":"numberLimit","maxDiscountField":"<verified % field on Product2>","firstOfferPct":12,"defaultMaxPct":15}
-    dataCapture:     {"mechanism":"dataCapture","listenFor":"<plain-language description>","extract":["Vendor","Price","Includes"],"targetField":"<verified field on the anchored record>","keywords":["vendor","price","offer"]}
-    followUpAction:  {"mechanism":"followUpAction","stageField":"<verified picklist field>","fromStage":"<real picklist value>","toStage":"<real picklist value>"}
-- When adding guardrails to a customer-facing agent, also ensure the root ai node's config has customerFacing=true (update_node_config) — it arms the always-on reply protections.
-- Verify every field/stage value with describe_object before writing it into a guardrail config.
+GUARDRAILS vs AUTOMATIONS (both enforced in code by the server — never prompt text):
+- GUARDRAILS (nodeType "guardrail") are the agent's RESTRICTION RULES — "must never say X", "never below Y". AT MOST ONE guardrail node per agent; ALL rules go in its config.rules array:
+    {"rules":[{"kind":"bannedWords","bannedWords":["cost price"]},{"kind":"numberLimit","maxDiscountField":"<verified % field on Product2>","firstOfferPct":12,"defaultMaxPct":15}]}
+  If a guardrail node already exists, ADD to it via update_node_config with the FULL new rules array — never add a second guardrail node.
+- AUTOMATIONS (nodeType "automation") are system WORK that happens automatically — capture mentioned data, move a stage after an escalation. One node per job, any number. EXACT config shapes:
+    {"mechanism":"dataCapture","listenFor":"<full plain-language description>","extract":["Vendor","Price","Includes"],"targetField":"<verified field>","keywords":["vendor","price","offer"]}
+    {"mechanism":"followUpAction","stageField":"<verified picklist field>","fromStage":"<real value>","toStage":"<real value>"}
+- Both connect FROM the top-level ai node with fromPort="tool", toPort="in".
+- When adding either to a customer-facing agent, also ensure the root ai node's config has customerFacing=true (update_node_config).
+- Verify every field/stage value with describe_object before writing it into any config.
 
 HOW TO RESPOND:
 - If the request is a genuine, buildable change, call one or more of the mutation tools to make it. COVER THE WHOLE REQUEST: a request with several parts needs ALL its tool calls emitted together in one turn — never just the first part. Reference EXISTING nodes/connections by their real "id" shown above; a node you add in this same turn is referenced by the localId you gave it.
