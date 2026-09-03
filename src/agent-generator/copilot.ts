@@ -190,6 +190,7 @@ export async function proposeCopilotChanges(
 
   const operations: CopilotOperation[] = [];
   let assistantText = '';
+  let nudged = false;
 
   for (let round = 0; round < MAX_LOOKUP_ROUNDS; round++) {
     const response = await callOpenAi(
@@ -223,11 +224,29 @@ export async function proposeCopilotChanges(
     }
     if (text) assistantText = text; // the latest round's prose wins
 
-    if (lookups.length === 0) break;
+    if (lookups.length === 0) {
+      // Completeness nudge (once): a multi-part request often gets one
+      // mutation per turn out of the model — give it one bounded chance to
+      // emit everything still missing (live-confirmed: 1 of 4 requested
+      // guardrails without this).
+      if (mutations.length > 0 && !nudged && round < MAX_LOOKUP_ROUNDS - 1) {
+        nudged = true;
+        input.push(...output);
+        for (const c of mutations) {
+          input.push({ type: 'function_call_output', call_id: c.call_id, output: 'Staged for the user to review and apply.' });
+        }
+        input.push({
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Re-read my original request. If any part of it is NOT yet covered by your staged changes, emit ALL remaining tool calls now, together in this one turn. If everything is covered, reply exactly: DONE.' }],
+        });
+        continue;
+      }
+      break;
+    }
 
     // Feed lookup results back; unanswered mutation calls in the same round
     // still need an output item or the next request is rejected.
-    input.push(...calls);
+    input.push(...output);
     for (const c of mutations) {
       input.push({ type: 'function_call_output', call_id: c.call_id, output: 'Staged for the user to review and apply.' });
     }
@@ -238,6 +257,7 @@ export async function proposeCopilotChanges(
     logger.info({ orgId, round, lookups: lookups.map(l => l.name) }, 'copilot_lookup_round');
   }
 
+  if (assistantText.trim() === 'DONE') assistantText = '';
   const validated = validateOperations(operations, req);
   if (validated.notes.length > 0) {
     assistantText = `${assistantText}${assistantText ? '\n\n' : ''}${validated.notes.map(n => `⚠ ${n}`).join('\n')}`;
@@ -372,7 +392,7 @@ GUARDRAILS (nodeType "guardrail"):
 - Verify every field/stage value with describe_object before writing it into a guardrail config.
 
 HOW TO RESPOND:
-- If the request is a genuine, buildable change, call one or more of the mutation tools to make it — you may call several in one turn (e.g. add a node AND rename the agent's own step). Reference EXISTING nodes/connections by their real "id" shown above; a node you add in this same turn is referenced by the localId you gave it.
+- If the request is a genuine, buildable change, call one or more of the mutation tools to make it. COVER THE WHOLE REQUEST: a request with several parts needs ALL its tool calls emitted together in one turn — never just the first part. Reference EXISTING nodes/connections by their real "id" shown above; a node you add in this same turn is referenced by the localId you gave it.
 - If the request is ambiguous, or you need one clarifying detail, ask in plain text and make NO mutation calls this turn.
 - If the request is something Archon genuinely can't do (see the valid node types above), say so plainly and make no mutation calls.
 - Never delete the agent's sole top-level node (the one everything else attaches to).
