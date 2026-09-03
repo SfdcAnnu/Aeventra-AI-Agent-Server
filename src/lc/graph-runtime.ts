@@ -53,6 +53,7 @@ import {
 } from '../chat/subagent-router';
 import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from '../chat/adapters/shared';
 import {
+  readGuardrailsConfig,
   loadOpportunityPricing,
   buildPricingBlock,
   findGuardrailViolations,
@@ -101,13 +102,20 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
   const assembled = assembleMemory(req.history, memory);
 
+  // Per-agent guardrails — parsed from the root AI node's ConfigJson (the
+  // JSON the drag-and-drop builder saves). Every feature below is
+  // config-driven and off when its block is absent; the server carries no
+  // agent-, org-, or field-specific values.
+  const guardrails = readGuardrailsConfig(aiNode.config);
+
   // Deterministic pricing (chat/pricing-guardrails.ts): computed in code and
   // injected into every prompt this turn builds, so the model quotes system
-  // numbers instead of doing its own discount arithmetic. Null when the
-  // session isn't Opportunity-anchored or the org lacks the customization.
-  const pricing = await loadOpportunityPricing(
-    req.context.orgId, req.context.recordContextId, req.context.recordContextType,
-  );
+  // numbers instead of doing its own discount arithmetic.
+  const pricing = guardrails.priceFloor
+    ? await loadOpportunityPricing(
+        req.context.orgId, req.context.recordContextId, req.context.recordContextType, guardrails.priceFloor,
+      )
+    : null;
   const pricingBlock = pricing ? buildPricingBlock(pricing) : null;
 
   logger.info({
@@ -286,7 +294,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // pass WITH TOOLS LIVE — through the active subagent when a handoff
     // happened (its prompt carries the procedure and its toolset the write
     // tools), else through the router graph.
-    const customerFacing = Boolean((aiNode.config as { customerFacing?: boolean })?.customerFacing);
+    const customerFacing = guardrails.customerFacing;
     if (customerFacing && assistantText) {
       const claim = findActionClaim(assistantText);
       if (claim && !turnHasWrite(state.messages)) {
@@ -322,7 +330,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // vocabulary and below-floor offers are ENFORCED, not requested — one
     // corrective regeneration, then a mechanical scrub as the last resort.
     if (customerFacing && assistantText) {
-      const violations = findGuardrailViolations(assistantText, pricing);
+      const violations = findGuardrailViolations(assistantText, pricing, guardrails.bannedPhrases);
       if (violations.length > 0) {
         logger.warn({ orgId: req.context.orgId, violations }, 'lc_output_guardrail_regen');
         const floorNote = pricing
@@ -341,12 +349,12 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           ])) as AIMessage;
           state = { ...state, messages: [...state.messages, corrected] };
           const retext = lastAssistantText(state.messages);
-          assistantText = findGuardrailViolations(retext, pricing).length > 0
-            ? scrubReply(retext, pricing)
+          assistantText = findGuardrailViolations(retext, pricing, guardrails.bannedPhrases).length > 0
+            ? scrubReply(retext, pricing, guardrails.bannedPhrases)
             : retext;
         } catch (err) {
           logger.error({ orgId: req.context.orgId, err: err instanceof Error ? err.message : err }, 'lc_output_guardrail_regen_failed');
-          assistantText = scrubReply(assistantText, pricing);
+          assistantText = scrubReply(assistantText, pricing, guardrails.bannedPhrases);
         }
       }
     }
@@ -380,20 +388,29 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     };
 
     // Post-reply hooks — identical to the original server, plus the
-    // deterministic competitor-intel capture for customer-facing
-    // Opportunity-anchored sessions (chat/competitor-intel.ts).
-    if (customerFacing && req.context.recordContextType === 'Opportunity' && req.context.recordContextId) {
-      maybeStoreCompetitorIntelAsync({
-        orgId: req.context.orgId,
-        opportunityId: req.context.recordContextId,
-        userMessage: req.newUserMessage,
-        engineOverride: req.engineOverride,
-      });
-      maybeReconcileEscalationAsync({
-        orgId: req.context.orgId,
-        opportunityId: req.context.recordContextId,
-        toolCalls,
-      });
+    // config-driven deterministic invariants for record-anchored sessions
+    // (chat/competitor-intel.ts, chat/escalation-reconciler.ts). Each runs
+    // only when the agent's own guardrails config enables it.
+    if (customerFacing && req.context.recordContextId && req.context.recordContextType) {
+      if (guardrails.competitorIntel) {
+        maybeStoreCompetitorIntelAsync({
+          orgId: req.context.orgId,
+          recordId: req.context.recordContextId,
+          recordType: req.context.recordContextType,
+          field: guardrails.competitorIntel.field,
+          userMessage: req.newUserMessage,
+          engineOverride: req.engineOverride,
+        });
+      }
+      if (guardrails.escalation) {
+        maybeReconcileEscalationAsync({
+          orgId: req.context.orgId,
+          recordId: req.context.recordContextId,
+          recordType: req.context.recordContextType,
+          toolCalls,
+          cfg: guardrails.escalation,
+        });
+      }
     }
     maybeUpdateMemoryAsync({
       orgId: req.context.orgId,
