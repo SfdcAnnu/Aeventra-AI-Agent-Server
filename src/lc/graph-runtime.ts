@@ -58,6 +58,9 @@ import {
   findGuardrailViolations,
   scrubReply,
   formatUsd,
+  findActionClaim,
+  ACTION_CLAIM_CORRECTION,
+  WRITE_TOOL_NAMES,
 } from '../chat/pricing-guardrails';
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
@@ -275,11 +278,47 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       assistantText = lastAssistantText(state.messages);
     }
 
+    // ── Action-claim guardrail: a reply that asserts "booked/registered/
+    // updated" (or promises "let me update…") backed by ZERO successful
+    // write-tool calls in this conversation is a fabrication. One corrective
+    // pass WITH TOOLS LIVE — through the active subagent when a handoff
+    // happened (its prompt carries the procedure and its toolset the write
+    // tools), else through the router graph.
+    const customerFacing = Boolean((aiNode.config as { customerFacing?: boolean })?.customerFacing);
+    if (customerFacing && assistantText) {
+      const claim = findActionClaim(assistantText);
+      if (claim && !conversationHasWrite(state.messages, req.history)) {
+        logger.warn({ orgId: req.context.orgId, claim }, 'lc_action_claim_without_write');
+        try {
+          const correction = new HumanMessage(ACTION_CLAIM_CORRECTION);
+          if (state.handoffNodeId) {
+            const subagentNode = req.agent.nodes.find(n => n.id === state.handoffNodeId);
+            if (subagentNode) {
+              const fix = await runSubagentTurn(
+                req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
+                [...sanitizeToolPairs(state.messages), correction], pricingBlock,
+              );
+              state = { ...state, messages: [...state.messages, correction, ...fix.messages] };
+            }
+          } else {
+            const input = [...sanitizeToolPairs(state.messages), correction];
+            const fix = await compiled.invoke(
+              { messages: input },
+              { recursionLimit: MAX_GRAPH_STEPS, runName: `claim-guard ${req.agent.apiName}`, tags: ['claim-guard', req.agent.apiName] },
+            );
+            state = { ...state, messages: [...state.messages, correction, ...fix.messages.slice(input.length)] };
+          }
+          assistantText = lastAssistantText(state.messages);
+        } catch (err) {
+          logger.error({ orgId: req.context.orgId, err: err instanceof Error ? err.message : err }, 'lc_action_claim_correction_failed');
+        }
+      }
+    }
+
     // ── Output guardrails (chat/pricing-guardrails.ts): for customer-facing
     // agents only (root AI node config `customerFacing: true`), internal
     // vocabulary and below-floor offers are ENFORCED, not requested — one
     // corrective regeneration, then a mechanical scrub as the last resort.
-    const customerFacing = Boolean((aiNode.config as { customerFacing?: boolean })?.customerFacing);
     if (customerFacing && assistantText) {
       const violations = findGuardrailViolations(assistantText, pricing);
       if (violations.length > 0) {
@@ -508,6 +547,33 @@ function sumUsage(messages: BaseMessage[]): { tokensIn: number; tokensOut: numbe
   return { tokensIn, tokensOut };
 }
 
+/** Did any successful write-tool call happen this turn (graph messages) or
+ *  earlier in the session (persisted tool history)? Custom Apex/Flow
+ *  actions (apex__ and flow__ prefixes) count — they exist to perform writes. */
+function conversationHasWrite(messages: BaseMessage[], history: ChatHistoryMessage[]): boolean {
+  const isWriteName = (name: string) =>
+    WRITE_TOOL_NAMES.has(name) || name.startsWith('apex__') || name.startsWith('flow__');
+
+  const failedCallIds = new Set<string>();
+  for (const m of messages) {
+    if (m instanceof ToolMessage && m.tool_call_id && m.status === 'error') failedCallIds.add(m.tool_call_id);
+  }
+  for (const m of messages) {
+    if (!(m instanceof AIMessage)) continue;
+    for (const call of m.tool_calls ?? []) {
+      if (isWriteName(call.name) && !(call.id && failedCallIds.has(call.id))) return true;
+    }
+  }
+  for (const h of history) {
+    if (h.role !== 'tool' || !h.toolCallsJson) continue;
+    try {
+      const j = JSON.parse(h.toolCallsJson) as { name?: string };
+      if (j.name && isWriteName(j.name)) return true;
+    } catch { /* unparseable row — ignore */ }
+  }
+  return false;
+}
+
 /** Belt-and-braces for any model invoke over raw state: every AIMessage
  *  tool_call must have a ToolMessage answering it (providers hard-reject
  *  otherwise). Inserts a synthetic answer right after the call's existing
@@ -548,7 +614,11 @@ function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools): Tool
   for (const m of messages) {
     if (!(m instanceof AIMessage)) continue;
     for (const call of m.tool_calls ?? []) {
-      if (!loaded.serverByTool.has(call.name)) continue; // skip handoff pseudo-tools
+      // Skip only handoff pseudo-tools. Filtering on the ROUTER's toolset
+      // here silently dropped SUBAGENT tool calls whose names the router
+      // doesn't carry (e.g. createSobjectRecord) from the persisted
+      // transcript — debug-confirmed.
+      if (call.name.startsWith('handoff_to_')) continue;
       const result = call.id ? resultsByCallId.get(call.id) : undefined;
       const output = result
         ? (typeof result.content === 'string' ? result.content : JSON.stringify(result.content))
