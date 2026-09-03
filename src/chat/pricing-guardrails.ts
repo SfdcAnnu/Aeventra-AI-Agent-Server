@@ -130,27 +130,23 @@ export function readGuardrailsConfig(nodeConfig: unknown): GuardrailsConfig {
   };
 }
 
-/** The drag-and-drop shape: one guardrail NODE per mechanism instance
- *  (NodeType__c='guardrail', ConfigJson holds `mechanism` + its fields —
- *  the contract GuardrailForm.tsx saves). Merged ON TOP of any legacy
- *  root-config guardrails, so both authoring styles work. */
+/** The drag-and-drop shape: ONE guardrail node per agent holding a
+ *  `rules` array of restriction rules (bannedWords / numberLimit — the
+ *  GuardrailForm contract), plus any number of AUTOMATION nodes each
+ *  carrying one `mechanism` (dataCapture / followUpAction — the
+ *  AutomationForm contract). Merged ON TOP of any legacy root-config
+ *  guardrails and the earlier one-mechanism-per-guardrail-node shape, so
+ *  every authoring generation keeps working. */
 export function readGuardrailsFromAgent(
   agent: { nodes: Array<{ nodeType: string; isEnabled: boolean; config?: unknown }> },
   aiNodeConfig: unknown,
 ): GuardrailsConfig {
   const merged = readGuardrailsConfig(aiNodeConfig);
 
-  for (const node of agent.nodes) {
-    if (node.nodeType !== 'guardrail' || !node.isEnabled) continue;
-    const g = (node.config ?? {}) as {
-      mechanism?: string;
-      bannedWords?: unknown;
-      maxDiscountField?: unknown; firstOfferPct?: unknown; defaultMaxPct?: unknown;
-      listenFor?: unknown; extract?: unknown; targetField?: unknown; keywords?: unknown;
-      stageField?: unknown; fromStage?: unknown; toStage?: unknown;
-    };
-    switch (g.mechanism) {
-      case 'replyRule': {
+  const applyRule = (g: Record<string, unknown>, kind: string) => {
+    switch (kind) {
+      case 'replyRule':
+      case 'bannedWords': {
         if (Array.isArray(g.bannedWords)) {
           const words = g.bannedWords.filter((w): w is string => typeof w === 'string' && w.trim().length > 1);
           merged.bannedPhrases = [...new Set([...merged.bannedPhrases, ...words])].slice(0, 50);
@@ -191,7 +187,25 @@ export function readGuardrailsFromAgent(
         }
         break;
       }
-      default: break; // liveFacts/customLogic: designed, not yet enforced
+      default: break; // future mechanisms: designed, not yet enforced
+    }
+  };
+
+  for (const node of agent.nodes) {
+    if (!node.isEnabled) continue;
+    const cfg = (node.config ?? {}) as Record<string, unknown>;
+    if (node.nodeType === 'guardrail') {
+      if (Array.isArray(cfg.rules)) {
+        // Current shape: one node, many rules.
+        for (const r of cfg.rules as Array<Record<string, unknown>>) {
+          if (r && typeof r.kind === 'string') applyRule(r, r.kind);
+        }
+      } else if (typeof cfg.mechanism === 'string') {
+        // Legacy shape: one mechanism per guardrail node.
+        applyRule(cfg, cfg.mechanism);
+      }
+    } else if (node.nodeType === 'automation' && typeof cfg.mechanism === 'string') {
+      applyRule(cfg, cfg.mechanism);
     }
   }
   return merged;
