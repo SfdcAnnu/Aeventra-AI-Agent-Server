@@ -463,6 +463,7 @@ const CHAT_KNOWN_NODES: Record<string, Set<string>> = {
   subagent: new Set(['claude', 'gpt4', 'gemini', '']),
   tool: new Set(['MCP', 'Apex', 'Flow']),
   catalog: new Set(['salesforce_crm_tools', 'storage_tools', 'email_tools', 'channel_tools']),
+  guardrail: new Set(['guardrail']),
 };
 
 function validatePayload(payload: GeneratedAgentPayload, mode: GeneratorMode): string[] {
