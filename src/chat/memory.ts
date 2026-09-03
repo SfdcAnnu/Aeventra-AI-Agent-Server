@@ -215,7 +215,7 @@ async function summarize(
 
 /** Smallest/cheapest chat model per provider — memory upkeep must never run
  *  on the flagship model the agent itself uses. Exported for the other
- *  cheap-model side jobs (competitor-intel extraction). */
+ *  cheap-model side jobs. */
 export async function callCheapModel(engine: EngineOverrideInput, system: string, user: string): Promise<string | null> {
   const type = engine.engineType === 'gpt4' ? 'openai' : (engine.engineType ?? 'openai');
   if (type === 'openai' || type === 'custom') {
