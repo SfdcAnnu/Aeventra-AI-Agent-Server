@@ -66,6 +66,16 @@ import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
 import { buildPrebuiltTools } from './prebuilt-tools';
+import {
+  createTurnBudget,
+  checkBudget,
+  noteUsage,
+  noteToolCall,
+  REPEAT_BLOCK_AT,
+  BUDGET_TRIPPED_REPLY,
+  REPEATED_CALL_RESULT,
+  type TurnBudget,
+} from './turn-budget';
 import type {
   ChatHistoryMessage,
   ChatTurnRequest,
@@ -102,6 +112,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // armed by ONE root-node config flag. Use-case behavior lives in agent
   // data (prompts/KB/config) — the server carries none of it.
   const guardrails = readGuardrailsConfig(aiNode.config);
+
+  // Phase-1 safety rails (lc/turn-budget.ts): token/time/step budgets and
+  // the identical-call loop detector, shared across the WHOLE turn (router,
+  // subagent, corrective passes). Checked BEFORE spending, not after.
+  const budget = createTurnBudget(aiNode.config);
 
   logger.info({
     orgId: req.context.orgId,
@@ -157,12 +172,23 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     // ── Router node: answer → END; handoff → mark + END (the subagent turn
     // runs as its own graph below, mirroring the original two-call shape);
-    // tool calls → ToolNode → back here.
+    // tool calls → ToolNode → back here. Budget brakes fire BEFORE the
+    // model invoke; blocked repeat-calls loop straight back here with a
+    // corrective tool result instead of executing.
     const routerNode = async (state: typeof TurnState.State) => {
+      const brake = checkBudget(budget);
+      if (brake) {
+        budget.tripped = brake;
+        logger.warn({ orgId: req.context.orgId, brake, steps: budget.steps, tokensUsed: budget.tokensUsed }, 'lc_turn_budget_tripped');
+        return new Command({ goto: END, update: { messages: [new AIMessage(BUDGET_TRIPPED_REPLY)] } });
+      }
+      budget.steps += 1;
+
       const response = (await routerModel.invoke([
         new SystemMessage(systemPrompt),
         ...state.messages,
       ])) as AIMessage;
+      noteUsage(budget, response);
 
       const calls = response.tool_calls ?? [];
       const handoff = calls.find(c => handoffByName.has(c.name));
@@ -185,13 +211,23 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         });
       }
       if (calls.length > 0) {
+        // Loop detector: when EVERY call in this response is an identical
+        // repeat, answer them with a corrective result and return to the
+        // router instead of paying to re-execute (persistent repetition
+        // trips the whole turn via noteToolCall).
+        const repeats = calls.map(c => noteToolCall(budget, c.name, c.args));
+        if (repeats.every(n => n > REPEAT_BLOCK_AT)) {
+          logger.warn({ orgId: req.context.orgId, tools: calls.map(c => c.name) }, 'lc_repeated_calls_blocked');
+          const answers = calls.map(c => new ToolMessage({ content: REPEATED_CALL_RESULT, tool_call_id: c.id ?? '' }));
+          return new Command({ goto: 'router', update: { messages: [response, ...answers] } });
+        }
         return new Command({ goto: 'tools', update: { messages: [response] } });
       }
       return new Command({ goto: END, update: { messages: [response] } });
     };
 
     const compiled = new StateGraph(TurnState)
-      .addNode('router', routerNode, { ends: [END, 'tools'] })
+      .addNode('router', routerNode, { ends: [END, 'tools', 'router'] })
       .addNode('tools', new ToolNode(routerTools))
       .addEdge(START, 'router')
       .addEdge('tools', 'router')
@@ -201,7 +237,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     let state = await compiled.invoke(
       { messages: baseMessages },
       {
-        recursionLimit: MAX_GRAPH_STEPS,
+        // Framework backstop only — the budget's own step brake fires first
+        // with a structured, attributable reason (doc rule: framework limit
+        // sits ABOVE the enforced budget).
+        recursionLimit: budget.maxSteps * 2 + 8,
         // LangSmith trace identity — with LANGSMITH_TRACING=true every model
         // call, tool execution and graph step lands under this named run,
         // filterable by agent/org/session in the LangSmith UI.
@@ -245,7 +284,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       } else {
         activeSubagentName = subagentNode.name;
         try {
-          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages);
+          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages, budget);
           if (req.debugMode) {
             debugRequest.push({ stage: 'subagent', subagent: subagentNode.name, model: sub.modelName, toolsBound: sub.toolNames });
           }
@@ -267,13 +306,15 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // the customer either way. One bounded nudge; its answer REPLACES the
     // stall (lastAssistantText picks the newest non-empty message).
     let assistantText = lastAssistantText(state.messages);
-    if (!assistantText || isDeferralText(assistantText)) {
+    if ((!assistantText || isDeferralText(assistantText)) && !checkBudget(budget)) {
       logger.warn({ orgId: req.context.orgId, deferral: Boolean(assistantText) }, 'lc_narration_only_continuation');
+      budget.steps += 1;
       const followup = (await routerModel.invoke([
         new SystemMessage(systemPrompt),
         ...sanitizeToolPairs(state.messages),
         new HumanMessage('Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.'),
       ])) as AIMessage;
+      noteUsage(budget, followup);
       state = { ...state, messages: [...state.messages, followup] };
       assistantText = lastAssistantText(state.messages);
     }
@@ -289,6 +330,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     const customerFacing = guardrails.customerFacing;
     if (customerFacing && assistantText) {
       for (let attempt = 0; attempt < 2; attempt++) {
+        if (checkBudget(budget)) break;
         const claim = findActionClaim(assistantText);
         if (!claim || turnHasWrite(state.messages)) break;
         logger.warn({ orgId: req.context.orgId, claim, attempt }, 'lc_action_claim_without_write');
@@ -299,14 +341,14 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
             if (!subagentNode) break;
             const fix = await runSubagentTurn(
               req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
-              [...sanitizeToolPairs(state.messages), correction],
+              [...sanitizeToolPairs(state.messages), correction], budget,
             );
             state = { ...state, messages: [...state.messages, correction, ...fix.messages] };
           } else {
             const input = [...sanitizeToolPairs(state.messages), correction];
             const fix = await compiled.invoke(
               { messages: input },
-              { recursionLimit: MAX_GRAPH_STEPS, runName: `claim-guard ${req.agent.apiName}`, tags: ['claim-guard', req.agent.apiName] },
+              { recursionLimit: budget.maxSteps * 2 + 8, runName: `claim-guard ${req.agent.apiName}`, tags: ['claim-guard', req.agent.apiName] },
             );
             state = { ...state, messages: [...state.messages, correction, ...fix.messages.slice(input.length)] };
           }
@@ -324,7 +366,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // corrective regeneration, then a mechanical scrub as the last resort.
     if (customerFacing && assistantText) {
       const violations = findGuardrailViolations(assistantText, guardrails.bannedPhrases);
-      if (violations.length > 0) {
+      if (violations.length > 0 && !checkBudget(budget)) {
         logger.warn({ orgId: req.context.orgId, violations }, 'lc_output_guardrail_regen');
         
         try {
@@ -338,6 +380,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
               ' Respond with ONLY the corrected customer message.',
             ),
           ])) as AIMessage;
+          noteUsage(budget, corrected);
           state = { ...state, messages: [...state.messages, corrected] };
           const retext = lastAssistantText(state.messages);
           assistantText = findGuardrailViolations(retext, guardrails.bannedPhrases).length > 0
@@ -422,6 +465,7 @@ async function runSubagentTurn(
   sfAccessToken: string,
   assembled: { preamble: string | null },
   baseMessages: BaseMessage[],
+  budget: TurnBudget,
 ): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[] }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
@@ -446,7 +490,17 @@ async function runSubagentTurn(
     const bound = model.bindTools(subTools);
 
     const subNode = async (state: typeof MessagesAnnotation.State) => {
+      const brake = checkBudget(budget);
+      if (brake) {
+        budget.tripped = brake;
+        logger.warn({ orgId: req.context.orgId, brake, stage: 'subagent' }, 'lc_turn_budget_tripped');
+        return { messages: [new AIMessage(BUDGET_TRIPPED_REPLY)] };
+      }
+      budget.steps += 1;
       const response = (await bound.invoke([new SystemMessage(systemPrompt), ...state.messages])) as AIMessage;
+      noteUsage(budget, response);
+      // Loop detector applies to subagent tool calls too.
+      for (const c of response.tool_calls ?? []) noteToolCall(budget, c.name, c.args);
       return { messages: [response] };
     };
     const shouldContinue = (state: typeof MessagesAnnotation.State) => {
@@ -464,7 +518,7 @@ async function runSubagentTurn(
     const out = await compiled.invoke(
       { messages: baseMessages },
       {
-        recursionLimit: MAX_GRAPH_STEPS,
+        recursionLimit: budget.maxSteps * 2 + 8,
         runName: `subagent ${subagentNode.name}`,
         tags: ['subagent-turn', req.agent.apiName],
         metadata: {
