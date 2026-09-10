@@ -13,6 +13,7 @@ import { MultiServerMCPClient } from '@langchain/mcp-adapters';
 import { tool } from '@langchain/core/tools';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { logger } from '../logger';
+import { spillIfLarge } from './artifact-store';
 import type { ResolvedMcpServer } from '../chat/adapters/shared';
 
 export interface LoadedMcpTools {
@@ -110,9 +111,12 @@ function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterf
       const t0 = Date.now();
       try {
         const result = await t.invoke(args as never);
-        const resultLog = (typeof result === 'string' ? result : JSON.stringify(result)).slice(0, 600);
-        logger.info({ tool: t.name, ms: Date.now() - t0, args: argsLog, result: resultLog }, 'mcp_tool_call');
-        return result;
+        const raw = typeof result === 'string' ? result : JSON.stringify(result);
+        // Phase 3: oversized results are stored by reference — the model
+        // gets a compact summary + artifact handle instead of the payload.
+        const out = spillIfLarge(t.name, raw);
+        logger.info({ tool: t.name, ms: Date.now() - t0, args: argsLog, resultChars: raw.length, result: out.slice(0, 600) }, 'mcp_tool_call');
+        return out;
       } catch (err) {
         logger.error({ tool: t.name, ms: Date.now() - t0, args: argsLog, err: err instanceof Error ? err.message : String(err) }, 'mcp_tool_call_failed');
         throw err;

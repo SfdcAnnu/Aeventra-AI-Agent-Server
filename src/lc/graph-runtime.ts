@@ -66,6 +66,7 @@ import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
 import { buildPrebuiltTools } from './prebuilt-tools';
+import { buildReadArtifactTool } from './artifact-store';
 import {
   createTurnBudget,
   checkBudget,
@@ -156,7 +157,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   );
   // Byte-stable tool ordering — part of the cacheable prefix on every
   // provider; unordered tools silently change the prefix hash per request.
-  const routerTools = [...loaded.tools, ...prebuiltTools].sort((a, b) => a.name.localeCompare(b.name));
+  const routerTools = [...loaded.tools, ...prebuiltTools, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
 
   try {
     const { model: routerBase, modelName } = buildChatModel(
@@ -508,7 +509,7 @@ async function runSubagentTurn(
       { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
       graph, subagentNode,
     );
-    const subTools = [...loaded.tools, ...subPrebuilt].sort((a, b) => a.name.localeCompare(b.name));
+    const subTools = [...loaded.tools, ...subPrebuilt, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
     const bound = model.bindTools(subTools);
 
     const subNode = async (state: typeof MessagesAnnotation.State) => {
