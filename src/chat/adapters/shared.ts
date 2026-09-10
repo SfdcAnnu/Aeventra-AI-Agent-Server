@@ -436,7 +436,11 @@ export async function buildSystemPromptParts(
   const config = (aiNode.config as { systemPrompt?: string }) ?? {};
 
   const stableParts: string[] = [];
-  stableParts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
+  // Identity only — the name is the client's own agent data. No channel,
+  // modality, or platform assumptions here (a voice agent runs the same
+  // runtime); everything about WHAT the agent is comes from the client's
+  // instructions screen (the AI node's systemPrompt).
+  stableParts.push(`You are ${agent.name}.`);
   // Business Rules/Knowledge (the agent's own Notes field) and uploaded/
   // indexed KB documents are different kinds of content — hand-written
   // instructions vs. searchable reference material — and are additive.
