@@ -5,10 +5,18 @@
  * ws/gateway.ts, chat/headless.ts) is untouched: same runChatTurn signature,
  * same ChatTurnRequest/Result shapes, same error behavior.
  *
+ * Phase 7: the runtime is wrapped in turn idempotency HERE — the one choke
+ * point every transport (HTTP, WebSocket, headless flow runs) goes through
+ * — so webhook double-fires and Apex timeout-retries share one execution
+ * instead of billing two.
+ *
  * The original hand-rolled provider adapters (adapters/claude.ts,
  * adapters/openai.ts) remain in the tree ONLY because the agent generator
  * and builder copilot still reuse their low-level callOpenAi/callClaude
  * helpers — chat traffic never touches them here.
  */
-export { runChatTurn } from '../lc/graph-runtime';
+import { runChatTurn as runLangGraphTurn } from '../lc/graph-runtime';
+import { withTurnIdempotency } from './turn-idempotency';
+
+export const runChatTurn = withTurnIdempotency(runLangGraphTurn);
 export type { ChatTurnRequest, ChatTurnResult, ChatHistoryMessage } from './adapters/types';

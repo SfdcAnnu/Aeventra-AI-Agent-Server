@@ -67,6 +67,7 @@ import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
 import { buildPrebuiltTools } from './prebuilt-tools';
 import { buildReadArtifactTool, spillIfLarge } from './artifact-store';
+import { approvalGate, approvalRequiredNames } from './approval-gate';
 import {
   createTurnBudget,
   checkBudget,
@@ -149,6 +150,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     aiNodeSubType: aiNode.nodeSubType,
     topLevelActionCount: topLevelActions.length,
     subagentCount: handoffTools.length,
+    planVersion: req.agent.planVersion,
     engine: 'langgraph',
   }, 'chat_turn_dispatch');
 
@@ -159,13 +161,24 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions.filter(a => a.actionType !== 'Prebuilt'));
   const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken);
   const loaded = await loadMcpTools(servers);
+  // Phase 7 — approval-as-suspension: a tool node marked requiresApproval
+  // never executes inline. The call parks as a durable ChatApproval row
+  // (the model tells the user it's awaiting approval) and
+  // POST /api/chat/approvals/decide executes or rejects it later.
+  const gate = approvalGate({
+    orgId: req.context.orgId, agentApiName: req.agent.apiName, planVersion: req.agent.planVersion,
+    sessionId: req.sessionId, userId: req.context.userId,
+    recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
+  });
+  const approvalNames = approvalRequiredNames(topLevelActions);
+  const mcpTools = loaded.tools.map(t => (approvalNames.has(t.name) ? gate(t) : t));
   const prebuiltTools = buildPrebuiltTools(
     { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
-    graph, aiNode,
+    graph, aiNode, gate,
   );
   // Byte-stable tool ordering — part of the cacheable prefix on every
   // provider; unordered tools silently change the prefix hash per request.
-  const routerTools = [...loaded.tools, ...prebuiltTools, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
+  const routerTools = [...mcpTools, ...prebuiltTools, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
 
   try {
     const { model: routerBase, modelName } = buildChatModel(
@@ -265,7 +278,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         systemMessage,
         ...state.messages,
       ])) as AIMessage;
-      noteUsage(budget, response);
+      noteUsage(budget, response, 'router', modelName);
 
       const calls = response.tool_calls ?? [];
       const handoff = calls.find(c => handoffByName.has(c.name));
@@ -296,7 +309,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         // repeat, answer them with a corrective result and return to the
         // router instead of paying to re-execute (persistent repetition
         // trips the whole turn via noteToolCall).
-        const repeats = calls.map(c => noteToolCall(budget, c.name, c.args));
+        const repeats = calls.map(c => noteToolCall(budget, c.name, c.args, 'router'));
         if (repeats.every(n => n > REPEAT_BLOCK_AT)) {
           logger.warn({ orgId: req.context.orgId, tools: calls.map(c => c.name) }, 'lc_repeated_calls_blocked');
           const answers = calls.map(c => new ToolMessage({ content: REPEATED_CALL_RESULT, tool_call_id: c.id ?? '' }));
@@ -396,7 +409,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         ...sanitizeToolPairs(state.messages),
         new HumanMessage('Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.'),
       ])) as AIMessage;
-      noteUsage(budget, followup);
+      noteUsage(budget, followup, 'narration_followup', modelName);
       state = { ...state, messages: [...state.messages, followup] };
       assistantText = lastAssistantText(state.messages);
     }
@@ -462,7 +475,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
               ' Respond with ONLY the corrected customer message.',
             ),
           ])) as AIMessage;
-          noteUsage(budget, corrected);
+          noteUsage(budget, corrected, 'guardrail_regen', modelName);
           state = { ...state, messages: [...state.messages, corrected] };
           const retext = lastAssistantText(state.messages);
           assistantText = findGuardrailViolations(retext, guardrails.bannedPhrases).length > 0
@@ -494,8 +507,31 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       orgId: req.context.orgId, tokensIn, tokensOut, cacheRead: budget.cacheReadTokens,
       toolCallCount: toolCalls.length, ms: Date.now() - t0,
       subagent: activeSubagentName,
+      planVersion: req.agent.planVersion,
       reply: assistantText.slice(0, 400),
     }, 'lc_turn_complete');
+
+    // Phase 7 — the per-transition metering feed: every model call (with
+    // split tokens + cache reads) and tool call this turn, stamped with
+    // org/agent/planVersion. Log-based today; a durable billing sink can
+    // consume the same event later without touching the runtime.
+    logger.info({
+      orgId: req.context.orgId,
+      agentApiName: req.agent.apiName,
+      planVersion: req.agent.planVersion,
+      sessionId: req.sessionId,
+      userId: req.context.userId,
+      modelUsed: usedModel,
+      totals: {
+        modelCalls: budget.modelCalls,
+        toolCalls: toolCalls.length,
+        tokensIn: budget.tokensIn,
+        tokensOut: budget.tokensOut,
+        cacheRead: budget.cacheReadTokens,
+        ms: Date.now() - t0,
+      },
+      transitions: budget.events,
+    }, 'lc_billing');
 
     const result: ChatTurnResult = {
       status: 'complete',
@@ -555,6 +591,15 @@ async function runSubagentTurn(
   const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions.filter(a => a.actionType !== 'Prebuilt'));
   const servers = await resolveMcpServers({ ...req, connectors: subConnectors }, synthetic, sfAccessToken);
   const loaded = await loadMcpTools(servers);
+  // Phase 7 — the same approval gate as the router, over THIS subagent's
+  // resolved actions.
+  const subGate = approvalGate({
+    orgId: req.context.orgId, agentApiName: req.agent.apiName, planVersion: req.agent.planVersion,
+    sessionId: req.sessionId, userId: req.context.userId,
+    recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
+  });
+  const subApprovalNames = approvalRequiredNames(subActions);
+  const subMcpTools = loaded.tools.map(t => (subApprovalNames.has(t.name) ? subGate(t) : t));
   try {
     const { model, modelName } = buildChatModel(
       synthetic.nodeSubType,
@@ -568,9 +613,9 @@ async function runSubagentTurn(
     if (!model.bindTools) throw new Error(`Model for ${synthetic.nodeSubType} does not support tool binding.`);
     const subPrebuilt = buildPrebuiltTools(
       { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
-      graph, subagentNode,
+      graph, subagentNode, subGate,
     );
-    const subTools = [...loaded.tools, ...subPrebuilt, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
+    const subTools = [...subMcpTools, ...subPrebuilt, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
     const bound = model.bindTools(subTools);
 
     const subNode = async (state: typeof MessagesAnnotation.State) => {
@@ -582,9 +627,9 @@ async function runSubagentTurn(
       }
       budget.steps += 1;
       const response = (await bound.invoke([subSystem, ...state.messages])) as AIMessage;
-      noteUsage(budget, response);
+      noteUsage(budget, response, 'subagent', modelName);
       // Loop detector applies to subagent tool calls too.
-      for (const c of response.tool_calls ?? []) noteToolCall(budget, c.name, c.args);
+      for (const c of response.tool_calls ?? []) noteToolCall(budget, c.name, c.args, 'subagent');
       return { messages: [response] };
     };
     const shouldContinue = (state: typeof MessagesAnnotation.State) => {
@@ -705,14 +750,22 @@ function turnHasWrite(messages: BaseMessage[]): boolean {
     WRITE_TOOL_NAMES.has(name) || name.startsWith('apex__') || name.startsWith('flow__') ||
     name.startsWith('do_'); // prebuilt create/update actions (lc/prebuilt-tools.ts)
 
-  const failedCallIds = new Set<string>();
+  // A call whose result says it never ran doesn't count: hard errors,
+  // pre-flight rejections (REJECTED:...), loop blocks (BLOCKED —...) and
+  // Phase 7 approval suspensions (PENDING_APPROVAL:...) all licensed false
+  // "it's done" claims when only the call's EXISTENCE was checked.
+  const unexecutedCallIds = new Set<string>();
   for (const m of messages) {
-    if (m instanceof ToolMessage && m.tool_call_id && m.status === 'error') failedCallIds.add(m.tool_call_id);
+    if (!(m instanceof ToolMessage) || !m.tool_call_id) continue;
+    const text = typeof m.content === 'string' ? m.content : '';
+    if (m.status === 'error' || /^(PENDING_APPROVAL|REJECTED|BLOCKED)\b/.test(text)) {
+      unexecutedCallIds.add(m.tool_call_id);
+    }
   }
   for (const m of messages) {
     if (!(m instanceof AIMessage)) continue;
     for (const call of m.tool_calls ?? []) {
-      if (isWriteName(call.name) && !(call.id && failedCallIds.has(call.id))) return true;
+      if (isWriteName(call.name) && !(call.id && unexecutedCallIds.has(call.id))) return true;
     }
   }
   return false;
@@ -783,7 +836,7 @@ function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools): Tool
 /** Verbatim port of chat-engine.ts's private helper — folds resolved tool-
  *  node actions into the connectors payload (MCP names → allowedTools,
  *  Apex/Flow → customTools). */
-function mergeActionsIntoConnectors(
+export function mergeActionsIntoConnectors(
   connectors: ConnectorInput[] | undefined,
   actions: AgentAction[],
 ): ConnectorInput[] | undefined {

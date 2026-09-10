@@ -22,13 +22,32 @@
  */
 import type { AIMessage } from '@langchain/core/messages';
 
+/** Phase 7 — one billable transition. Model calls carry tokens; tool
+ *  calls carry the name. Emitted at turn end as the `lc_billing` event —
+ *  the per-tenant metering feed (log-based today, durable sink later). */
+export interface BillingEvent {
+  kind: 'model_call' | 'tool_call';
+  stage: string;
+  name?: string;
+  model?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  cacheRead?: number;
+}
+
+const MAX_EVENTS = 300;
+
 export interface TurnBudget {
   deadlineAt: number;
   maxTokens: number;
   maxSteps: number;
   tokensUsed: number;
+  tokensIn: number;
+  tokensOut: number;
   cacheReadTokens: number;
+  modelCalls: number;
   steps: number;
+  events: BillingEvent[];
   callCounts: Map<string, number>;
   /** Set when a brake fires — later passes (corrections, regens) skip. */
   tripped: string | null;
@@ -64,8 +83,12 @@ export function createTurnBudget(rootNodeConfig: unknown): TurnBudget {
     maxTokens: pick(cfg.maxTokens, DEFAULT_TOKENS, CEIL_TOKENS),
     maxSteps: pick(cfg.maxSteps, DEFAULT_STEPS, CEIL_STEPS),
     tokensUsed: 0,
+    tokensIn: 0,
+    tokensOut: 0,
     cacheReadTokens: 0,
+    modelCalls: 0,
     steps: 0,
+    events: [],
     callCounts: new Map(),
     tripped: null,
   };
@@ -80,15 +103,25 @@ export function checkBudget(b: TurnBudget): string | null {
   return null;
 }
 
-/** Accumulate real usage from a model response. */
-export function noteUsage(b: TurnBudget, msg: AIMessage): void {
+/** Accumulate real usage from a model response; each call is also one
+ *  billable transition (Phase 7). */
+export function noteUsage(b: TurnBudget, msg: AIMessage, stage = 'model', model?: string): void {
+  b.modelCalls += 1;
   const u = msg.usage_metadata;
   if (!u) return;
-  b.tokensUsed += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+  const tokensIn = u.input_tokens ?? 0;
+  const tokensOut = u.output_tokens ?? 0;
+  b.tokensUsed += tokensIn + tokensOut;
+  b.tokensIn += tokensIn;
+  b.tokensOut += tokensOut;
   // Cache-hit visibility (the "highest-value alert"): OpenAI reports
   // cached prompt tokens in input_token_details.cache_read via LangChain.
   const det = (u as { input_token_details?: { cache_read?: number } }).input_token_details;
-  if (det?.cache_read) b.cacheReadTokens += det.cache_read;
+  const cacheRead = det?.cache_read ?? 0;
+  if (cacheRead) b.cacheReadTokens += cacheRead;
+  if (b.events.length < MAX_EVENTS) {
+    b.events.push({ kind: 'model_call', stage, model, tokensIn, tokensOut, ...(cacheRead ? { cacheRead } : {}) });
+  }
 }
 
 /** JSON with sorted keys so identical args always hash identically. */
@@ -100,7 +133,8 @@ function stableStringify(v: unknown): string {
 }
 
 /** Record one tool call; returns its repeat count (1 = first time). */
-export function noteToolCall(b: TurnBudget, name: string, args: unknown): number {
+export function noteToolCall(b: TurnBudget, name: string, args: unknown, stage = 'tools'): number {
+  if (b.events.length < MAX_EVENTS) b.events.push({ kind: 'tool_call', stage, name });
   const sig = `${name}|${stableStringify(args ?? {})}`;
   const count = (b.callCounts.get(sig) ?? 0) + 1;
   b.callCounts.set(sig, count);

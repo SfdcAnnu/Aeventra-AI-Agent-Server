@@ -102,6 +102,10 @@ export function buildPrebuiltTools(
   ctx: TurnContext,
   graph: GraphAdjacency,
   ownerNode: AgentNode,
+  /** Phase 7 — wraps tools whose node is marked requiresApproval so the
+   *  call suspends as a ChatApproval instead of executing. Omitted on the
+   *  approval-execute path (approval is what that path IS). */
+  gate?: (t: StructuredToolInterface) => StructuredToolInterface,
 ): StructuredToolInterface[] {
   const nodes = nextNodes(graph, ownerNode.id, 'tool')
     .filter(n => n.isEnabled && n.nodeType === 'tool' && (n.config as PrebuiltConfig)?.actionType === 'Prebuilt');
@@ -140,10 +144,12 @@ export function buildPrebuiltTools(
       `${cfg.description?.trim() || node.name} ` +
       `[${op} ${object}${bound.size > 0 ? ' — record identity is filled in automatically from this conversation' : ''}]`;
 
-    tools.push(tool(
+    const built = tool(
       async (args: Record<string, unknown>) => executePrebuilt(ctx, op, object, fields, bound, args ?? {}, needsIdParam),
       { name, description, schema: z.object(shape) },
-    ) as StructuredToolInterface);
+    ) as StructuredToolInterface;
+    const needsApproval = (node.config as { requiresApproval?: boolean })?.requiresApproval === true;
+    tools.push(needsApproval && gate ? gate(built) : built);
   }
   return tools;
 }

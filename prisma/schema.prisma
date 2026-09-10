@@ -253,3 +253,33 @@ model KbChunk {
 
   @@index([orgId, agentApiName])
 }
+
+// ── Chat-mode approvals (Phase 7) ───────────────────────────────────
+//
+// A chat tool node marked requiresApproval never executes inline — the
+// call suspends here (the turn continues; the model tells the user the
+// action awaits approval) and POST /api/chat/approvals/decide executes or
+// rejects it later. Trigger-mode already has this via AgentRun's
+// WAITING_APPROVAL; this is the chat-mode counterpart.
+model ChatApproval {
+  id                String    @id @default(uuid())
+  orgId             String
+  agentApiName      String
+  planVersion       String?
+  sessionId         String
+  userId            String
+  recordContextId   String?
+  recordContextType String?
+  toolName          String
+  argsJson          Json
+  status            String    @default("Pending") // Pending | Approved | Rejected | Executed | Failed | Expired
+  resultText        String?
+  decidedBy         String?
+  decidedAt         DateTime?
+  timeoutAt         DateTime
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([orgId, status])
+  @@index([orgId, sessionId])
+}
