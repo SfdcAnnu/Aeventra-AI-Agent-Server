@@ -33,6 +33,10 @@ export interface HandoffToolDef {
 export interface TopLevelResolution {
   topLevelActions: AgentAction[];
   handoffTools: HandoffToolDef[];
+  /** Phase 5 — subagents in call/return mode: exposed to the parent as a
+   *  callable tool that RETURNS a result (the parent keeps the reply).
+   *  Same def shape as handoffs; the runtime executes them differently. */
+  callAgents: HandoffToolDef[];
 }
 
 /**
@@ -96,19 +100,30 @@ export function resolveTopLevelToolsAndSubagents(
 
   const topLevelActions: AgentAction[] = [];
   const handoffTools: HandoffToolDef[] = [];
+  const callAgents: HandoffToolDef[] = [];
 
   for (const node of downstream) {
     if (node.nodeType === 'tool') {
       topLevelActions.push(nodeToAgentAction(node));
     } else if (node.nodeType === 'subagent') {
-      const cfg = node.config as { routingDescription?: string };
+      const cfg = node.config as { routingDescription?: string; mode?: string };
       const description = (cfg.routingDescription ?? '').trim() ||
         `Hand off to the "${node.name}" specialist for this part of the conversation.`;
-      handoffTools.push({
-        name: toolNameSlug('handoff_to', node.name, node.id),
-        description,
-        subagentNodeId: node.id,
-      });
+      if (cfg.mode === 'call') {
+        // Agent-as-tool: call/return. The parent invokes it like a
+        // function and RESUMES with the result — it never loses the reply.
+        callAgents.push({
+          name: toolNameSlug('ask', node.name, node.id),
+          description,
+          subagentNodeId: node.id,
+        });
+      } else {
+        handoffTools.push({
+          name: toolNameSlug('handoff_to', node.name, node.id),
+          description,
+          subagentNodeId: node.id,
+        });
+      }
     }
     // Other node types (e.g. 'catalog') attached directly to the ai node's
     // 'tool' port would be unusual — today's catalog config is read via
@@ -116,7 +131,7 @@ export function resolveTopLevelToolsAndSubagents(
     // here rather than erroring, since it isn't this function's concern.
   }
 
-  return { topLevelActions, handoffTools };
+  return { topLevelActions, handoffTools, callAgents };
 }
 
 /**

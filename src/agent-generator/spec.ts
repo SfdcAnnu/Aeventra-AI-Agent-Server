@@ -180,6 +180,8 @@ export const CHAT_NODE_SPEC: NodeSpecEntry[] = [
     fields: [
       { key: 'model', type: 'text', description: 'Leave "" to inherit the top-level agent\'s provider/model — the common case. Only set claude/gpt4/gemini explicitly if this specialist genuinely needs a different one.' },
       { key: 'routingDescription', type: 'text', description: 'Shown to the TOP-LEVEL model as this subagent\'s "tool" description — this is what actually drives when it gets picked, so be specific about what belongs here vs. other subagents.', example: 'Handles billing questions, invoice lookups, and payment disputes.' },
+      { key: 'mode', type: 'picklist(transfer,call)', description: 'transfer (DEFAULT for conversation): the specialist replies to the customer directly — lowest latency for reply-owning specialists. call: agent-as-tool — the root gives it a task, gets a RESULT back, and keeps the reply. Use call when the root owns the outcome (research, scoring, drafting); use transfer when the specialist owns the conversation.' },
+      { key: 'contextPolicy', type: 'picklist(isolated,windowed,full)', description: 'call mode only. isolated (DEFAULT): the specialist sees only its task — token cost stays flat regardless of specialist count; it still knows the anchored record. windowed: recent turns + task. full: entire conversation — expensive, use only when genuinely needed.' },
       { key: 'systemPrompt', type: 'textarea', description: 'This specialist\'s own full persona and instructions, independent of the top-level agent\'s.' },
     ],
   },
