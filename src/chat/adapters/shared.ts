@@ -446,9 +446,11 @@ export async function buildSystemPromptParts(
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     stableParts.push(config.systemPrompt);
   }
+  // Runtime mechanics only — no provider assumptions, no style opinions
+  // (tone/verbosity belong to each agent's own instructions).
   stableParts.push(
-    'You have access to Salesforce tools through a Model Context Protocol server. ' +
-    'Use them to look up records, run SOQL, or take actions when the user asks. Be concise.',
+    'You have access to the tools connected to this agent. Use them to look up real data or take actions when ' +
+    'the conversation calls for it — never invent a value a tool can fetch.',
   );
   stableParts.push(
     'CRITICAL — never end your turn on a narration-only sentence. ' +
