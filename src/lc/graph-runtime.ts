@@ -51,7 +51,7 @@ import {
   toSyntheticAiNode,
   type HandoffToolDef,
 } from '../chat/subagent-router';
-import { buildSystemPrompt, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry } from '../chat/adapters/shared';
+import { buildSystemPromptParts, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry, type SystemPromptParts } from '../chat/adapters/shared';
 import {
   readGuardrailsConfig,
   findGuardrailViolations,
@@ -91,6 +91,22 @@ const TurnState = Annotation.Root({
   ...MessagesAnnotation.spec,
   handoffNodeId: Annotation<string | null>({ reducer: (_a, b) => b, default: () => null }),
 });
+
+/** Cache-aware system message. Anthropic gets an explicit cache_control
+ *  breakpoint after the stable block; OpenAI/Gemini cache automatically on
+ *  a byte-stable prefix, so they get plain text with stable-first order. */
+function cacheAwareSystem(nodeSubType: string, parts: SystemPromptParts): SystemMessage {
+  if (nodeSubType === 'claude') {
+    const blocks: Array<Record<string, unknown>> = [
+      { type: 'text', text: parts.stable, cache_control: { type: 'ephemeral' } },
+    ];
+    if (parts.volatile) blocks.push({ type: 'text', text: parts.volatile });
+    return new SystemMessage({ content: blocks as never });
+  }
+  return new SystemMessage(parts.volatile ? `${parts.stable}
+
+${parts.volatile}` : parts.stable);
+}
 
 export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult> {
   const aiNode = req.agent.nodes.find(n => n.nodeType === 'ai') ?? null;
@@ -138,7 +154,9 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
     graph, aiNode,
   );
-  const routerTools = [...loaded.tools, ...prebuiltTools];
+  // Byte-stable tool ordering — part of the cacheable prefix on every
+  // provider; unordered tools silently change the prefix hash per request.
+  const routerTools = [...loaded.tools, ...prebuiltTools].sort((a, b) => a.name.localeCompare(b.name));
 
   try {
     const { model: routerBase, modelName } = buildChatModel(
@@ -147,9 +165,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       req.engineOverride,
     );
 
-    const systemPrompt = await buildSystemPrompt(
+    const promptParts = await buildSystemPromptParts(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
     );
+    const systemMessage = cacheAwareSystem(aiNode.nodeSubType, promptParts);
 
     const attachments = (req.attachments && req.attachments.length > 0)
       ? await loadAttachments(req.context.orgId, req.attachments)
@@ -185,7 +204,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       budget.steps += 1;
 
       const response = (await routerModel.invoke([
-        new SystemMessage(systemPrompt),
+        systemMessage,
         ...state.messages,
       ])) as AIMessage;
       noteUsage(budget, response);
@@ -271,7 +290,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         servers: servers.map(s => ({ name: s.name, url: s.url, allowedTools: s.allowedTools })),
         toolsBound: routerTools.map(t => t.name),
         handoffTools: handoffTools.map(h => h.name),
-        systemPromptChars: systemPrompt.length,
+        systemPromptChars: promptParts.stable.length + promptParts.volatile.length,
+        stablePrefixChars: promptParts.stable.length,
       });
     }
 
@@ -310,7 +330,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       logger.warn({ orgId: req.context.orgId, deferral: Boolean(assistantText) }, 'lc_narration_only_continuation');
       budget.steps += 1;
       const followup = (await routerModel.invoke([
-        new SystemMessage(systemPrompt),
+        systemMessage,
         ...sanitizeToolPairs(state.messages),
         new HumanMessage('Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.'),
       ])) as AIMessage;
@@ -371,7 +391,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         
         try {
           const corrected = (await routerModel.invoke([
-            new SystemMessage(systemPrompt),
+            systemMessage,
             ...sanitizeToolPairs(state.messages),
             new HumanMessage(
               'REWRITE your last reply to the customer. It broke hard rules: ' + violations.join('; ') + '. ' +
@@ -409,7 +429,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     }
 
     logger.info({
-      orgId: req.context.orgId, tokensIn, tokensOut, toolCallCount: toolCalls.length, ms: Date.now() - t0,
+      orgId: req.context.orgId, tokensIn, tokensOut, cacheRead: budget.cacheReadTokens,
+      toolCallCount: toolCalls.length, ms: Date.now() - t0,
       subagent: activeSubagentName,
       reply: assistantText.slice(0, 400),
     }, 'lc_turn_complete');
@@ -478,15 +499,16 @@ async function runSubagentTurn(
       (synthetic.config as { model?: string })?.model,
       req.engineOverride,
     );
-    const systemPrompt = await buildSystemPrompt(
+    const subParts = await buildSystemPromptParts(
       req.agent, synthetic, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
     );
+    const subSystem = cacheAwareSystem(synthetic.nodeSubType, subParts);
     if (!model.bindTools) throw new Error(`Model for ${synthetic.nodeSubType} does not support tool binding.`);
     const subPrebuilt = buildPrebuiltTools(
       { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
       graph, subagentNode,
     );
-    const subTools = [...loaded.tools, ...subPrebuilt];
+    const subTools = [...loaded.tools, ...subPrebuilt].sort((a, b) => a.name.localeCompare(b.name));
     const bound = model.bindTools(subTools);
 
     const subNode = async (state: typeof MessagesAnnotation.State) => {
@@ -497,7 +519,7 @@ async function runSubagentTurn(
         return { messages: [new AIMessage(BUDGET_TRIPPED_REPLY)] };
       }
       budget.steps += 1;
-      const response = (await bound.invoke([new SystemMessage(systemPrompt), ...state.messages])) as AIMessage;
+      const response = (await bound.invoke([subSystem, ...state.messages])) as AIMessage;
       noteUsage(budget, response);
       // Loop detector applies to subagent tool calls too.
       for (const c of response.tool_calls ?? []) noteToolCall(budget, c.name, c.args);
