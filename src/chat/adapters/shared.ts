@@ -440,15 +440,16 @@ export async function buildSystemPromptParts(
   // modality, or platform assumptions here (a voice agent runs the same
   // runtime); everything about WHAT the agent is comes from the client's
   // instructions screen (the AI node's systemPrompt).
-  stableParts.push(`You are ${agent.name}.`);
+  //stableParts.push(`You are ${agent.name}.`);
   // Business Rules/Knowledge (the agent's own Notes field) and uploaded/
   // indexed KB documents are different kinds of content — hand-written
   // instructions vs. searchable reference material — and are additive.
-  if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
-    stableParts.push('BUSINESS RULES / KNOWLEDGE (always apply these):\n' + agent.knowledgeBase);
-  }
+ 
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     stableParts.push(config.systemPrompt);
+  }
+   if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
+    stableParts.push('BUSINESS RULES / KNOWLEDGE (always apply these):\n' + agent.knowledgeBase);
   }
   // Runtime mechanics only — no provider assumptions, no style opinions
   // (tone/verbosity belong to each agent's own instructions).
@@ -483,9 +484,12 @@ export async function buildSystemPromptParts(
   // Session memory (facts + summary of older turns) — see chat/memory.ts.
   if (memoryPreamble && memoryPreamble.trim().length > 0) volatileParts.push(memoryPreamble);
   if (ctx.recordContextId) {
+    // Record anchoring — a runtime FACT (which record this session is
+    // attached to), phrased modality-neutrally: works for an embedded
+    // widget, WhatsApp, or a voice call alike.
     volatileParts.push(
-      `The user is viewing the ${ctx.recordContextType ?? 'record'} with Id ${ctx.recordContextId}. ` +
-      `You may reference it when calling tools.`,
+      `This conversation is anchored to the ${ctx.recordContextType ?? 'record'} with Id ${ctx.recordContextId}. ` +
+      `Use this record as the context for lookups and actions unless told otherwise.`,
     );
   }
 
