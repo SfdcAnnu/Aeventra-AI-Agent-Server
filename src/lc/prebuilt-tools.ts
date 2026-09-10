@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { nextNodes, type GraphAdjacency } from '../orchestrator/graph';
 import { logger } from '../logger';
+import { spillIfLarge } from './artifact-store';
 import type { AgentNode } from '../types';
 
 const SAFE_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,80}$/;
@@ -195,7 +196,7 @@ async function executePrebuilt(
       const safeId = recordId.replace(/[^a-zA-Z0-9]/g, '');
       const r = await conn.query<Record<string, unknown>>(
         `SELECT ${[...fieldNames].join(', ')} FROM ${object} WHERE Id = '${safeId}' LIMIT 1`);
-      return r.records.length ? JSON.stringify(r.records[0]).slice(0, 2000) : `No ${object} found with Id ${safeId}.`;
+      return r.records.length ? spillIfLarge('prebuilt_get', JSON.stringify(r.records[0])) : `No ${object} found with Id ${safeId}.`;
     }
 
     // search — equality/LIKE over the provided params, ticked fields returned.
@@ -210,7 +211,7 @@ async function executePrebuilt(
     if (clauses.length === 0) return 'Error: provide at least one field value to search by.';
     const soql = `SELECT Id, ${[...fieldNames].join(', ')} FROM ${object} WHERE ${clauses.join(' AND ')} LIMIT 10`;
     const r = await conn.query<Record<string, unknown>>(soql);
-    return JSON.stringify({ totalSize: r.records.length, records: r.records }).slice(0, 3000);
+    return spillIfLarge('prebuilt_search', JSON.stringify({ totalSize: r.records.length, records: r.records }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ orgId: ctx.orgId, op, object, err: msg }, 'prebuilt_tool_failed');
