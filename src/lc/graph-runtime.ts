@@ -66,7 +66,7 @@ import { generateSessionTitleAsync } from '../chat/title-generator';
 import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
 import { buildPrebuiltTools } from './prebuilt-tools';
-import { buildReadArtifactTool } from './artifact-store';
+import { buildReadArtifactTool, spillIfLarge } from './artifact-store';
 import {
   createTurnBudget,
   checkBudget,
@@ -119,7 +119,12 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   }
 
   const graph = buildGraph(req.agent);
-  const { topLevelActions, handoffTools } = resolveTopLevelToolsAndSubagents(req.agent, graph, aiNode);
+  const { topLevelActions, handoffTools, callAgents } = resolveTopLevelToolsAndSubagents(req.agent, graph, aiNode);
+
+  // Phase 5: writes performed inside a called specialist count for the
+  // action-claim guard even though they never appear in the parent's own
+  // message state.
+  const turnFlags = { childWrote: false };
 
   // Memory read path — identical to the original (see chat/memory.ts).
   const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
@@ -177,6 +182,49 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     const baseMessages = toLangchainMessages(assembled.history, req.newUserMessage, attachments);
 
+    // Phase 5 — call/return specialists as REAL executable tools: the
+    // ToolNode runs the child turn and the result comes back as a normal
+    // tool message; the router resumes and keeps the reply. Context per
+    // the child's policy: isolated (task only — the child's own system
+    // prompt still carries record anchoring), windowed (recent turns), or
+    // full. Children get no call/handoff tools of their own — the depth
+    // cap is structural.
+    const buildCallContext = (policy: string | undefined, task: string): BaseMessage[] => {
+      const taskMsg = new HumanMessage(`TASK FROM THE LEAD AGENT: ${task}`);
+      if (policy === 'full') return [...baseMessages, taskMsg];
+      if (policy === 'windowed') return [...baseMessages.slice(-6), taskMsg];
+      return [taskMsg]; // isolated — the default, and the cheapest
+    };
+    const callAgentTools = callAgents.map(c => {
+      const subagentNode = req.agent.nodes.find(n => n.id === c.subagentNodeId);
+      return tool(
+        async ({ task }: { task: string }) => {
+          if (!subagentNode) return 'That specialist is unavailable.';
+          if (checkBudget(budget)) return 'Budget exhausted — answer with what you already have.';
+          try {
+            const policy = (subagentNode.config as { contextPolicy?: string })?.contextPolicy;
+            const out = await runSubagentTurn(
+              req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
+              buildCallContext(policy, task), budget,
+            );
+            if (turnHasWrite(out.messages)) turnFlags.childWrote = true;
+            const text = lastAssistantText(out.messages) || '(the specialist produced no result)';
+            return spillIfLarge(c.name, text);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error({ orgId: req.context.orgId, specialist: subagentNode.name, err: msg }, 'lc_call_agent_failed');
+            return `Specialist failed: ${msg.slice(0, 200)}. Continue without it or try another approach.`;
+          }
+        },
+        {
+          name: c.name,
+          description: `${c.description} Returns the specialist's result to you — you stay in control of the reply.`,
+          schema: z.object({ task: z.string().describe('The specific job for this specialist — include every fact and value it needs.') }),
+        },
+      ) as StructuredToolInterface;
+    });
+    const allRouterTools = [...routerTools, ...callAgentTools];
+
     // Handoff tools — same slugged names/descriptions subagent-router built.
     const handoffLcTools = handoffTools.map(h =>
       tool(async () => `Handing off to ${h.name}.`, {
@@ -187,7 +235,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     );
 
     if (!routerBase.bindTools) throw new Error(`Model for ${aiNode.nodeSubType} does not support tool binding.`);
-    const routerModel = routerBase.bindTools([...routerTools, ...handoffLcTools]);
+    const routerModel = routerBase.bindTools([...allRouterTools, ...handoffLcTools]);
     const handoffByName = new Map(handoffTools.map(h => [h.name, h]));
 
     // ── Router node: answer → END; handoff → mark + END (the subagent turn
@@ -248,7 +296,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     const compiled = new StateGraph(TurnState)
       .addNode('router', routerNode, { ends: [END, 'tools', 'router'] })
-      .addNode('tools', new ToolNode(routerTools))
+      .addNode('tools', new ToolNode(allRouterTools))
       .addEdge(START, 'router')
       .addEdge('tools', 'router')
       .compile();
@@ -289,7 +337,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         stage: 'router',
         model: modelName,
         servers: servers.map(s => ({ name: s.name, url: s.url, allowedTools: s.allowedTools })),
-        toolsBound: routerTools.map(t => t.name),
+        toolsBound: allRouterTools.map(t => t.name),
         handoffTools: handoffTools.map(h => h.name),
         systemPromptChars: promptParts.stable.length + promptParts.volatile.length,
         stablePrefixChars: promptParts.stable.length,
@@ -353,7 +401,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       for (let attempt = 0; attempt < 2; attempt++) {
         if (checkBudget(budget)) break;
         const claim = findActionClaim(assistantText);
-        if (!claim || turnHasWrite(state.messages)) break;
+        if (!claim || turnHasWrite(state.messages) || turnFlags.childWrote) break;
         logger.warn({ orgId: req.context.orgId, claim, attempt }, 'lc_action_claim_without_write');
         try {
           const correction = new HumanMessage(ACTION_CLAIM_CORRECTION);
