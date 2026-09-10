@@ -27,6 +27,7 @@ export interface TurnBudget {
   maxTokens: number;
   maxSteps: number;
   tokensUsed: number;
+  cacheReadTokens: number;
   steps: number;
   callCounts: Map<string, number>;
   /** Set when a brake fires — later passes (corrections, regens) skip. */
@@ -63,6 +64,7 @@ export function createTurnBudget(rootNodeConfig: unknown): TurnBudget {
     maxTokens: pick(cfg.maxTokens, DEFAULT_TOKENS, CEIL_TOKENS),
     maxSteps: pick(cfg.maxSteps, DEFAULT_STEPS, CEIL_STEPS),
     tokensUsed: 0,
+    cacheReadTokens: 0,
     steps: 0,
     callCounts: new Map(),
     tripped: null,
@@ -81,7 +83,12 @@ export function checkBudget(b: TurnBudget): string | null {
 /** Accumulate real usage from a model response. */
 export function noteUsage(b: TurnBudget, msg: AIMessage): void {
   const u = msg.usage_metadata;
-  if (u) b.tokensUsed += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+  if (!u) return;
+  b.tokensUsed += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+  // Cache-hit visibility (the "highest-value alert"): OpenAI reports
+  // cached prompt tokens in input_token_details.cache_read via LangChain.
+  const det = (u as { input_token_details?: { cache_read?: number } }).input_token_details;
+  if (det?.cache_read) b.cacheReadTokens += det.cache_read;
 }
 
 /** JSON with sorted keys so identical args always hash identically. */

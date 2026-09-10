@@ -401,7 +401,30 @@ export function summarizeToolHistoryEntry(m: { content: string; toolCallsJson?: 
   return `[Earlier tool result — ${name}: ${clipped}\nReuse exact Ids/values from here in later turns; never invent or truncate them.]`;
 }
 
-export async function buildSystemPrompt(
+/** Whitespace normalization so the stable prefix is byte-identical on
+ *  every request (prompt-cache rule: a single drifting byte turns every
+ *  cache read into a paid cache write). */
+export function normalizePromptText(s: string): string {
+  return s
+    .replace(/\r\n/g, '\n')
+    .split('\n').map(line => line.replace(/[ \t]+$/g, '')).join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export interface SystemPromptParts {
+  /** Byte-identical for every turn of this agent version — the cacheable
+   *  prefix. Identity, business rules, instructions, platform rules. */
+  stable: string;
+  /** Varies per turn/session — date, retrieved KB, memory, record context.
+   *  Always placed BELOW the cache breakpoint. */
+  volatile: string;
+}
+
+/** The cache-aware split. NOTHING volatile may enter `stable`: the old
+ *  layout put a per-second timestamp as line two of the prompt, which
+ *  would have made every request a cache write and none a read. */
+export async function buildSystemPromptParts(
   agent: AgentDefinition,
   aiNode: AgentNode,
   ctx:   ChatTurnRequest['context'],
@@ -409,55 +432,25 @@ export async function buildSystemPrompt(
   engineOverride?: EngineOverrideInput | null,
   memoryPreamble?: string | null,
   extraContext?: string | null,
-): Promise<string> {
+): Promise<SystemPromptParts> {
   const config = (aiNode.config as { systemPrompt?: string }) ?? {};
-  const parts: string[] = [];
 
-  parts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
-
-  // Models have no clock — without this, any "tomorrow"/"next week" they
-  // compute (Task due dates, Event start times) lands on a training-era
-  // date (live-confirmed: an Event scheduled for 2023).
-  parts.push(`Current date and time (UTC): ${new Date().toISOString()}`);
-
+  const stableParts: string[] = [];
+  stableParts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
   // Business Rules/Knowledge (the agent's own Notes field) and uploaded/
   // indexed KB documents are different kinds of content — hand-written
   // instructions vs. searchable reference material — and are additive.
-  // Previously this was an either/or: once ANY document got indexed, the
-  // Notes text silently stopped reaching the model at all.
   if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
-    parts.push('BUSINESS RULES / KNOWLEDGE (always apply these):\n' + agent.knowledgeBase);
-  }
-  const kbBlock = await buildKbBlock(ctx.orgId, agent, query, engineOverride);
-  if (kbBlock) {
-    parts.push(kbBlock);
+    stableParts.push('BUSINESS RULES / KNOWLEDGE (always apply these):\n' + agent.knowledgeBase);
   }
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
-    parts.push(config.systemPrompt);
+    stableParts.push(config.systemPrompt);
   }
-  // System-computed facts (e.g. the ALLOWED PRICING block from
-  // e.g. system-computed facts) — deterministic values the model must use
-  // verbatim instead of computing its own.
-  if (extraContext && extraContext.trim().length > 0) {
-    parts.push(extraContext);
-  }
-  // Session memory (facts + summary of older turns) — see chat/memory.ts.
-  // Placed right after the agent's own instructions so exact record Ids and
-  // the conversation's standing context sit top-of-mind for the model.
-  if (memoryPreamble && memoryPreamble.trim().length > 0) {
-    parts.push(memoryPreamble);
-  }
-  if (ctx.recordContextId) {
-    parts.push(
-      `The user is viewing the ${ctx.recordContextType ?? 'record'} with Id ${ctx.recordContextId}. ` +
-      `You may reference it when calling tools.`,
-    );
-  }
-  parts.push(
+  stableParts.push(
     'You have access to Salesforce tools through a Model Context Protocol server. ' +
     'Use them to look up records, run SOQL, or take actions when the user asks. Be concise.',
   );
-  parts.push(
+  stableParts.push(
     'CRITICAL — never end your turn on a narration-only sentence. ' +
     'A phrase like "let me check that," "let me get that updated," or "let me look that up" is a placeholder, ' +
     'not a reply — the user cannot see that you called a tool or whether it worked. ' +
@@ -469,5 +462,44 @@ export async function buildSystemPrompt(
     'or if the tool call failed, say so and what you\'ll do instead. Silently stopping after a narration sentence, ' +
     'with or without a successful tool call behind it, is always wrong.',
   );
-  return parts.join('\n\n');
+
+  const volatileParts: string[] = [];
+  // Models have no clock — without this, any "tomorrow"/"next week" they
+  // compute (Task due dates, Event start times) lands on a training-era
+  // date (live-confirmed: an Event scheduled for 2023). Lives BELOW the
+  // cache breakpoint precisely because it changes every second.
+  volatileParts.push(`Current date and time (UTC): ${new Date().toISOString()}`);
+  const kbBlock = await buildKbBlock(ctx.orgId, agent, query, engineOverride);
+  if (kbBlock) volatileParts.push(kbBlock);
+  // System-computed facts — deterministic values the model must use
+  // verbatim instead of computing its own.
+  if (extraContext && extraContext.trim().length > 0) volatileParts.push(extraContext);
+  // Session memory (facts + summary of older turns) — see chat/memory.ts.
+  if (memoryPreamble && memoryPreamble.trim().length > 0) volatileParts.push(memoryPreamble);
+  if (ctx.recordContextId) {
+    volatileParts.push(
+      `The user is viewing the ${ctx.recordContextType ?? 'record'} with Id ${ctx.recordContextId}. ` +
+      `You may reference it when calling tools.`,
+    );
+  }
+
+  return {
+    stable: normalizePromptText(stableParts.join('\n\n')),
+    volatile: normalizePromptText(volatileParts.join('\n\n')),
+  };
+}
+
+/** Joined form for callers that don't need the cache split (legacy
+ *  adapters, the agent generator). Same content, same order. */
+export async function buildSystemPrompt(
+  agent: AgentDefinition,
+  aiNode: AgentNode,
+  ctx:   ChatTurnRequest['context'],
+  query: string,
+  engineOverride?: EngineOverrideInput | null,
+  memoryPreamble?: string | null,
+  extraContext?: string | null,
+): Promise<string> {
+  const parts = await buildSystemPromptParts(agent, aiNode, ctx, query, engineOverride, memoryPreamble, extraContext);
+  return parts.volatile ? `${parts.stable}\n\n${parts.volatile}` : parts.stable;
 }
