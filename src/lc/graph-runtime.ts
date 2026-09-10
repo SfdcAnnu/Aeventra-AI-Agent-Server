@@ -123,8 +123,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
   // Phase 5: writes performed inside a called specialist count for the
   // action-claim guard even though they never appear in the parent's own
-  // message state.
-  const turnFlags = { childWrote: false };
+  // message state. Phase 6: activeCalls caps concurrent specialists per
+  // fan-out (ToolNode executes a response's tool calls with Promise.all).
+  const turnFlags = { childWrote: false, activeCalls: 0 };
+  const MAX_PARALLEL_CALLS = Number(process.env.TURN_MAX_PARALLEL_CALLS) > 0
+    ? Number(process.env.TURN_MAX_PARALLEL_CALLS) : 4;
 
   // Memory read path — identical to the original (see chat/memory.ts).
   const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
@@ -201,6 +204,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         async ({ task }: { task: string }) => {
           if (!subagentNode) return 'That specialist is unavailable.';
           if (checkBudget(budget)) return 'Budget exhausted — answer with what you already have.';
+          if (turnFlags.activeCalls >= MAX_PARALLEL_CALLS) {
+            return 'Parallel specialist limit reached for this step — call this specialist again in your next step if still needed.';
+          }
+          turnFlags.activeCalls += 1;
           try {
             const policy = (subagentNode.config as { contextPolicy?: string })?.contextPolicy;
             const out = await runSubagentTurn(
@@ -214,6 +221,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
             const msg = err instanceof Error ? err.message : String(err);
             logger.error({ orgId: req.context.orgId, specialist: subagentNode.name, err: msg }, 'lc_call_agent_failed');
             return `Specialist failed: ${msg.slice(0, 200)}. Continue without it or try another approach.`;
+          } finally {
+            turnFlags.activeCalls -= 1;
           }
         },
         {
@@ -279,6 +288,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         });
       }
       if (calls.length > 0) {
+        const fanout = calls.filter(c => c.name.startsWith('ask_')).length;
+        if (fanout > 1) {
+          logger.info({ orgId: req.context.orgId, specialists: fanout }, 'lc_parallel_fanout');
+        }
         // Loop detector: when EVERY call in this response is an identical
         // repeat, answer them with a corrective result and return to the
         // router instead of paying to re-execute (persistent repetition

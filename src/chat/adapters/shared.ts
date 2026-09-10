@@ -455,7 +455,8 @@ export async function buildSystemPromptParts(
   // (tone/verbosity belong to each agent's own instructions).
   stableParts.push(
     'You have access to the tools connected to this agent. Use them to look up real data or take actions when ' +
-    'the conversation calls for it — never invent a value a tool can fetch.',
+    'the conversation calls for it — never invent a value a tool can fetch. When several tool calls are ' +
+    'independent of each other, make them in ONE response — they execute in parallel.',
   );
   stableParts.push(
     'CRITICAL — never end your turn on a narration-only sentence. ' +
