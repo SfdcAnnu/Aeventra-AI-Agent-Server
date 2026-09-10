@@ -198,7 +198,7 @@ export const CHAT_NODE_SPEC: NodeSpecEntry[] = [
       { key: 'boundFields', type: 'string[]', description: 'Prebuilt only: fields the SERVER injects from the anchored record of the conversation — ["WhatId","WhoId"] on create (Task/Event-style), ["Id"] on update/get of the anchored record. Strongly preferred when applicable: the AI then cannot pass a wrong Id.' },
       { key: 'toolName', type: 'text', description: 'The specific tool name, best-guessed from the CONNECTED PROVIDERS list — the user corrects it via the tool picker if needed.' },
       { key: 'connectorId', type: 'text', description: 'Leave empty string — the user binds this after connecting the provider.' },
-      { key: 'requiresApproval', type: 'toggle', description: 'true if this action is costly/irreversible and the requirement mentions review or approval before it fires.' },
+      { key: 'requiresApproval', type: 'toggle', description: 'true if this action is costly/irreversible and the requirement mentions review or approval before it fires. The runtime SUSPENDS such calls as pending approval requests instead of executing them — a human approves or rejects each one later.' },
     ],
   },
   { type: 'catalog', subType: 'salesforce_crm_tools', label: 'Salesforce Tools (catalog)', when: 'Attach to the ai or subagent node it belongs to (on that node\'s "tool" port) so it can look up/query/act on Salesforce data itself mid-conversation.', ports: [],

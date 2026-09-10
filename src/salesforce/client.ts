@@ -2,6 +2,7 @@ import jsforce, { Connection } from 'jsforce';
 import { config } from '../config';
 import { logger } from '../logger';
 import type { AgentDefinition, AgentNode } from '../types';
+import { fnv1a } from '../util/hash';
 
 /**
  * Salesforce OAuth 2.0 Client Credentials Flow.
@@ -139,7 +140,7 @@ export async function loadAgentDefinition(apiName: string, connOverride?: Connec
     mcpTool: r.McpTool__c ?? null,
   }));
 
-  return {
+  const agent: AgentDefinition = {
     id: def.Id,
     name: def.Name,
     apiName: def.ApiName__c,
@@ -151,6 +152,10 @@ export async function loadAgentDefinition(apiName: string, connOverride?: Connec
     externalServerUrl: def.ExternalServerUrl__c,
     nodes,
   };
+  // Phase 7 — planVersion: content hash of everything loaded above. Any
+  // edit to a node, config, prompt or wire yields a new stamp.
+  agent.planVersion = fnv1a(JSON.stringify(agent));
+  return agent;
 }
 
 function safeJson<T = unknown>(s: string): T {

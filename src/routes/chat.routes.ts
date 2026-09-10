@@ -15,6 +15,8 @@ import { logger } from '../logger';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { runChatTurn } from '../chat/chat-engine';
+import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
+import { executeApprovedAction } from '../chat/approval-executor';
 
 export const chatRouter = Router();
 
@@ -115,5 +117,72 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
   }
 });
 
-// /api/chat/approve-tool removed — Managed MCP providers execute tools
-// directly, so there is no approval pause to resume from.
+// ── Phase 7 — chat-mode approvals (approval-as-suspension) ──────────
+// A tool node marked requiresApproval suspends its call as a ChatApproval
+// row instead of executing (lc/approval-gate.ts). These endpoints are the
+// decide surface: list what is pending, then approve (executes the stored
+// call now, via chat/approval-executor.ts) or reject.
+
+chatRouter.get('/api/chat/approvals', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  try {
+    const approvals = await ChatApprovalsRepo.listForOrg(orgId, {
+      status: typeof req.query.status === 'string' ? req.query.status : undefined,
+      sessionId: typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined,
+    });
+    res.json({ approvals });
+  } catch (err) {
+    logger.error({ err, orgId }, 'chat_approvals_list_failed');
+    res.status(500).json({ error: 'chat_approvals_list_failed' });
+  }
+});
+
+const decideSchema = z.object({
+  approvalId: z.string().min(1),
+  decision: z.enum(['approved', 'rejected']),
+  deciderUserId: z.string().nullish(),
+});
+
+chatRouter.post('/api/chat/approvals/decide', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const parsed = decideSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
+    return;
+  }
+  const { approvalId, decision, deciderUserId } = parsed.data;
+  try {
+    const row = await ChatApprovalsRepo.findForOrg(orgId, approvalId);
+    if (!row) {
+      res.status(404).json({ error: 'approval_not_found' });
+      return;
+    }
+    // Atomic claim — only a Pending, unexpired row can be decided, and two
+    // concurrent decisions can never both win.
+    const claimed = await ChatApprovalsRepo.claimPending(
+      orgId, approvalId, decision === 'approved' ? 'Approved' : 'Rejected', deciderUserId,
+    );
+    if (!claimed) {
+      res.status(409).json({ error: 'approval_not_pending', status: row.status });
+      return;
+    }
+    if (decision === 'rejected') {
+      logger.info({ orgId, approvalId, tool: row.toolName }, 'chat_approval_rejected');
+      res.json({ status: 'Rejected' });
+      return;
+    }
+    try {
+      const resultText = await executeApprovedAction(row);
+      await ChatApprovalsRepo.recordExecution(approvalId, true, resultText);
+      res.json({ status: 'Executed', resultText: resultText.slice(0, 2000) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ orgId, approvalId, tool: row.toolName, err: msg }, 'chat_approval_execute_failed');
+      await ChatApprovalsRepo.recordExecution(approvalId, false, msg);
+      res.json({ status: 'Failed', error: msg.slice(0, 500) });
+    }
+  } catch (err) {
+    logger.error({ err, orgId, approvalId }, 'chat_approval_decide_failed');
+    res.status(500).json({ error: 'chat_approval_decide_failed' });
+  }
+});

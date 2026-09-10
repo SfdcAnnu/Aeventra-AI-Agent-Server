@@ -102,6 +102,10 @@ export interface AgentDefinition {
   accessMode?: string;
   canvasJson?: { connections: AgentConnection[] };
   externalServerUrl?: string;
+  /** Phase 7 — content hash of the loaded definition (nodes + config +
+   *  wiring). Changes whenever the agent is edited; stamped into every
+   *  turn/billing log so behavior correlates to the exact plan version. */
+  planVersion?: string;
   nodes: AgentNode[];
 }
 
