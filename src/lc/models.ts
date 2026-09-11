@@ -41,11 +41,20 @@ export interface BuiltModel {
   engineType: 'openai' | 'claude' | 'gemini';
 }
 
+export interface ModelOptions {
+  /** Force a JSON object response (OpenAI json_object mode). */
+  jsonMode?: boolean;
+  /** How much a reasoning-era model may think before answering. Ignored
+   *  by models that do not reason. */
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+}
+
 export function buildChatModel(
   nodeSubType: string,
   nodeModel: string | undefined,
   engineOverride: EngineOverride | null | undefined,
   maxTokens = 8_000,
+  options: ModelOptions = {},
 ): BuiltModel {
   const engineType = engineTypeForSubtype(nodeSubType);
   const creds = resolveEngine(engineType, engineOverride);
@@ -55,12 +64,22 @@ export function buildChatModel(
   switch (engineType) {
     case 'openai': {
       const reasoningEra = NEEDS_MAX_COMPLETION_TOKENS.test(modelName);
+      const kwargs: Record<string, unknown> = {};
+      if (reasoningEra) {
+        // max_completion_tokens covers REASONING PLUS the visible answer on
+        // these models, so a cap sized for the answer alone can be spent
+        // entirely on thinking and return empty content (live-confirmed on
+        // gpt-5.5: the Flow Designer came back with nothing). Give the
+        // thinking its own headroom on top of the caller's cap.
+        kwargs.max_completion_tokens = Math.max(maxTokens * 3, 16_000);
+        if (options.reasoningEffort) kwargs.reasoning_effort = options.reasoningEffort;
+      }
+      if (options.jsonMode) kwargs.response_format = { type: 'json_object' };
       model = new ChatOpenAI({
         model: modelName,
         apiKey: creds.apiKey,
-        // Reasoning-era models take the cap under a different name, and
-        // reject the old one outright rather than ignoring it.
-        ...(reasoningEra ? { modelKwargs: { max_completion_tokens: maxTokens } } : { maxTokens }),
+        ...(reasoningEra ? {} : { maxTokens }),
+        ...(Object.keys(kwargs).length > 0 ? { modelKwargs: kwargs } : {}),
         configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
       });
       break;
