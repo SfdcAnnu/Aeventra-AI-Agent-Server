@@ -240,7 +240,8 @@ export async function callSpecialist<T = unknown>(opts: {
   // Knowledge FIRST and byte-identical per specialist: it is the cacheable
   // prefix, and anything volatile above it would destroy the discount.
   const knowledge = opts.includeKnowledge === false ? '' : loadKnowledgeFor(node.id);
-  const system = (knowledge ? knowledge + '\n\n' : '') + `## Your role\n${node.instructions ?? ''}`;
+  const roleText = opts.instructionsOverride ?? node.instructions ?? '';
+  const system = (knowledge ? knowledge + '\n\n' : '') + `## Your role\n${roleText}`;
   const user = JSON.stringify(opts.input, null, 1);
 
   const t0 = Date.now();
