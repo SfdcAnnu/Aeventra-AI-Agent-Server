@@ -361,7 +361,10 @@ connectorsRouter.post('/api/mcp-tool-schemas', sessionAuth, async (req, res) => 
       // Not a failure of ours — the tool server is throttling. Say so in
       // the client's vocabulary and let the UI retry, rather than a 502.
       logger.warn({ orgId, provider }, 'mcp_tool_schemas_rate_limited');
-      res.status(503).json({
+      // 429, NOT 503: Apex maps any 502/503 from this server to its
+      // "Archon is waking up" retry signal, which would put a wrong
+      // explanation in front of the user for a throttled tool host.
+      res.status(429).json({
         error: 'tool_server_busy',
         message: err.message,
         retryAfterMs: err.retryAfterMs,
