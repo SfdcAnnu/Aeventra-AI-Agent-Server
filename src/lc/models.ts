@@ -20,6 +20,13 @@ const DEFAULT_MODELS: Record<string, string> = {
   gemini: 'gemini-2.5-pro',
 };
 
+/** OpenAI's reasoning-era models (o-series, gpt-5 and later) reject the
+ *  legacy `max_tokens` parameter and require `max_completion_tokens`.
+ *  Live-confirmed: "Unsupported parameter: 'max_tokens' is not supported
+ *  with this model" from gpt-5.5. Detect by name so a newly-released
+ *  model an admin enables does not break every agent in the org. */
+const NEEDS_MAX_COMPLETION_TOKENS = /^(o[1-9]|gpt-5|gpt-[6-9])/i;
+
 /** Node subtypes use canvas vocabulary ('gpt4'); engine connections use
  *  admin vocabulary ('openai') — same normalization Apex applies. */
 export function engineTypeForSubtype(nodeSubType: string): 'openai' | 'claude' | 'gemini' {
@@ -46,14 +53,18 @@ export function buildChatModel(
 
   let model: BaseChatModel;
   switch (engineType) {
-    case 'openai':
+    case 'openai': {
+      const reasoningEra = NEEDS_MAX_COMPLETION_TOKENS.test(modelName);
       model = new ChatOpenAI({
         model: modelName,
         apiKey: creds.apiKey,
-        maxTokens,
+        // Reasoning-era models take the cap under a different name, and
+        // reject the old one outright rather than ignoring it.
+        ...(reasoningEra ? { modelKwargs: { max_completion_tokens: maxTokens } } : { maxTokens }),
         configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
       });
       break;
+    }
     case 'claude':
       model = new ChatAnthropic({
         model: modelName,
