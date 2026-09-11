@@ -23,6 +23,41 @@ import { logger } from '../logger';
 import { callSpecialist, resolveArchitectEngine, type ArchitectEngine } from './specialists';
 import { buildCapabilityManifest, describeObjectCompact, listInvocables, listMcpToolsLive } from './surveyor-tools';
 
+/**
+ * The copilot's own role. It borrows the Change Planner's machinery — tier
+ * resolution, cost accounting — but NOT its job: asked to change something,
+ * a change planner writes a plan, and the surface then reports a change
+ * that never happened. Live-confirmed: "Done. I'll require your approval…"
+ * with zero operations attached.
+ */
+const COPILOT_ROLE = `You are Archon, working inside the agent builder alongside the person who owns this agent.
+
+You do two things:
+  1. ANSWER questions about the open agent and about what their Salesforce org can already do. Use the org
+     context you are given. If something they want does not exist in that context, say so plainly — never
+     name a tool, Flow or invocable that is not listed there.
+  2. CHANGE the open agent's configuration when they ask, by emitting operations.
+
+THE RULE THAT MATTERS MOST: you do not change anything yourself. Every change happens by emitting an
+operation, which the person then reviews and applies. So if your reply agrees to a change — "I'll make it
+warmer", "that will need approval now" — there MUST be a matching operation in the same response. A reply
+that describes a change with no operation attached is a false report of work you did not do. If you cannot
+express what they asked as one of the allowed operations, say exactly that instead of agreeing.
+
+Allowed operations, each with nodeId (from the agent's nodes), value, and a one-line why:
+  setInstructions        an agent or sub-agent's instructions
+  setDescription         a tool's description
+  setRoutingDescription  when a sub-agent should be used
+  setModel               the model a node runs on
+  setApproval            true/false — whether a tool call waits for a human
+  setContextPolicy       isolated | windowed | full
+  setMode                call (returns a value) | transfer (hands off)
+
+When you rewrite instructions, write them FOR THE MODEL that node runs on, using the style guidance provided.
+
+Speak the way the person does: no API names, no JSON, no node ids in your reply — use the names on the
+canvas. Be brief. For a plain question, emit no operations at all.`;
+
 let styleCache: string | null = null;
 function modelStyles(): string {
   if (!styleCache) {
@@ -65,7 +100,14 @@ export async function rewritePrompt(
     specialistId: 'write_prompts',
     engine,
     includeKnowledge: false, // this task needs style guidance, not the spec schema
+    tierOverride: 'medium',
     maxOutputTokens: 2000,
+    instructionsOverride:
+      'You rewrite an instruction someone wrote for an AI agent, turning rough notes — in any language — ' +
+      'into production-quality instructions. You change the CRAFT, never the decisions: every concrete rule, ' +
+      'limit, tone and boundary the author stated survives, and you add nothing they did not ask for. Write ' +
+      'for the specific model named, following the style guidance given. Instructions describe a role, never ' +
+      'a procedure, and never contain anything that varies per customer.',
     input: {
       task:
         'Rewrite the draft below as production-quality instructions. Preserve the author\'s intent and every ' +
@@ -191,17 +233,14 @@ export async function copilotTurn(
     specialistId: 'plan_change',
     engine,
     includeKnowledge: true,
+    tierOverride: 'medium',
     maxOutputTokens: 3000,
     rawJson: true,
+    instructionsOverride: COPILOT_ROLE,
     input: {
       task:
-        'You are Archon, helping inside the agent builder. Answer the user in plain language — their vocabulary, ' +
-        'never API names or JSON. When they ask for a CHANGE to the open agent, return operations that make it. ' +
-        'When they ask what is possible, answer from the org context and say plainly when something is missing. ' +
-        'Return JSON: { "reply": "...", "operations": [...] }. Operations may only be: setInstructions, ' +
-        'setDescription, setRoutingDescription, setModel, setApproval, setContextPolicy, setMode — each with ' +
-        'nodeId, value and a one-line why. Propose NO operations for a question. Never name a tool, Flow or ' +
-        'invocable that is not in the org context; if one is needed and missing, say so instead.',
+        'Answer the user, and emit an operation for every change you agree to make. ' +
+        'Return JSON: { "reply": "...", "operations": [...] }.',
       promptStyleGuidance: modelStyles(),
       openAgent: input.agent ? { apiName: input.agent.apiName, name: input.agent.name, department: input.agent.department, nodes } : null,
       orgContext: ctx,
