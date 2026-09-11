@@ -36,13 +36,13 @@ import {
 const FAST_RE = /mini|nano|lite|flash|haiku|small/i;
 const BEST_RE = /opus|ultra|(^|[^a-z])o[134]([^a-z]|$)|gpt-5|-pro($|[^a-z])/i;
 
-function tierOfModel(id: string): 'small' | 'medium' | 'large' {
+export function tierOfModel(id: string): 'small' | 'medium' | 'large' {
   if (FAST_RE.test(id)) return 'small';
   if (BEST_RE.test(id)) return 'large';
   return 'medium';
 }
 
-function providerOfModel(id: string): string {
+export function providerOfModel(id: string): string {
   const m = id.toLowerCase();
   if (m.includes('claude') || m.includes('haiku') || m.includes('sonnet') || m.includes('opus')) return 'claude';
   if (m.includes('gemini')) return 'gemini';
@@ -56,13 +56,13 @@ interface OrgModels {
 
 /** Same fallback the UI pickers use: an active connection with no curated
  *  catalog offers the provider's known default models. */
-const ENGINE_DEFAULT_MODELS: Record<string, string[]> = {
+export const ENGINE_DEFAULT_MODELS: Record<string, string[]> = {
   claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini'],
   gemini: ['gemini-2.5-pro', 'gemini-2.5-flash'],
 };
 
-async function loadOrgModels(conn: Connection): Promise<OrgModels> {
+export async function loadOrgModels(conn: Connection): Promise<OrgModels> {
   const res = await conn.query<{
     EngineType__c: string;
     DefaultModel__c?: string;
