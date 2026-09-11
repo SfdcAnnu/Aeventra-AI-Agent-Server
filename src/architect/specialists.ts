@@ -202,6 +202,13 @@ export async function callSpecialist<T = unknown>(opts: {
   const modelId = modelForTier(opts.engine, tier);
   const maxTokens = opts.maxOutputTokens ?? node.model?.maxOutputTokens ?? 4096;
 
+  // The spec's own effort setting maps onto how long a reasoning model may
+  // think. 'deep' is deliberate and expensive; everything else stays lean.
+  const EFFORT: Record<string, 'minimal' | 'low' | 'medium' | 'high'> = {
+    off: 'minimal',
+    standard: 'low',
+    deep: 'high',
+  };
   const { model } = buildChatModel(
     opts.engine.nodeSubType,
     modelId,
@@ -213,6 +220,10 @@ export async function callSpecialist<T = unknown>(opts: {
       connectionId: null,
     },
     maxTokens,
+    {
+      jsonMode: opts.rawJson === true,
+      reasoningEffort: EFFORT[node.model?.effort ?? 'standard'] ?? 'low',
+    },
   );
 
   // Knowledge FIRST and byte-identical per specialist: it is the cacheable
@@ -270,7 +281,10 @@ function parseLooseJson(text: string, label: string): unknown {
   const unfenced = text.replace(/```(?:json)?/gi, '');
   const start = unfenced.indexOf('{');
   const end = unfenced.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new SpecialistError(`'${label}' did not return a JSON object.`);
+  if (start < 0 || end <= start) {
+    const seen = text.trim().length === 0 ? '(nothing at all)' : `"${text.trim().slice(0, 200)}"`;
+    throw new SpecialistError(`'${label}' did not return a JSON object — it returned ${seen}.`);
+  }
   try {
     return JSON.parse(unfenced.slice(start, end + 1));
   } catch (e) {
