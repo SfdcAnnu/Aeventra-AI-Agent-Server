@@ -310,9 +310,61 @@ async function runBuild(job: BuildJob, attachmentText?: string): Promise<void> {
   if (gaps > 0) {
     const gapOut = await specialist<{ prerequisites: SpecPrerequisite[]; blockingCount?: number }>(
       job, engine, 'report_gaps',
-      { partial: match.partial, missing: match.missing, orgInventory: surveyed, specNodes: spec.nodes.map(n => n.id) },
+      {
+        partial: match.partial,
+        missing: match.missing,
+        orgInventory: surveyed,
+        specNodes: spec.nodes.map(n => n.id),
+        instruction:
+          `Write ONE prerequisite for EVERY item in partial and missing — ${gaps} in total. ` +
+          'Never omit one because the design worked around it; a gap the client is not told about is the ' +
+          'worst outcome this system can produce. Ids run PRE-001 upwards.',
+      },
     );
     prerequisites = gapOut.prerequisites ?? [];
+
+    // The architecture's hardest promise is that nothing is silently
+    // dropped. If the writer returned fewer items than there are gaps,
+    // the shortfall is recorded mechanically rather than lost — an
+    // unpolished prerequisite beats an invisible one.
+    if (prerequisites.length < gaps) {
+      const covered = new Set(
+        prerequisites.flatMap(p => [p.title?.toLowerCase(), ...(p.affects ?? [])].filter(Boolean) as string[]),
+      );
+      const allGaps = [...(match.partial ?? []), ...(match.missing ?? [])];
+      let seq = prerequisites.length + 1;
+      for (const g of allGaps) {
+        const label = String(
+          (g as Record<string, unknown>).capability ??
+            (g as Record<string, unknown>).name ??
+            (g as Record<string, unknown>).title ??
+            'Unnamed capability',
+        );
+        if (covered.has(label.toLowerCase())) continue;
+        if (prerequisites.some(p => (p.title ?? '').toLowerCase().includes(label.toLowerCase().slice(0, 24)))) continue;
+        const reason = String(
+          (g as Record<string, unknown>).reason ?? (g as Record<string, unknown>).why ?? 'The org has nothing that does this yet.',
+        );
+        prerequisites.push({
+          id: `PRE-${String(seq++).padStart(3, '0')}`,
+          kind: 'permission',
+          title: label.slice(0, 120),
+          why: reason.slice(0, 500),
+          steps: [
+            `Decide who owns "${label}" in your org and what should provide it.`,
+            'Tell Archon once it exists and the agent will be re-checked automatically.',
+          ],
+          assignee: 'salesforce_admin',
+          blocking: true,
+          status: 'pending',
+          estimatedEffort: 'hours',
+        });
+      }
+      logger.warn(
+        { jobId: job.id, gaps, written: gapOut.prerequisites?.length ?? 0, total: prerequisites.length },
+        'architect_gap_shortfall_backfilled',
+      );
+    }
   }
   const blockingCount = prerequisites.filter(p => p.blocking && p.status !== 'done' && p.status !== 'waived').length;
   spec.prerequisites = prerequisites;
