@@ -14,7 +14,7 @@
  */
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { resolveProviderToken } from '../chat/adapters/shared';
-import { mcpListTools } from '../mcp/clients/streamable-http-client';
+import { listToolsCached } from '../mcp/tool-list-cache';
 import { InstallsRepo } from '../db/installs.repo';
 import { prisma } from '../db/client';
 import { logger } from '../logger';
@@ -181,7 +181,7 @@ export async function listMcpToolsLive(orgId: string): Promise<McpToolInventory[
         out.push({ provider: s.provider, url: s.url, tools: [], error: 'not connected' });
         continue;
       }
-      const tools = await mcpListTools({ remoteUrl: s.url, accessToken: token });
+      const tools = await listToolsCached({ remoteUrl: s.url, accessToken: token });
       out.push({
         provider: s.provider,
         url: s.url,

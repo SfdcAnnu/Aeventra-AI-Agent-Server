@@ -17,6 +17,7 @@ import { sessionAuth } from '../auth/session';
 import { InstallsRepo } from '../db/installs.repo';
 import { ConnectorsRepo, PendingOAuthRepo } from '../db/connectors.repo';
 import { mcpListTools } from '../mcp/clients/streamable-http-client';
+import { listToolsCached, McpRateLimited } from '../mcp/tool-list-cache';
 import { refreshAccessToken, buildAuthorizeUrl, exchangeCode, fetchUserInfo, parseUserIdFromIdUrl, brokerRedirectUri as sfBrokerRedirectUri } from '../oauth/salesforce';
 import {
   googleConfigured,
@@ -353,9 +354,20 @@ connectorsRouter.post('/api/mcp-tool-schemas', sessionAuth, async (req, res) => 
       }
     }
 
-    const tools = await mcpListTools({ remoteUrl: baseUrl, accessToken: token ?? '' });
+    const tools = await listToolsCached({ remoteUrl: baseUrl, accessToken: token ?? '' });
     res.json({ tools });
   } catch (err) {
+    if (err instanceof McpRateLimited) {
+      // Not a failure of ours — the tool server is throttling. Say so in
+      // the client's vocabulary and let the UI retry, rather than a 502.
+      logger.warn({ orgId, provider }, 'mcp_tool_schemas_rate_limited');
+      res.status(503).json({
+        error: 'tool_server_busy',
+        message: err.message,
+        retryAfterMs: err.retryAfterMs,
+      });
+      return;
+    }
     logger.error({ err, orgId, provider }, 'mcp_tool_schemas_failed');
     res.status(502).json({ error: 'tool_schemas_failed', message: (err as Error).message });
   }

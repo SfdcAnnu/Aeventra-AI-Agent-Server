@@ -57,6 +57,11 @@ export function loadKnowledgePrefix(): string {
 // ── Engine resolution from the org's own connection records ──────────
 export interface ArchitectEngine {
   nodeSubType: string; // canvas vocabulary for buildChatModel
+  /** Resolver vocabulary ('openai' | 'claude' | 'gemini'). resolveEngine
+   *  only honours an override whose engineType MATCHES the engine it is
+   *  resolving — omitting this is why a build failed at the first call
+   *  with "No AI Engine Connection configured". */
+  engineType: 'openai' | 'claude' | 'gemini';
   apiKey: string;
   endpoint: string | null;
   models: string[]; // this provider's usable models
@@ -99,8 +104,12 @@ export async function resolveArchitectEngine(conn: Connection): Promise<Architec
   if (pick.DefaultModel__c && !models.includes(pick.DefaultModel__c)) models.unshift(pick.DefaultModel__c);
   if (models.length === 0) throw new Error(`The ${pick.EngineType__c} connection has no usable models.`);
 
+  const engineType = (['openai', 'claude', 'gemini'].includes(pick.EngineType__c)
+    ? pick.EngineType__c
+    : 'openai') as 'openai' | 'claude' | 'gemini';
   return {
     nodeSubType: SUBTYPE_FOR_ENGINE[pick.EngineType__c] ?? 'claude',
+    engineType,
     apiKey: pick.ApiKey__c!,
     endpoint: pick.Endpoint__c ?? null,
     models,
@@ -167,7 +176,13 @@ export async function callSpecialist<T = unknown>(opts: {
   const { model } = buildChatModel(
     opts.engine.nodeSubType,
     modelId,
-    { engineType: null, apiKey: opts.engine.apiKey, endpoint: opts.engine.endpoint, defaultModel: modelId, connectionId: null },
+    {
+      engineType: opts.engine.engineType,
+      apiKey: opts.engine.apiKey,
+      endpoint: opts.engine.endpoint,
+      defaultModel: modelId,
+      connectionId: null,
+    },
     maxTokens,
   );
 
