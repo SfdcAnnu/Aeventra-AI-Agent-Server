@@ -191,6 +191,13 @@ export async function callSpecialist<T = unknown>(opts: {
    *  AgentSpec (structured-output binding to a loose schema is unreliable
    *  across providers). */
   rawJson?: boolean;
+  /** Replace the node's instructions. Interactive surfaces (the copilot,
+   *  the prompt rewriter) borrow a specialist's machinery — tier, model,
+   *  cost accounting — but do a different job, and a borrowed role makes
+   *  a model answer the wrong question. */
+  instructionsOverride?: string;
+  /** Run this call on a cheaper tier than the node declares. */
+  tierOverride?: 'small' | 'medium' | 'large';
 }): Promise<{ result: T; usage: SpecialistUsage; model: string }> {
   const spec = loadArchitectSpec();
   const node = spec.nodes.find(n => n.id === opts.specialistId);
@@ -198,7 +205,7 @@ export async function callSpecialist<T = unknown>(opts: {
     throw new SpecialistError(`Unknown specialist '${opts.specialistId}'.`);
   }
 
-  const tier = (node.model?.tier ?? 'large') as 'small' | 'medium' | 'large';
+  const tier = (opts.tierOverride ?? node.model?.tier ?? 'large') as 'small' | 'medium' | 'large';
   const modelId = modelForTier(opts.engine, tier);
   const maxTokens = opts.maxOutputTokens ?? node.model?.maxOutputTokens ?? 4096;
 
