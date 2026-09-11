@@ -1,0 +1,787 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://archon.ai/schemas/agent-spec.schema.json",
+  "title": "AgentSpec",
+  "description": "The only thing the Agent Architect is allowed to emit. A deterministic compiler turns a validated instance of this into platform objects. Anything not expressible here cannot be built.",
+  "type": "object",
+  "required": [
+    "specVersion",
+    "name",
+    "department",
+    "trigger",
+    "nodes",
+    "edges",
+    "budgets"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specVersion": {
+      "const": "1.0"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 80
+    },
+    "department": {
+      "enum": [
+        "Sales",
+        "Service",
+        "Support",
+        "Success",
+        "Marketing",
+        "Operations"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 400,
+      "description": "One or two sentences. Shown in the agent list."
+    },
+    "requirementId": {
+      "type": "string",
+      "description": "Traceability back to the Requirement this was built from."
+    },
+    "trigger": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "inbound_message",
+            "record_change",
+            "schedule",
+            "webhook",
+            "manual"
+          ]
+        },
+        "channel": {
+          "enum": [
+            "whatsapp",
+            "email",
+            "sms",
+            "web",
+            "voice"
+          ]
+        },
+        "sobject": {
+          "type": "string"
+        },
+        "condition": {
+          "type": "string",
+          "description": "Formula-style predicate, evaluated deterministically."
+        },
+        "cron": {
+          "type": "string"
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 40,
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    },
+    "knowledge": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "knowledgeBaseId",
+          "attachedTo"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "knowledgeBaseId": {
+            "type": "string"
+          },
+          "attachedTo": {
+            "type": "string",
+            "description": "nodeId"
+          },
+          "topK": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 5
+          },
+          "minScore": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.55
+          }
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "required": [
+        "maxSteps",
+        "maxCostUsd",
+        "timeoutSeconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxSteps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 40
+        },
+        "maxCostUsd": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 50,
+          "default": 2.0
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 900,
+          "default": 180
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 6
+        }
+      }
+    },
+    "guardrails": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "pii_redaction",
+          "prompt_injection",
+          "output_policy",
+          "cost_ceiling",
+          "discount_cap"
+        ]
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "draft",
+            "blocked",
+            "ready",
+            "staged",
+            "published",
+            "retired"
+          ],
+          "description": "blocked means one or more blocking prerequisites are still open. The compiler refuses to activate a spec in this state."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes": {
+          "type": "integer"
+        },
+        "changeReason": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "Set when this version was produced by an edit rather than a first build."
+        }
+      }
+    },
+    "prerequisites": {
+      "type": "array",
+      "description": "Things the agent needs that do not exist in the org. The platform NEVER creates these. It describes them, assigns them, and blocks activation until they are done.",
+      "items": {
+        "$ref": "#/$defs/prerequisite"
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splitRationale",
+        "subAgentCount",
+        "maxNesting"
+      ],
+      "description": "The shape of the agent must be justified, not asserted. The compiler rejects a spec with sub-agents whose splitRationale has no question answered true.",
+      "properties": {
+        "splitRationale": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "All four forcing questions, answered with evidence. Order fixed.",
+          "items": {
+            "type": "object",
+            "required": [
+              "question",
+              "answer",
+              "evidence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "question": {
+                "enum": [
+                  "context",
+                  "permission",
+                  "independence",
+                  "toolCount"
+                ]
+              },
+              "answer": {
+                "type": "boolean"
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 300,
+                "description": "A number for context and toolCount. Named data for permission. Named check for independence. 'It felt cleaner' is not evidence."
+              }
+            }
+          }
+        },
+        "subAgentCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
+        },
+        "maxNesting": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "estimate": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Produced by the deterministic estimator, never by a model.",
+          "properties": {
+            "modelCallsPerRun": {
+              "type": "integer"
+            },
+            "costPerRunUsd": {
+              "type": "number"
+            },
+            "latencySeconds": {
+              "type": "number"
+            },
+            "targetCostUsd": {
+              "type": "number"
+            },
+            "targetLatencySeconds": {
+              "type": "number"
+            },
+            "withinBudget": {
+              "type": "boolean"
+            },
+            "overBudgetReason": {
+              "type": "string"
+            }
+          }
+        },
+        "countJustification": {
+          "type": "string",
+          "minLength": 30,
+          "maxLength": 400,
+          "description": "Required when subAgentCount exceeds 8. Past that point a trace stops being readable and a person stops being able to reason about the agent, so exceeding it must be argued, not assumed."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "subAgentCount": {
+                "minimum": 9
+              }
+            },
+            "required": [
+              "subAgentCount"
+            ]
+          },
+          "then": {
+            "required": [
+              "countJustification"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "label"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{2,39}$"
+        },
+        "type": {
+          "enum": [
+            "agent",
+            "subagent",
+            "tool",
+            "tool_catalog",
+            "approval",
+            "condition",
+            "transform",
+            "end"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 60
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tier": {
+              "enum": [
+                "small",
+                "medium",
+                "large"
+              ],
+              "description": "Prefer a tier over a model name so provider changes do not break the spec."
+            },
+            "modelId": {
+              "type": "string"
+            },
+            "fallbackId": {
+              "type": "string"
+            },
+            "style": {
+              "enum": [
+                "precise",
+                "balanced",
+                "exploratory"
+              ],
+              "default": "balanced"
+            },
+            "effort": {
+              "enum": [
+                "off",
+                "standard",
+                "deep"
+              ],
+              "default": "standard"
+            },
+            "maxOutputTokens": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 32000,
+              "default": 1024
+            }
+          }
+        },
+        "instructions": {
+          "type": "string",
+          "maxLength": 12000,
+          "description": "Role, tone and boundaries. NEVER a procedure, and never anything that varies per customer — volatile content above the cache breakpoint destroys the cache."
+        },
+        "returns": {
+          "type": "object",
+          "description": "JSON Schema the sub-agent must satisfy when it returns. Required on every subagent reached by a call edge.",
+          "additionalProperties": true
+        },
+        "toolChoice": {
+          "enum": [
+            "auto",
+            "required",
+            "none"
+          ],
+          "default": "auto"
+        },
+        "parallelTools": {
+          "type": "boolean",
+          "default": true
+        },
+        "action": {
+          "type": "object",
+          "description": "Tool nodes only.",
+          "required": [
+            "kind",
+            "discovered"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "mcp",
+                "apex_invocable",
+                "flow_invocable",
+                "crud",
+                "http",
+                "code"
+              ],
+              "description": "apex_invocable and flow_invocable reference EXISTING org automation discovered by the surveyor. The platform never authors Apex or Flows."
+            },
+            "connector": {
+              "type": "string"
+            },
+            "toolName": {
+              "type": "string"
+            },
+            "sobject": {
+              "type": "string"
+            },
+            "operation": {
+              "enum": [
+                "create",
+                "update",
+                "upsert",
+                "delete",
+                "query"
+              ]
+            },
+            "sideEffect": {
+              "type": "boolean",
+              "default": false
+            },
+            "sequence": {
+              "type": "array",
+              "description": "For a node that must perform several calls atomically. Use this INSTEAD of writing 'this requires two calls' in a description.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "discovered": {
+              "const": true,
+              "description": "Must be true. Every tool references something the Org Surveyor actually found. A spec claiming a tool that was not discovered is invalid, which is what stops the Architect inventing an invocable that does not exist."
+            }
+          }
+        },
+        "inputs": {
+          "type": "array",
+          "description": "Argument mapping. Every required parameter of the tool MUST appear here. A parameter described in prose instead of mapped here is a validation error.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "required": {
+                "type": "boolean",
+                "default": false
+              },
+              "source": {
+                "enum": [
+                  "model",
+                  "literal",
+                  "record",
+                  "step",
+                  "context"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "For record: {{Object.Field}}. For step: {{step_id.field}}. For model: the hint given to the model."
+              }
+            }
+          }
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "saveAs": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$"
+            },
+            "largeResults": {
+              "enum": [
+                "summarise",
+                "full"
+              ],
+              "default": "summarise"
+            }
+          }
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 800,
+          "description": "Tool nodes only. One or two sentences saying WHEN to use this. This is the routing signal the model reads. Procedures, payloads and business rules do not belong here."
+        },
+        "approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": false
+            },
+            "approver": {
+              "enum": [
+                "record_owner",
+                "queue",
+                "role",
+                "named_user"
+              ]
+            },
+            "approverId": {
+              "type": "string"
+            },
+            "condition": {
+              "type": "string",
+              "description": "Only ask when this is true. Empty means always."
+            }
+          }
+        },
+        "onFailure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5,
+              "default": 2
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300,
+              "default": 30
+            },
+            "then": {
+              "enum": [
+                "tell_agent",
+                "stop_run",
+                "escalate"
+              ],
+              "default": "tell_agent"
+            }
+          }
+        },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tool"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "action",
+              "description",
+              "inputs"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "agent",
+                  "subagent"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "instructions",
+              "model"
+            ]
+          }
+        }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "mode"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "call",
+            "handoff",
+            "static",
+            "conditional"
+          ],
+          "description": "call returns a value and the parent resumes. handoff transfers control and CLEARS the frame stack — the caller never resumes. Default to call; handoff is an explicit choice."
+        },
+        "contextPolicy": {
+          "enum": [
+            "isolated",
+            "summary",
+            "windowed",
+            "full"
+          ],
+          "default": "isolated",
+          "description": "What the target receives. isolated keeps child cost flat as sub-agents are added; full multiplies your bill by the number of sub-agents."
+        },
+        "carryFields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Fields always passed across this edge regardless of policy. If a child needs a field the parent holds, name it here — this is the single most common cause of sub-agent failure."
+        },
+        "windowTurns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "condition": {
+          "type": "string",
+          "description": "Required when mode is conditional."
+        },
+        "parallel": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "prerequisite": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "why",
+        "steps",
+        "assignee",
+        "blocking",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^PRE-[0-9]{3}$"
+        },
+        "kind": {
+          "enum": [
+            "invocable_apex",
+            "flow",
+            "field",
+            "permission",
+            "connector",
+            "knowledge_base",
+            "record_type",
+            "named_credential",
+            "data"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "why": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "What the agent cannot do without it, in the admin's vocabulary."
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Numbered steps a Salesforce admin or developer follows. Specific enough to act on without asking a follow-up question."
+        },
+        "assignee": {
+          "enum": [
+            "salesforce_admin",
+            "apex_developer",
+            "integration_owner",
+            "data_owner",
+            "business_owner"
+          ]
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "true means the agent cannot be activated until this is done. false means the agent works but with reduced capability."
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "done",
+            "waived"
+          ],
+          "default": "pending"
+        },
+        "waivedReason": {
+          "type": "string"
+        },
+        "verification": {
+          "type": "string",
+          "description": "How the platform re-checks this automatically. Usually a describe call or a tool lookup."
+        },
+        "affects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Node ids that degrade or fail without it."
+        },
+        "estimatedEffort": {
+          "enum": [
+            "minutes",
+            "hours",
+            "days"
+          ]
+        }
+      }
+    }
+  }
+}
