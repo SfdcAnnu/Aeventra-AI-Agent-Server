@@ -84,6 +84,14 @@ const STEPS: Array<[string, string]> = [
   ['compile', 'Saved the agent'],
 ];
 
+/** The objects nearly every requirement actually touches. Custom objects
+ *  are always included on top of these. */
+const CORE_OBJECTS = new Set([
+  'Account', 'Contact', 'Lead', 'Opportunity', 'OpportunityLineItem', 'Case', 'Task', 'Event',
+  'Product2', 'Pricebook2', 'PricebookEntry', 'Quote', 'QuoteLineItem', 'Contract', 'Order',
+  'Campaign', 'CampaignMember', 'User', 'Knowledge__kav', 'ContentDocument', 'EmailMessage',
+]);
+
 const jobs = new Map<string, BuildJob>();
 
 export function getBuildJob(id: string): BuildJob | undefined {
@@ -201,7 +209,13 @@ async function runBuild(job: BuildJob, attachmentText?: string): Promise<void> {
   const manifest: CapabilityManifest = manifestBuilt.manifest;
   const inventoryForModel = {
     requirement,
-    objects: objects.slice(0, 250).map(o => ({ n: o.name, l: o.label, c: o.createable, u: o.updateable, q: o.queryable })),
+    // Standard CRM objects plus every custom object, capped — a full
+    // describeGlobal is thousands of entries and most are platform noise
+    // the design will never touch.
+    objects: objects
+      .filter(o => o.custom || CORE_OBJECTS.has(o.name))
+      .slice(0, 120)
+      .map(o => ({ n: o.name, l: o.label, c: o.createable, u: o.updateable, q: o.queryable })),
     invocableApex: invocables.filter(i => i.kind === 'apex'),
     flows: invocables.filter(i => i.kind === 'flow'),
     mcpServers: mcp.map(m => ({ provider: m.provider, error: m.error, tools: m.tools })),

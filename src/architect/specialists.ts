@@ -34,24 +34,53 @@ export function loadArchitectSpec(): AgentSpec {
   return architectSpecCache;
 }
 
-let knowledgeCache: string | null = null;
-/** The stable knowledge prefix: the AgentSpec schema + platform rules +
- *  pattern library + test taxonomy. Identical every call — the cacheable
- *  ~12k-token prefix the design assumes. */
-export function loadKnowledgePrefix(): string {
-  if (!knowledgeCache) {
-    const schema = readFileSync(join(ROOT(), 'schemas', 'agent-spec.schema.json'), 'utf8');
-    const rules = readFileSync(join(ROOT(), 'knowledge', 'platform-rules.md'), 'utf8');
-    const patterns = readFileSync(join(ROOT(), 'knowledge', 'pattern-library.md'), 'utf8');
-    const taxonomy = readFileSync(join(ROOT(), 'knowledge', 'test-taxonomy.md'), 'utf8');
-    knowledgeCache = [
-      '## The AgentSpec schema — the only thing a design may emit\n```json\n' + schema + '\n```',
-      '## Platform rules\n' + rules,
-      '## Pattern library\n' + patterns,
-      '## Test taxonomy\n' + taxonomy,
-    ].join('\n\n');
+const assetCache = new Map<string, string>();
+function asset(kind: 'schema' | 'rules' | 'patterns' | 'taxonomy'): string {
+  if (!assetCache.has(kind)) {
+    const file =
+      kind === 'schema'
+        ? join(ROOT(), 'schemas', 'agent-spec.schema.json')
+        : join(
+            ROOT(),
+            'knowledge',
+            kind === 'rules' ? 'platform-rules.md' : kind === 'patterns' ? 'pattern-library.md' : 'test-taxonomy.md',
+          );
+    const body = readFileSync(file, 'utf8');
+    assetCache.set(
+      kind,
+      kind === 'schema' ? '## The AgentSpec schema — the only thing a design may emit\n```json\n' + body + '\n```' : body,
+    );
   }
-  return knowledgeCache;
+  return assetCache.get(kind)!;
+}
+
+/**
+ * Which static knowledge each specialist actually needs.
+ *
+ * Sending all of it to all of them was ~12k tokens PER CALL — live-measured
+ * at over a dollar for one build, much of it paying to show the Requirements
+ * Analyst a JSON schema it never emits. Scoped per role, the same build
+ * carries a fraction of that, and each specialist's prefix stays
+ * byte-identical so provider prefix-caching still applies.
+ */
+const KNOWLEDGE_FOR: Record<string, Array<'schema' | 'rules' | 'patterns' | 'taxonomy'>> = {
+  architect: ['rules'],
+  analyse_requirement: [],
+  survey_org: [],
+  match_capabilities: ['rules'],
+  design_flow: ['schema', 'rules', 'patterns'],
+  write_prompts: ['schema', 'rules'],
+  report_gaps: ['rules'],
+  plan_change: ['schema', 'rules'],
+  design_tests: ['taxonomy'],
+  run_tests: [],
+  evaluate: ['taxonomy', 'rules'],
+  build_report: [],
+};
+
+export function loadKnowledgeFor(specialistId: string): string {
+  const kinds = KNOWLEDGE_FOR[specialistId] ?? ['rules'];
+  return kinds.map(asset).join('\n\n');
 }
 
 // ── Engine resolution from the org's own connection records ──────────
@@ -186,9 +215,10 @@ export async function callSpecialist<T = unknown>(opts: {
     maxTokens,
   );
 
-  const system =
-    (opts.includeKnowledge === false ? '' : loadKnowledgePrefix() + '\n\n') +
-    `## Your role\n${node.instructions ?? ''}`;
+  // Knowledge FIRST and byte-identical per specialist: it is the cacheable
+  // prefix, and anything volatile above it would destroy the discount.
+  const knowledge = opts.includeKnowledge === false ? '' : loadKnowledgeFor(node.id);
+  const system = (knowledge ? knowledge + '\n\n' : '') + `## Your role\n${node.instructions ?? ''}`;
   const user = JSON.stringify(opts.input, null, 1);
 
   const t0 = Date.now();
