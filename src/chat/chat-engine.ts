@@ -11,9 +11,8 @@
  * instead of billing two.
  *
  * The original hand-rolled provider adapters (adapters/claude.ts,
- * adapters/openai.ts) remain in the tree ONLY because the agent generator
- * and builder copilot still reuse their low-level callOpenAi/callClaude
- * helpers — chat traffic never touches them here.
+ * adapters/openai.ts) remain in the tree ONLY for Trigger-mode ai steps
+ * (chat/headless.ts) — chat traffic never touches them here.
  */
 import { runChatTurn as runLangGraphTurn } from '../lc/graph-runtime';
 import { withTurnIdempotency } from './turn-idempotency';
