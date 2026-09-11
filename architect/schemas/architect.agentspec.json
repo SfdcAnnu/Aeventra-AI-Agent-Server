@@ -248,7 +248,7 @@
       "type": "subagent",
       "label": "Prompt Engineer",
       "model": {
-        "tier": "large",
+        "tier": "medium",
         "style": "balanced",
         "maxOutputTokens": 6000
       },
