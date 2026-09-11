@@ -236,8 +236,36 @@ export async function copilotTurn(
     includeKnowledge: true,
     tierOverride: 'medium',
     maxOutputTokens: 3000,
-    rawJson: true,
     instructionsOverride: COPILOT_ROLE,
+    schemaOverride: {
+      type: 'object',
+      required: ['reply', 'operations'],
+      properties: {
+        reply: { type: 'string', description: "Your answer, in the person's vocabulary. No ids, no JSON." },
+        operations: {
+          type: 'array',
+          description:
+            'One entry for EVERY change your reply agrees to make. Empty for a question. Never describe a ' +
+            'change here that is not also in your reply, or agree to one in your reply without an entry here.',
+          items: {
+            type: 'object',
+            required: ['kind', 'nodeId', 'value', 'why'],
+            properties: {
+              kind: {
+                type: 'string',
+                enum: ['setInstructions', 'setDescription', 'setRoutingDescription', 'setModel', 'setApproval', 'setContextPolicy', 'setMode'],
+              },
+              nodeId: { type: 'string', description: "The node's id, copied exactly from the agent data." },
+              value: {
+                type: 'string',
+                description: "The new value as text. 'true'/'false' for setApproval; isolated|windowed|full for setContextPolicy; call|transfer for setMode.",
+              },
+              why: { type: 'string', description: 'One line on why, for the person reviewing the change.' },
+            },
+          },
+        },
+      },
+    },
     input: {
       task:
         'Answer the user, and emit an operation for every change you agree to make. ' +
@@ -273,7 +301,18 @@ export async function copilotTurn(
       dropped++;
       continue;
     }
-    operations.push({ ...(op as CopilotOperation), nodeId });
+    const rawValue = (op as { value?: unknown }).value;
+    let value: unknown = rawValue;
+    if (kind === 'setApproval') value = String(rawValue).toLowerCase() === 'true';
+    if (kind === 'setContextPolicy' && !['isolated', 'windowed', 'full'].includes(String(rawValue))) {
+      dropped++;
+      continue;
+    }
+    if (kind === 'setMode' && !['call', 'transfer'].includes(String(rawValue))) {
+      dropped++;
+      continue;
+    }
+    operations.push({ ...(op as CopilotOperation), nodeId, value } as CopilotOperation);
     if (operations.length >= 8) break;
   }
   if (dropped > 0) {

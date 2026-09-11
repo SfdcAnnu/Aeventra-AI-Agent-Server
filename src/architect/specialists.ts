@@ -198,6 +198,10 @@ export async function callSpecialist<T = unknown>(opts: {
   instructionsOverride?: string;
   /** Run this call on a cheaper tier than the node declares. */
   tierOverride?: 'small' | 'medium' | 'large';
+  /** Bind THIS schema instead of the node's own `returns`. Asking for a
+   *  shape in prose is advice; binding a schema is a contract — the
+   *  copilot kept omitting its operations array until this existed. */
+  schemaOverride?: Record<string, unknown>;
 }): Promise<{ result: T; usage: SpecialistUsage; model: string }> {
   const spec = loadArchitectSpec();
   const node = spec.nodes.find(n => n.id === opts.specialistId);
@@ -261,12 +265,13 @@ export async function callSpecialist<T = unknown>(opts: {
   let tokensOut = 0;
   let result: unknown;
 
-  if (node.returns && !opts.rawJson) {
+  const boundSchema = opts.schemaOverride ?? (opts.rawJson ? null : node.returns);
+  if (boundSchema) {
     const bound = (model as unknown as {
       withStructuredOutput: (schema: Record<string, unknown>, cfg?: { name?: string; includeRaw?: boolean }) => {
         invoke: (msgs: Array<[string, string]>) => Promise<{ raw?: { usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown } | unknown>;
       };
-    }).withStructuredOutput({ ...node.returns, title: node.id }, { name: node.id, includeRaw: true });
+    }).withStructuredOutput({ ...boundSchema, title: node.id }, { name: node.id, includeRaw: true });
     const out = (await deadline(bound.invoke([
       ['system', system],
       ['human', user],
