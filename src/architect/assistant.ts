@@ -44,7 +44,8 @@ warmer", "that will need approval now" — there MUST be a matching operation in
 that describes a change with no operation attached is a false report of work you did not do. If you cannot
 express what they asked as one of the allowed operations, say exactly that instead of agreeing.
 
-Allowed operations, each with nodeId (from the agent's nodes), value, and a one-line why:
+Allowed operations. Each carries nodeId — copy it EXACTLY from the "id" field of the node you are changing
+in the agent data you were given (not its name, not a label) — plus value and a one-line why:
   setInstructions        an agent or sub-agent's instructions
   setDescription         a tool's description
   setRoutingDescription  when a sub-agent should be used
@@ -249,13 +250,35 @@ export async function copilotTurn(
     },
   });
 
-  const ids = new Set(nodes.map(n => n.id));
-  const operations = (Array.isArray(result?.operations) ? result!.operations : [])
-    .filter(op => op && OP_KINDS.has((op as { kind?: string }).kind ?? ''))
-    // A proposal against a node that is not on the canvas is a
-    // hallucination, not an edit — drop it rather than confuse the diff.
-    .filter(op => ids.has((op as { nodeId?: string }).nodeId ?? ''))
-    .slice(0, 8);
+  // The model is told to speak in node NAMES (ids are meaningless to the
+  // person reading), so it often addresses operations by name too. Resolve
+  // either form to the real id rather than dropping a valid edit — an
+  // operation silently filtered out is how the copilot ends up claiming a
+  // change it never made.
+  const byId = new Map(nodes.map(n => [n.id, n.id]));
+  const byName = new Map(nodes.map(n => [n.name.trim().toLowerCase(), n.id]));
+  const resolveNode = (raw: unknown): string | null => {
+    const key = String(raw ?? '').trim();
+    if (!key) return null;
+    return byId.get(key) ?? byName.get(key.toLowerCase()) ?? null;
+  };
+
+  const raw = Array.isArray(result?.operations) ? result!.operations : [];
+  const operations: CopilotOperation[] = [];
+  let dropped = 0;
+  for (const op of raw.slice(0, 12)) {
+    const kind = (op as { kind?: string }).kind ?? '';
+    const nodeId = resolveNode((op as { nodeId?: string }).nodeId);
+    if (!OP_KINDS.has(kind) || !nodeId) {
+      dropped++;
+      continue;
+    }
+    operations.push({ ...(op as CopilotOperation), nodeId });
+    if (operations.length >= 8) break;
+  }
+  if (dropped > 0) {
+    logger.warn({ orgId, dropped, kept: operations.length }, 'architect_copilot_ops_dropped');
+  }
 
   if (manifestBuilt) {
     // setModel is the only operation naming an external identity; the rest
