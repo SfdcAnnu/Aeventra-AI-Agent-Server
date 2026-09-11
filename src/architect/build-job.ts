@@ -185,6 +185,18 @@ async function runBuild(job: BuildJob, attachmentText?: string): Promise<void> {
   const conn = await getOrgConnection(job.orgId);
   const engine = await resolveArchitectEngine(conn);
 
+  // The org gathering needs nothing from the Analyst, so it runs WHILE the
+  // requirement is being understood instead of after it — on a cold MCP
+  // host that listing alone is tens of seconds.
+  const orgGather = Promise.all([
+    listObjects(job.orgId),
+    listInvocables(job.orgId),
+    listMcpToolsLive(job.orgId),
+    listKnowledgeBases(job.orgId).catch(() => []),
+    buildCapabilityManifest(job.orgId),
+  ]);
+  orgGather.catch(() => { /* surfaced when awaited below */ });
+
   // 1 — understand
   let s = begin(job, 'understand');
   const requirement = await specialist<Requirement>(job, engine, 'analyse_requirement', {
@@ -199,13 +211,7 @@ async function runBuild(job: BuildJob, attachmentText?: string): Promise<void> {
 
   // 2 — survey (deterministic gather, one compression call)
   s = begin(job, 'survey');
-  const [objects, invocables, mcp, kbs, manifestBuilt] = await Promise.all([
-    listObjects(job.orgId),
-    listInvocables(job.orgId),
-    listMcpToolsLive(job.orgId),
-    listKnowledgeBases(job.orgId).catch(() => []),
-    buildCapabilityManifest(job.orgId),
-  ]);
+  const [objects, invocables, mcp, kbs, manifestBuilt] = await orgGather;
   const manifest: CapabilityManifest = manifestBuilt.manifest;
   const inventoryForModel = {
     requirement,

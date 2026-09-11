@@ -204,10 +204,14 @@ export async function callSpecialist<T = unknown>(opts: {
 
   // The spec's own effort setting maps onto how long a reasoning model may
   // think. 'deep' is deliberate and expensive; everything else stays lean.
+  // Deliberately capped at 'medium': on a reasoning model, 'high' spent
+  // minutes and dollars thinking before writing anything, for a build the
+  // estimator and schema validate anyway. The gates catch bad designs far
+  // more cheaply than rumination prevents them.
   const EFFORT: Record<string, 'minimal' | 'low' | 'medium' | 'high'> = {
     off: 'minimal',
     standard: 'low',
-    deep: 'high',
+    deep: 'medium',
   };
   const { model } = buildChatModel(
     opts.engine.nodeSubType,
@@ -233,6 +237,18 @@ export async function callSpecialist<T = unknown>(opts: {
   const user = JSON.stringify(opts.input, null, 1);
 
   const t0 = Date.now();
+  const CALL_TIMEOUT_MS = Number(process.env.ARCHITECT_CALL_TIMEOUT_MS) > 0
+    ? Number(process.env.ARCHITECT_CALL_TIMEOUT_MS) : 150_000;
+  const deadline = <R>(p: Promise<R>): Promise<R> =>
+    Promise.race([
+      p,
+      new Promise<R>((_, reject) =>
+        setTimeout(
+          () => reject(new SpecialistError(`'${node.label}' took longer than ${Math.round(CALL_TIMEOUT_MS / 1000)}s and was stopped.`)),
+          CALL_TIMEOUT_MS,
+        ),
+      ),
+    ]);
   let tokensIn = 0;
   let tokensOut = 0;
   let result: unknown;
@@ -243,10 +259,10 @@ export async function callSpecialist<T = unknown>(opts: {
         invoke: (msgs: Array<[string, string]>) => Promise<{ raw?: { usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown } | unknown>;
       };
     }).withStructuredOutput({ ...node.returns, title: node.id }, { name: node.id, includeRaw: true });
-    const out = (await bound.invoke([
+    const out = (await deadline(bound.invoke([
       ['system', system],
       ['human', user],
-    ])) as { raw?: { usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown };
+    ]))) as { raw?: { usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown };
     result = out.parsed;
     tokensIn = out.raw?.usage_metadata?.input_tokens ?? 0;
     tokensOut = out.raw?.usage_metadata?.output_tokens ?? 0;
@@ -255,10 +271,12 @@ export async function callSpecialist<T = unknown>(opts: {
     const sys = opts.rawJson
       ? system + '\n\nRespond with ONE JSON object and nothing else — no prose, no code fences.'
       : system;
-    const out = await model.invoke([
-      ['system', sys],
-      ['human', user],
-    ]);
+    const out = await deadline(
+      model.invoke([
+        ['system', sys],
+        ['human', user],
+      ]),
+    );
     const meta = (out as { usage_metadata?: { input_tokens?: number; output_tokens?: number } }).usage_metadata;
     tokensIn = meta?.input_tokens ?? 0;
     tokensOut = meta?.output_tokens ?? 0;

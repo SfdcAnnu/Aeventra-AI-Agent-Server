@@ -71,7 +71,7 @@ export function buildChatModel(
         // entirely on thinking and return empty content (live-confirmed on
         // gpt-5.5: the Flow Designer came back with nothing). Give the
         // thinking its own headroom on top of the caller's cap.
-        kwargs.max_completion_tokens = Math.max(maxTokens * 3, 16_000);
+        kwargs.max_completion_tokens = maxTokens + 4_000;
         if (options.reasoningEffort) kwargs.reasoning_effort = options.reasoningEffort;
       }
       if (options.jsonMode) kwargs.response_format = { type: 'json_object' };
