@@ -3,8 +3,9 @@
  * making it rediscover the same one every turn.
  *
  * Measured on a live 4-turn conversation: every turn opened with the same
- * five tool calls (object schema → contact → opportunity → read_artifact →
- * opportunity again) purely to learn facts the platform already knew. Each
+ * five tool calls (object schema → related record → anchored record →
+ * read_artifact → the same record again) purely to learn facts the platform
+ * already knew. Each
  * tool round-trip forces another model call, and each model call re-sends
  * the whole ~4,000-token prefix, so rediscovery — not the conversation —
  * was the bulk of the bill and nearly all of the latency.

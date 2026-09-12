@@ -130,7 +130,7 @@ const SENTENCE_DROP: RegExp[] = [
   /\bCRM\b/,
   /\bsalesforce\b/i,
   /\bopportunity\s+stage\b/i,
-  /\b(?:updated?|creat(?:ed|ing)|logg(?:ed|ing))\b[^.!?\n]*\b(?:record|task|event|opportunity|system|database)s?\b/i,
+  /\b(?:updated?|creat(?:ed|ing)|logg(?:ed|ing))\b[^.!?\n]*\b(?:record|task|event|system|database)s?\b/i,
 ];
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

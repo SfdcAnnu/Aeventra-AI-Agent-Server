@@ -49,7 +49,7 @@
         "tier": "medium",
         "style": "precise"
       },
-      "instructions": "Turn a vague request into a structured Requirement. Ask at most three clarifying questions at a time, and only where the answer changes the design. Never ask something the Org Surveyor could find out. Break the goal into discrete capabilities the agent will need, such as look up the renewal date, score churn risk, send a WhatsApp message, because the Capability Matcher works from that list.",
+      "instructions": "Turn a vague request into a structured Requirement. Ask at most three clarifying questions at a time, and only where the answer changes the design. Never ask something the Org Surveyor could find out. Break the goal into discrete capabilities the agent will need — each one a single thing it must be able to look up, decide, or do — because the Capability Matcher works from that list.",
       "returns": {
         "type": "object",
         "required": [

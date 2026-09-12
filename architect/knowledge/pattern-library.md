@@ -19,7 +19,7 @@ single-agent version is faster, cheaper, and debuggable.
 ## 2 · Specialist on call (call/return)
 
 **When:** one part of the job needs its own instructions or its own model —
-pricing maths, drafting, scoring — but the lead owns the conversation.
+calculation, drafting, scoring — but the lead owns the conversation.
 **Shape:** agent + one `subagent`, edge `mode: call`, `contextPolicy:
 isolated`, `carryFields` naming exactly what the child needs.
 **Spec:** the child has a typed `returns` schema and a one-sentence
@@ -37,22 +37,22 @@ exist for exactly this).
 
 ## 4 · The permission-boundary split
 
-**When:** one part must see data another part never may — cost, margin,
-discount floors visible to a pricing helper but never to the customer-facing
-lead.
+**When:** one part must see data another part never may — an internal
+threshold, cost basis or eligibility rule a calculating helper needs but the
+customer-facing lead must never be able to repeat.
 **Shape:** pattern 2 with the sensitive tools attached ONLY to the child.
 **Spec:** splitRationale.permission answers true with the data NAMED. The
-child's returns schema carries the outcome (a quote), never the secret
-(the floor).
+child's returns schema carries the OUTCOME the customer may hear, never the
+internal value it was derived from.
 
 ## 5 · Parallel sweep (fan-out)
 
-**When:** many independent items — score 300 accounts, chase 40 renewals.
+**When:** many independent items — the same work repeated across a list of records.
 **Shape:** agent + one worker `subagent`; the lead fans out several calls in
 one response; the runtime executes them concurrently and joins all.
 **Spec:** edge `parallel: true`, `contextPolicy: isolated` (cost stays flat
 per item), budget sized as per-item × items. splitRationale.context answers
-true with the arithmetic ("300 × 8,100 tokens > 0.6 × window").
+true with the arithmetic ("300 items × 8,100 tokens > 0.6 × window").
 
 ## 6 · Approval-gated write
 
@@ -76,7 +76,7 @@ the knowledge base where retrieval, sync and the cache all work.
 
 ## 8 · Record-anchored conversation
 
-**When:** the conversation is about one record — a deal, a case, an order.
+**When:** the whole conversation is about one record, whatever that object is.
 **Shape:** the runtime anchors each session to a record; tools with
 `source: record` inputs pull `{{Object.Field}}` from it.
 **Spec:** never ask the model to restate record ids — map them. The single

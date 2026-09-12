@@ -13,7 +13,7 @@
  * first few fields, so the next turn re-read the artifact, re-described the
  * object, pulled the full 1,315-object index, and finally guessed — four
  * tool calls and ~15k input tokens to recover data it already had. Two
- * Opportunity queries three turns apart were byte-identical.
+ * record queries three turns apart were byte-identical.
  *
  * Three rules follow from that:
  *
