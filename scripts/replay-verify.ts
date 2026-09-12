@@ -315,6 +315,26 @@ const classic = buildChatModel('gpt4', 'gpt-4o',
 check('but it is sent to a classic one',
   (classic.model as unknown as { temperature?: number }).temperature === 0.2);
 
+// ── 10. Responses-only models ────────────────────────────────────────
+console.log('\n10. -pro models go to the Responses API, not chat completions');
+const proModel = buildChatModel('gpt4', 'gpt-5.5-pro',
+  { engineType: 'openai', apiKey: 'sk-test' } as never, 4000, { reasoningEffort: 'high' });
+const proRaw = proModel.model as unknown as { useResponsesApi?: boolean; maxTokens?: number; reasoningEffort?: string };
+check('gpt-5.5-pro uses the Responses API', proRaw.useResponsesApi === true, String(proRaw.useResponsesApi));
+check('it keeps reasoning headroom on top of the cap', (proRaw.maxTokens ?? 0) > 4000, String(proRaw.maxTokens));
+check('reasoning effort is passed as a typed option', proRaw.reasoningEffort === 'high');
+
+for (const name of ['gpt-5-pro', 'o3-pro', 'o1-pro']) {
+  const m = buildChatModel('gpt4', name, { engineType: 'openai', apiKey: 'sk-test' } as never);
+  check(`${name} routes to the Responses API`,
+    (m.model as unknown as { useResponsesApi?: boolean }).useResponsesApi === true);
+}
+for (const name of ['gpt-5.5', 'gpt-4o', 'gpt-4.1-mini']) {
+  const m = buildChatModel('gpt4', name, { engineType: 'openai', apiKey: 'sk-test' } as never);
+  check(`${name} stays on chat completions`,
+    (m.model as unknown as { useResponsesApi?: boolean }).useResponsesApi !== true);
+}
+
 console.log(failures === 0 ? '\nAll replay checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
 }

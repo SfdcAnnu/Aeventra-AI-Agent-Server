@@ -27,6 +27,15 @@ const DEFAULT_MODELS: Record<string, string> = {
  *  model an admin enables does not break every agent in the org. */
 const NEEDS_MAX_COMPLETION_TOKENS = /^(o[1-9]|gpt-5|gpt-[6-9])/i;
 
+/** OpenAI's `-pro` tier (gpt-5-pro, gpt-5.5-pro, o1-pro, o3-pro) is served
+ *  ONLY by the Responses API. Sent to /v1/chat/completions it answers
+ *  404 "This is not a chat model and thus not supported in the
+ *  v1/chat/completions endpoint" — live-confirmed on gpt-5.5-pro, which
+ *  took down a production agent the moment the node's own model started
+ *  winning over the connection default. Detect by name so a future -pro
+ *  release works without a code change. */
+const RESPONSES_API_ONLY = /-pro(-|$)/i;
+
 /** Node subtypes use canvas vocabulary ('gpt4'); engine connections use
  *  admin vocabulary ('openai') — same normalization Apex applies. */
 export function engineTypeForSubtype(nodeSubType: string): 'openai' | 'claude' | 'gemini' {
@@ -120,6 +129,25 @@ export function buildChatModel(
   switch (engineType) {
     case 'openai': {
       const reasoningEra = NEEDS_MAX_COMPLETION_TOKENS.test(modelName);
+
+      // Responses-only models take the library's own typed options. Passing
+      // chat-completions kwargs (max_completion_tokens, response_format)
+      // through to /v1/responses would be rejected, so this path stays
+      // separate rather than bolting onto the branch below.
+      if (RESPONSES_API_ONLY.test(modelName)) {
+        model = new ChatOpenAI({
+          model: modelName,
+          apiKey: creds.apiKey,
+          useResponsesApi: true,
+          // Reasoning shares this budget with the visible answer, same as
+          // the chat-completions reasoning path — give thinking headroom.
+          maxTokens: maxTokens + 4_000,
+          ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+          configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
+        });
+        break;
+      }
+
       const kwargs: Record<string, unknown> = {};
       if (reasoningEra) {
         // max_completion_tokens covers REASONING PLUS the visible answer on
