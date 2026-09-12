@@ -48,6 +48,15 @@ export class TurnRecorder extends BaseCallbackHandler {
 
   readonly steps: RecordedStep[] = [];
   private readonly open = new Map<string, RecordedStep>();
+  /** EVERY tool run currently in flight, recorded or not. A tool reaches
+   *  the runtime wrapped several layers deep — session cache, argument
+   *  pre-flight, approval gate, then the MCP tool itself — and each layer
+   *  is a tool that invokes the next, so LangChain fires a start for all
+   *  of them. Without this, one `soqlQuery` appeared three times, each
+   *  timing the layer below it, and the tool-call count was inflated to
+   *  match. Skipped layers still go in here, so their children are
+   *  recognised as nested too. */
+  private readonly activeToolRuns = new Set<string>();
   private seq = 0;
 
   private begin(step: Omit<RecordedStep, 'seq' | 'startedAt' | 'tokensIn' | 'tokensOut' | 'cacheRead' | 'latencyMs' | 'isError'>, runId: string): void {
@@ -126,21 +135,26 @@ export class TurnRecorder extends BaseCallbackHandler {
     tool: Serialized,
     input: string,
     runId: string,
-    _parentRunId?: string,
-    tags?: string[],
+    parentRunId?: string,
+    _tags?: string[],
     _metadata?: Record<string, unknown>,
     runName?: string,
   ): void {
+    const nested = !!parentRunId && this.activeToolRuns.has(parentRunId);
+    this.activeToolRuns.add(runId);
+    // Only the OUTERMOST layer is the call the model actually made; the
+    // rest are this platform's own wrappers around it.
+    if (nested) return;
     this.begin({
       kind: 'tool_call',
       stage: 'tools',
       name: runName ?? tool?.id?.[tool.id.length - 1] ?? 'tool',
       request: input,
     }, runId);
-    void tags;
   }
 
   override handleToolEnd(output: unknown, runId: string): void {
+    this.activeToolRuns.delete(runId);
     this.close(runId, rec => {
       rec.response = output;
       // A tool that answers with a refusal or an error string did not do
@@ -154,6 +168,7 @@ export class TurnRecorder extends BaseCallbackHandler {
   }
 
   override handleToolError(err: Error, runId: string): void {
+    this.activeToolRuns.delete(runId);
     this.close(runId, rec => {
       rec.isError = true;
       rec.error = err?.message ?? String(err);
@@ -171,6 +186,7 @@ export class TurnRecorder extends BaseCallbackHandler {
       if (!rec.isError) { rec.isError = true; rec.error = 'never completed'; }
     }
     this.open.clear();
+    this.activeToolRuns.clear();
     return this.steps;
   }
 }

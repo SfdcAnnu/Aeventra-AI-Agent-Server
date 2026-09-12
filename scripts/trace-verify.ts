@@ -12,6 +12,7 @@
  */
 import { redact, redactText, redactForStorage, REDACTED } from '../src/trace/redact';
 import { toWireMessages, toWireResponse } from '../src/trace/prompt-parts';
+import { TurnRecorder } from '../src/trace/recorder';
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
 
 let failures = 0;
@@ -208,6 +209,51 @@ check('a genuine cycle is still broken', JSON.stringify(redact(realCycle)).inclu
 check('a real LLMResult redacts without losing its usage',
   (((redact(llmResult) as never as { generations: Array<Array<{ message: { usage_metadata: { input_tokens: number } } }>> })
     .generations[0][0].message.usage_metadata.input_tokens)) === 580);
+
+// ── 8. One tool call is one step, however deeply it is wrapped ───────
+console.log('\n8. Wrapper layers collapse to the call the model actually made');
+{
+  // A tool reaches the runtime wrapped: session cache -> argument
+  // pre-flight -> the MCP tool. Each layer invokes the next, so LangChain
+  // fires a start for every one. Live evidence: a single soqlQuery showed
+  // up as three steps of 2.1s each.
+  const rec = new TurnRecorder();
+  const serialized = { lc: 1, type: 'not_implemented', id: ['soqlQuery'] } as never;
+  rec.handleToolStart(serialized, '{"query":"SELECT Id FROM Account"}', 'outer', undefined, [], {}, 'soqlQuery');
+  rec.handleToolStart(serialized, '{"query":"SELECT Id FROM Account"}', 'mid', 'outer', [], {}, 'soqlQuery');
+  rec.handleToolStart(serialized, '{"query":"SELECT Id FROM Account"}', 'inner', 'mid', [], {}, 'soqlQuery');
+  rec.handleToolEnd('{"records":[]}', 'inner');
+  rec.handleToolEnd('{"records":[]}', 'mid');
+  rec.handleToolEnd('{"records":[]}', 'outer');
+  const steps = rec.finish();
+  check('three wrapper layers record ONE step', steps.length === 1, `got ${steps.length}`);
+  check('it is the outermost layer', steps[0]?.name === 'soqlQuery');
+  check('and it completed', steps[0]?.isError === false && !!steps[0]?.finishedAt);
+}
+{
+  // Two genuinely separate calls must stay two.
+  const rec = new TurnRecorder();
+  const s = { lc: 1, type: 'not_implemented', id: ['soqlQuery'] } as never;
+  rec.handleToolStart(s, '{"q":1}', 'a', undefined, [], {}, 'soqlQuery');
+  rec.handleToolEnd('ok', 'a');
+  rec.handleToolStart(s, '{"q":2}', 'b', undefined, [], {}, 'getObjectSchema');
+  rec.handleToolEnd('ok', 'b');
+  const steps = rec.finish();
+  check('two separate calls stay two steps', steps.length === 2, `got ${steps.length}`);
+  check('each keeps its own name',
+    steps.map(x => x.name).join(',') === 'soqlQuery,getObjectSchema', steps.map(x => x.name).join(','));
+}
+{
+  // A model call nested under nothing is unaffected by the tool logic.
+  const rec = new TurnRecorder();
+  const s = { lc: 1, type: 'not_implemented', id: ['ChatOpenAI'] } as never;
+  rec.handleChatModelStart(s, [[new HumanMessage('hi')]], 'm1', undefined, { invocation_params: { model: 'gpt-5.5' } }, []);
+  rec.handleLLMEnd({ generations: [[{ text: 'hello', message: { usage_metadata: { input_tokens: 10, output_tokens: 2 } } }]] } as never, 'm1');
+  const steps = rec.finish();
+  check('a model call is recorded once with its usage',
+    steps.length === 1 && steps[0].tokensIn === 10 && steps[0].tokensOut === 2,
+    JSON.stringify(steps.map(x => [x.name, x.tokensIn, x.tokensOut])));
+}
 
 console.log(failures === 0 ? '\nAll trace checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
