@@ -63,7 +63,7 @@ import {
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
 import { generateSessionTitleAsync } from '../chat/title-generator';
-import { buildChatModel } from './models';
+import { buildChatModel, modelOptionsFromConfig } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
 import { buildPrebuiltTools } from './prebuilt-tools';
 import { buildReadArtifactTool, spillIfLarge } from './artifact-store';
@@ -190,10 +190,15 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   ).sort((a, b) => a.name.localeCompare(b.name));
 
   try {
+    // Answer style / Thinking effort / Longest reply, straight off the root
+    // node's inspector. They were stored and ignored before this.
+    const rootTuning = modelOptionsFromConfig(aiNode.config);
     const { model: routerBase, modelName } = buildChatModel(
       aiNode.nodeSubType,
       (aiNode.config as { model?: string })?.model,
       req.engineOverride,
+      rootTuning.maxTokens,
+      rootTuning.options,
     );
 
     const promptParts = await buildSystemPromptParts(
@@ -614,10 +619,14 @@ async function runSubagentTurn(
   const subApprovalNames = approvalRequiredNames(subActions);
   const subMcpTools = loaded.tools.map(t => (subApprovalNames.has(t.name) ? subGate(t) : t));
   try {
+    // Same inspector knobs, this specialist's own values.
+    const subTuning = modelOptionsFromConfig(synthetic.config);
     const { model, modelName } = buildChatModel(
       synthetic.nodeSubType,
       (synthetic.config as { model?: string })?.model,
       req.engineOverride,
+      subTuning.maxTokens,
+      subTuning.options,
     );
     const subParts = await buildSystemPromptParts(
       req.agent, synthetic, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
