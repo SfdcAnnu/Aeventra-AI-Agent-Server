@@ -12,7 +12,7 @@ import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
-import { toLangchainMessages } from '../src/lc/graph-runtime';
+import { toLangchainMessages, extractToolCalls, turnHasWrite } from '../src/lc/graph-runtime';
 import { budgetToolReplays, decodeStoredResult, parseToolRow } from '../src/chat/tool-replay';
 import { withSessionResultCache, invalidateSession } from '../src/lc/tool-result-cache';
 import { createTurnBudget, noteUsage, noteToolCall, usageByModel } from '../src/lc/turn-budget';
@@ -357,6 +357,53 @@ for (const [label, um, rm, expected] of cases) {
   noteUsage(b, withUsage(um, rm), 'router', 'gpt-5.5-pro');
   check(label, b.cacheReadTokens === expected, `got ${b.cacheReadTokens}, expected ${expected}`);
 }
+
+// ── 12. Replayed history must not be mistaken for this turn ──────────
+console.log('\n12. Turn-end scans see only THIS turn');
+// Reproduces the live regression: once history replays as real tool-call
+// pairs, scanning the whole message list re-reports every earlier call as
+// if it had just happened — duplicate Tool rows with identical provider
+// ids, and an old write licensing a fresh "I've updated it" claim.
+const priorTurn: ChatHistoryMessage[] = [
+  { role: 'user', content: 'what are the line items?' },
+  toolRow('soqlQuery', { query: 'SELECT Id FROM OpportunityLineItem' }, OPP_RESULT, 'call_OLD1'),
+  toolRow('updateSobjectRecord', { body: '{}' }, '{"id":"006x","success":true}', 'call_OLD2'),
+  { role: 'assistant', content: 'Here they are.' },
+];
+const historyReplay = toLangchainMessages(priorTurn, 'and the price?', []);
+const turnStart = historyReplay.length;
+
+check('replayed history carries real tool calls',
+  historyReplay.some(m => m instanceof AIMessage && (m.tool_calls?.length ?? 0) > 0));
+
+// A fresh turn that called nothing at all.
+const quietTurn = [...historyReplay, new AIMessage('The total is 65,000.')];
+check('a turn with no tool calls reports none',
+  extractToolCalls(quietTurn.slice(turnStart), { serverByTool: new Map() } as never).length === 0,
+  `got ${extractToolCalls(quietTurn.slice(turnStart), { serverByTool: new Map() } as never).length}`);
+check('scanning everything would wrongly report the earlier ones',
+  extractToolCalls(quietTurn, { serverByTool: new Map() } as never).length === 2,
+  'guard: confirms the slice is what fixes it');
+
+// A fresh turn that made ONE new call.
+const busyTurn = [
+  ...historyReplay,
+  new AIMessage({ content: '', tool_calls: [{ id: 'call_NEW', name: 'soqlQuery', args: {}, type: 'tool_call' as const }] }),
+  new ToolMessage({ tool_call_id: 'call_NEW', name: 'soqlQuery', content: OPP_RESULT }),
+  new AIMessage('Done.'),
+];
+const fresh = extractToolCalls(busyTurn.slice(turnStart), { serverByTool: new Map() } as never);
+check('only the new call is reported', fresh.length === 1 && fresh[0].id === 'call_NEW',
+  JSON.stringify(fresh.map(f => f.id)));
+
+check("an earlier turn's write does not count as this turn's",
+  turnHasWrite(quietTurn.slice(turnStart)) === false);
+check('a write made THIS turn still counts',
+  turnHasWrite([
+    ...historyReplay,
+    new AIMessage({ content: '', tool_calls: [{ id: 'call_W', name: 'updateSobjectRecord', args: {}, type: 'tool_call' as const }] }),
+    new ToolMessage({ tool_call_id: 'call_W', name: 'updateSobjectRecord', content: '{"success":true}' }),
+  ].slice(turnStart)) === true);
 
 console.log(failures === 0 ? '\nAll replay checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
