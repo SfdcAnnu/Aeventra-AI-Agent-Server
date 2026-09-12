@@ -58,7 +58,7 @@ import {
   scrubReply,
   findActionClaim,
   ACTION_CLAIM_CORRECTION,
-  WRITE_TOOL_NAMES,
+  isWriteToolName,
 } from '../chat/output-guardrails';
 import { loadAttachments, type LoadedAttachment } from '../chat/adapters/attachments';
 import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from '../chat/memory';
@@ -67,6 +67,8 @@ import { buildChatModel } from './models';
 import { loadMcpTools, type LoadedMcpTools } from './mcp-tools';
 import { buildPrebuiltTools } from './prebuilt-tools';
 import { buildReadArtifactTool, spillIfLarge } from './artifact-store';
+import { withSessionResultCache } from './tool-result-cache';
+import { budgetToolReplays, parseToolRow, type ParsedToolRow } from '../chat/tool-replay';
 import { approvalGate, approvalRequiredNames } from './approval-gate';
 import {
   createTurnBudget,
@@ -178,7 +180,13 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   );
   // Byte-stable tool ordering — part of the cacheable prefix on every
   // provider; unordered tools silently change the prefix hash per request.
-  const routerTools = [...mcpTools, ...prebuiltTools, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
+  // The session result cache goes on LAST so it sees the approval gate's
+  // verdict as the call's result — a parked PENDING_APPROVAL is a
+  // non-answer and is never cached (tool-result-cache.ts).
+  const routerTools = withSessionResultCache(
+    [...mcpTools, ...prebuiltTools, buildReadArtifactTool()],
+    req.sessionId,
+  ).sort((a, b) => a.name.localeCompare(b.name));
 
   try {
     const { model: routerBase, modelName } = buildChatModel(
@@ -615,7 +623,12 @@ async function runSubagentTurn(
       { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
       graph, subagentNode, subGate,
     );
-    const subTools = [...subMcpTools, ...subPrebuilt, buildReadArtifactTool()].sort((a, b) => a.name.localeCompare(b.name));
+    // Same session cache as the router — a specialist re-reading what the
+    // lead agent already fetched this session is the commonest repeat.
+    const subTools = withSessionResultCache(
+      [...subMcpTools, ...subPrebuilt, buildReadArtifactTool()],
+      req.sessionId,
+    ).sort((a, b) => a.name.localeCompare(b.name));
     const bound = model.bindTools(subTools);
 
     const subNode = async (state: typeof MessagesAnnotation.State) => {
@@ -666,31 +679,100 @@ async function runSubagentTurn(
 
 // ── Mapping helpers ─────────────────────────────────────────────────
 
-function toLangchainMessages(
+/** Exported for scripts/replay-verify.ts — history replay is the one piece
+ *  whose bugs are invisible until a live conversation misbehaves. */
+export function toLangchainMessages(
   history: ChatHistoryMessage[],
   newUserMessage: string,
   attachments: LoadedAttachment[],
 ): BaseMessage[] {
   const out: BaseMessage[] = [];
-  for (const m of history) {
-    if (m.role === 'system') continue;
-    if (m.role === 'tool') {
-      // Persisted tool RESULTS carry the exact record Ids/values later
-      // turns must reuse — fold each into the preceding assistant message
-      // (same fix as both original adapters; dropping them caused invented
-      // record Ids, live-confirmed on the WhatsApp path).
-      const summary = summarizeToolHistoryEntry(m);
+
+  // Budget every persisted tool result in this history up front: recency
+  // decides how much of each survives, under one global cap (tool-replay.ts).
+  const parsedByIndex = new Map<number, ParsedToolRow>();
+  const toolOrder: number[] = [];
+  history.forEach((m, i) => {
+    if (m.role !== 'tool') return;
+    const parsed = parseToolRow(m);
+    if (!parsed) return;
+    parsedByIndex.set(i, parsed);
+    toolOrder.push(i);
+  });
+  const budgeted = budgetToolReplays(toolOrder.map(i => parsedByIndex.get(i)!.result));
+  toolOrder.forEach((i, k) => { parsedByIndex.get(i)!.result = budgeted[k]; });
+
+  let pending: ParsedToolRow[] = [];
+
+  const flushTools = () => {
+    if (pending.length === 0) return;
+    const run = pending;
+    pending = [];
+
+    const ids = run.map(p => p.id);
+    const pairable = ids.every((id): id is string => !!id) && new Set(ids).size === ids.length;
+
+    // Anthropic requires the first message to be a user turn, so a history
+    // slice that BEGINS mid-tool-run (assembleMemory cuts at an arbitrary
+    // point) can't open with an assistant message. Replay it as labelled
+    // context instead — honest about what it is, and valid on every provider.
+    if (out.length === 0) {
+      const block = run
+        .map(p => summarizeToolHistoryEntry({ content: p.result, toolCallsJson: JSON.stringify({ name: p.name }) }))
+        .filter((s): s is string => !!s);
+      if (block.length > 0) {
+        out.push(new HumanMessage(`[Context from earlier in this conversation]\n${block.join('\n')}`));
+      }
+      return;
+    }
+
+    if (pairable) {
+      // Real tool-call/tool-result pairs. A model treats these as VERIFIED
+      // output it already holds; the prose fallback below reads as something
+      // it merely SAID, which is why it kept re-running the same queries
+      // (live-diagnosed, session CHAT-0149). Needs the provider's original
+      // tool_call id — persisted since AgentChatController stopped writing
+      // null — and every call must have its answer, or the provider rejects
+      // the request outright (INVALID_TOOL_RESULTS killed a live turn once).
+      out.push(new AIMessage({
+        content: '',
+        tool_calls: run.map(p => ({ id: p.id!, name: p.name, args: p.args, type: 'tool_call' as const })),
+      }));
+      for (const p of run) {
+        out.push(new ToolMessage({ tool_call_id: p.id!, name: p.name, content: p.result || '(no output)' }));
+      }
+      return;
+    }
+
+    // Pre-fix rows (and anything missing a call id) keep the original
+    // fold-into-prose path — never drop them, that caused invented Ids.
+    for (const p of run) {
+      const summary = summarizeToolHistoryEntry({
+        content: p.result,
+        toolCallsJson: JSON.stringify({ name: p.name }),
+      });
       if (!summary) continue;
       const prev = out[out.length - 1];
-      if (prev instanceof AIMessage && typeof prev.content === 'string') {
+      if (prev instanceof AIMessage && typeof prev.content === 'string' && !(prev.tool_calls?.length)) {
         out[out.length - 1] = new AIMessage(`${prev.content}\n\n${summary}`);
       } else {
         out.push(new AIMessage(summary));
       }
+    }
+  };
+
+  for (let i = 0; i < history.length; i++) {
+    const m = history[i];
+    if (m.role === 'system') continue;
+    if (m.role === 'tool') {
+      const parsed = parsedByIndex.get(i);
+      if (parsed) pending.push(parsed);
       continue;
     }
+    flushTools();
     out.push(m.role === 'assistant' ? new AIMessage(m.content) : new HumanMessage(m.content));
   }
+  flushTools();
   if (attachments.length === 0) {
     out.push(new HumanMessage(newUserMessage || '(no message)'));
     return out;
@@ -746,9 +828,9 @@ function sumUsage(messages: BaseMessage[]): { tokensIn: number; tokensOut: numbe
  *  Custom Apex/Flow actions (apex__ and flow__ prefixes) count — they
  *  exist to perform writes. */
 function turnHasWrite(messages: BaseMessage[]): boolean {
-  const isWriteName = (name: string) =>
-    WRITE_TOOL_NAMES.has(name) || name.startsWith('apex__') || name.startsWith('flow__') ||
-    name.startsWith('do_'); // prebuilt create/update actions (lc/prebuilt-tools.ts)
+  // Shared with the session result cache (output-guardrails.isWriteToolName)
+  // so the two can never disagree about what counts as a write.
+  const isWriteName = isWriteToolName;
 
   // A call whose result says it never ran doesn't count: hard errors,
   // pre-flight rejections (REJECTED:...), loop blocks (BLOCKED —...) and
