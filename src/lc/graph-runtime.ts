@@ -69,6 +69,8 @@ import { buildPrebuiltTools } from './prebuilt-tools';
 import { buildReadArtifactTool, spillIfLarge } from './artifact-store';
 import { withSessionResultCache } from './tool-result-cache';
 import { budgetToolReplays, parseToolRow, type ParsedToolRow } from '../chat/tool-replay';
+import { TurnRecorder, traceCaptureEnabled } from '../trace/recorder';
+import { persistTrace } from '../trace/writer';
 import { approvalGate, approvalRequiredNames } from './approval-gate';
 import {
   createTurnBudget,
@@ -146,6 +148,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // the identical-call loop detector, shared across the WHOLE turn (router,
   // subagent, corrective passes). Checked BEFORE spending, not after.
   const budget = createTurnBudget(aiNode.config);
+
+  // Internal flight recorder. Off unless TRACE_CAPTURE=full, and even when
+  // on it only pushes to an array during the turn — everything expensive
+  // happens after the reply is sent (see trace/writer.ts).
+  const recorder = traceCaptureEnabled() ? new TurnRecorder() : null;
 
   logger.info({
     orgId: req.context.orgId,
@@ -353,11 +360,12 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         // with a structured, attributable reason (doc rule: framework limit
         // sits ABOVE the enforced budget).
         recursionLimit: budget.maxSteps * 2 + 8,
-        // LangSmith trace identity — with LANGSMITH_TRACING=true every model
-        // call, tool execution and graph step lands under this named run,
-        // filterable by agent/org/session in the LangSmith UI.
+        // Run identity. The turn recorder reads these tags to label each
+        // step's stage, and they stay useful in logs regardless of whether
+        // capture is on.
         runName: `chat-turn ${req.agent.apiName}`,
         tags: ['chat-turn', req.agent.apiName],
+        ...(recorder ? { callbacks: [recorder] } : {}),
         metadata: {
           orgId: req.context.orgId,
           sessionId: req.sessionId,
@@ -565,6 +573,31 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       ...(activeSubagentName !== null ? { activeTopicName: activeSubagentName } : {}),
       ...(req.debugMode ? { debugRequest, debugResponse } : {}),
     };
+
+    // Flight recorder — queued, never awaited. The reply is already
+    // built; this costs the turn nothing (see trace/writer.ts).
+    if (recorder) {
+      persistTrace(
+        {
+          orgId: req.context.orgId,
+          userId: req.context.userId,
+          agentApiName: req.agent.apiName,
+          agentId: req.agent.id ?? null,
+          agentName: req.agent.name ?? null,
+          sessionId: req.sessionId,
+          recordId: req.context.recordContextId ?? null,
+          channel: req.context.recordContextId ? 'record' : 'chat',
+        },
+        {
+          status: 'complete',
+          tokensIn, tokensOut,
+          cachedTokens: budget.cacheReadTokens,
+          latencyMs: Date.now() - t0,
+          usageByModel: result.usage,
+        },
+        recorder.finish(),
+      );
+    }
 
     // Post-reply hooks — identical to the original server.
     maybeUpdateMemoryAsync({

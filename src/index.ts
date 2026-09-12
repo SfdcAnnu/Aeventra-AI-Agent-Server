@@ -13,6 +13,9 @@ import { engineRouter } from './routes/engine.routes';
 import { kbRouter } from './routes/kb.routes';
 import { runsRouter } from './routes/runs.routes';
 import { wsRouter } from './routes/ws.routes';
+import { adminTracesRouter, adminTracesEnabled } from './routes/admin-traces.routes';
+import { startTraceRetention } from './trace/retention';
+import { traceCaptureEnabled } from './trace/recorder';
 import { attach as attachWsGateway } from './ws/gateway';
 import { startRunPoller } from './scheduler/run-poller';
 
@@ -36,6 +39,16 @@ function buildApp(): express.Express {
   app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
   app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
   app.use(wsRouter);         // /api/ws/ticket — sessionAuth-guarded (Apex-only)
+
+  // Internal flight recorder. Mounted ONLY when ADMIN_API_KEY is set, so a
+  // default deployment has no cross-tenant surface at all — forgetting to
+  // configure it fails closed rather than open. Not sessionAuth: this one
+  // reads across orgs, which is exactly why no subscriber may reach it.
+  if (adminTracesEnabled) {
+    app.use(adminTracesRouter);
+    logger.info({ capture: traceCaptureEnabled() ? 'full' : 'off' }, 'admin_traces_enabled');
+    startTraceRetention();
+  }
 
   // Final error handler. body-parser/http errors carry a real statusCode
   // (413 too-large, 400 bad JSON, …) — pass it through instead of masking

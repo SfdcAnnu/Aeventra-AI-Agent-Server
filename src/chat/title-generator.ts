@@ -14,7 +14,6 @@
  * Never throws. All errors are swallowed + logged. A missing title is fine;
  * a broken chat turn because of title generation is not.
  */
-import { traceable } from 'langsmith/traceable';
 import { logger } from '../logger';
 import type { ChatHistoryMessage } from './adapters/types';
 import { resolveEngine, type EngineOverride } from './engine-resolver';
@@ -62,14 +61,9 @@ export interface GenerateTitleParams {
 }
 
 /** Fire-and-forget wrapper — call this after a turn returns; do not await.
- *  Traced as its own LangSmith run (raw provider fetch inside — invisible
- *  otherwise); only identifying fields enter the trace, never the API key. */
+ *  Fire-and-forget: a title is never worth delaying or failing a turn. */
 export function generateSessionTitleAsync(params: GenerateTitleParams): void {
-  const traced = traceable(
-    (_ctx: { orgId: string; sessionId: string; engineType: string }) => generateSessionTitle(params),
-    { name: 'session-title', run_type: 'chain' },
-  );
-  traced({ orgId: params.orgId, sessionId: params.sessionId, engineType: params.engineType }).catch((err: unknown) => {
+  generateSessionTitle(params).catch((err: unknown) => {
     logger.warn({ err, sessionId: params.sessionId }, 'title_generation_failed');
   });
 }
