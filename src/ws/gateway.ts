@@ -216,17 +216,10 @@ async function persistTurnUsage(
     state = await resolveWsChatSession(conn, ctx.sessionId, agentId, ctx.userId, department);
     wsSessionState.set(ws, state);
   }
-  await recordWsTurn(
-    conn,
-    state.chatSessionId,
-    state.nextSeq,
-    userText,
-    result.assistantText,
-    result.modelUsed,
-    result.tokensIn,
-    result.tokensOut,
-  );
-  state.nextSeq += 2;
+  // Advance by however many rows were actually written — a turn with tool
+  // calls writes more than the user+assistant pair.
+  const written = await recordWsTurn(conn, state.chatSessionId, state.nextSeq, userText, result);
+  state.nextSeq += written;
 }
 
 export function attach(server: Server): void {
