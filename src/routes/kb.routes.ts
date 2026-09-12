@@ -13,6 +13,7 @@ import { logger } from '../logger';
 import { indexDocument, reindexDocument, deleteDocument } from '../kb/indexer';
 import { testExternalPostgresConnection, closeExternalClient } from '../kb/backends/external-postgres';
 import { extractTextFromUpload } from '../kb/file-extract';
+import { hasReadyKbDocuments, retrieveKb, formatKbContext } from '../kb/retriever';
 
 export const kbRouter = Router();
 
@@ -113,6 +114,46 @@ kbRouter.get('/api/kb/documents', sessionAuth, async (req, res) => {
     },
   });
   res.json({ documents: docs });
+});
+
+/**
+ * Retrieval test — runs the EXACT path a turn runs, so what comes back is
+ * literally what the agent would be handed for that question, not an
+ * approximation of it. Same embedding, same backend, same top-k, same
+ * formatting (retriever.ts). A KB you cannot query is a KB you cannot
+ * trust: this is how you find out that the answer is missing, or that the
+ * wrong passage wins, without spending a live turn to discover it.
+ */
+kbRouter.post('/api/kb/search', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const agentApiName = String(req.body?.agentApiName ?? '');
+  const query = String(req.body?.query ?? '').trim();
+  if (!agentApiName || !query) {
+    res.status(400).json({ error: 'missing_agentApiName_or_query' });
+    return;
+  }
+  const k = Math.min(Math.max(Number(req.body?.k) || 6, 1), 20);
+
+  try {
+    const ready = await hasReadyKbDocuments(orgId, agentApiName);
+    if (!ready) {
+      res.json({ chunks: [], formatted: '', note: 'No indexed documents for this agent yet.' });
+      return;
+    }
+    const chunks = await retrieveKb({
+      orgId,
+      agentApiName,
+      query,
+      k,
+      engineOverride: req.body?.engineOverride ?? null,
+    });
+    res.json({ chunks, formatted: formatKbContext(chunks) });
+  } catch (err) {
+    // Embedding needs the org's own provider key; say so rather than 500.
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ orgId, agentApiName, err: message }, 'kb_search_failed');
+    res.status(400).json({ error: 'kb_search_failed', message });
+  }
 });
 
 kbRouter.post('/api/kb/documents', sessionAuth, async (req, res) => {
