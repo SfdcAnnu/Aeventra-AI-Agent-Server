@@ -16,6 +16,7 @@ import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
 import { hasReadyKbDocuments, retrieveKb, formatKbContext } from '../../kb/retriever';
 import { decodeStoredResult } from '../tool-replay';
+import { buildRecordContextBlock } from '../record-context';
 import type { AgentDefinition, AgentNode } from '../../types';
 import type { ChatTurnRequest, EngineOverrideInput } from './types';
 import type { Connector } from '@prisma/client';
@@ -502,6 +503,13 @@ export async function buildSystemPromptParts(
       `This conversation is anchored to the ${ctx.recordContextType ?? 'record'} with Id ${ctx.recordContextId}. ` +
       `Use this record as the context for lookups and actions unless told otherwise.`,
     );
+    // ...and its actual values, so the agent does not spend a tool call —
+    // and therefore another whole model call — rediscovering them on every
+    // single turn (see chat/record-context.ts).
+    const recordBlock = await buildRecordContextBlock(
+      ctx.orgId, ctx.recordContextType, ctx.recordContextId,
+    );
+    if (recordBlock) volatileParts.push(recordBlock);
   }
 
   return {
