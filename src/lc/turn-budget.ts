@@ -106,6 +106,53 @@ export function checkBudget(b: TurnBudget): string | null {
 
 /** Accumulate real usage from a model response; each call is also one
  *  billable transition (Phase 7). */
+/**
+ * How many input tokens were served from the prompt cache.
+ *
+ * Worth reading from several shapes, because the providers do not agree
+ * and the library only normalises one of them:
+ *
+ *  - Chat Completions reports `prompt_tokens_details.cached_tokens`, which
+ *    LangChain maps to usage_metadata.input_token_details.cache_read.
+ *  - The RESPONSES API reports `input_tokens_details.cached_tokens` — a
+ *    different key that the installed @langchain/openai does not map at
+ *    all, so cache_read reads 0 there no matter how well the cache is
+ *    working. Every `-pro` model runs on that path, so without this the
+ *    cached share of our biggest, most expensive prompts is invisible.
+ *  - Anthropic reports cache reads separately again.
+ *
+ * Falls back through the raw response metadata rather than trusting one
+ * normalised field. Returns 0 when nothing reports a hit.
+ */
+function readCacheHits(msg: AIMessage): number {
+  const asNum = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+
+  const normalised = (msg.usage_metadata as
+    | { input_token_details?: { cache_read?: unknown } }
+    | undefined)?.input_token_details?.cache_read;
+  if (asNum(normalised)) return asNum(normalised);
+
+  const meta = msg.response_metadata as Record<string, unknown> | undefined;
+  const usage = (meta?.usage ?? meta?.tokenUsage ?? meta?.estimatedTokenUsage) as
+    | Record<string, unknown>
+    | undefined;
+  if (!usage) return 0;
+
+  const candidates: unknown[] = [
+    // Responses API
+    (usage.input_tokens_details as { cached_tokens?: unknown } | undefined)?.cached_tokens,
+    // Chat Completions, straight from the raw payload
+    (usage.prompt_tokens_details as { cached_tokens?: unknown } | undefined)?.cached_tokens,
+    // Anthropic
+    usage.cache_read_input_tokens,
+  ];
+  for (const c of candidates) {
+    const n = asNum(c);
+    if (n) return n;
+  }
+  return 0;
+}
+
 export function noteUsage(b: TurnBudget, msg: AIMessage, stage = 'model', model?: string): void {
   b.modelCalls += 1;
   const u = msg.usage_metadata;
@@ -115,10 +162,7 @@ export function noteUsage(b: TurnBudget, msg: AIMessage, stage = 'model', model?
   b.tokensUsed += tokensIn + tokensOut;
   b.tokensIn += tokensIn;
   b.tokensOut += tokensOut;
-  // Cache-hit visibility (the "highest-value alert"): OpenAI reports
-  // cached prompt tokens in input_token_details.cache_read via LangChain.
-  const det = (u as { input_token_details?: { cache_read?: number } }).input_token_details;
-  const cacheRead = det?.cache_read ?? 0;
+  const cacheRead = readCacheHits(msg);
   if (cacheRead) b.cacheReadTokens += cacheRead;
   if (b.events.length < MAX_EVENTS) {
     b.events.push({ kind: 'model_call', stage, model, tokensIn, tokensOut, ...(cacheRead ? { cacheRead } : {}) });

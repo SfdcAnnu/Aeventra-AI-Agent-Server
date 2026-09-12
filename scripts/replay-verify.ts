@@ -335,6 +335,29 @@ for (const name of ['gpt-5.5', 'gpt-4o', 'gpt-4.1-mini']) {
     (m.model as unknown as { useResponsesApi?: boolean }).useResponsesApi !== true);
 }
 
+// ── 11. Cache hits are read from every provider's own shape ──────────
+console.log('\n11. Cached-token reporting survives the provider differences');
+const withUsage = (usage_metadata: unknown, response_metadata?: unknown) =>
+  new AIMessage({ content: '', ...(usage_metadata ? { usage_metadata } : {}), ...(response_metadata ? { response_metadata } : {}) } as never);
+
+const base = { input_tokens: 1000, output_tokens: 10, total_tokens: 1010 };
+const cases: Array<[string, unknown, unknown, number]> = [
+  ['chat completions (normalised by the library)',
+    { ...base, input_token_details: { cache_read: 640 } }, undefined, 640],
+  ['Responses API raw shape (library maps nothing)',
+    base, { usage: { input_tokens_details: { cached_tokens: 768 } } }, 768],
+  ['chat completions raw shape',
+    base, { usage: { prompt_tokens_details: { cached_tokens: 512 } } }, 512],
+  ['Anthropic raw shape',
+    base, { usage: { cache_read_input_tokens: 384 } }, 384],
+  ['no cache hit anywhere', base, { usage: {} }, 0],
+];
+for (const [label, um, rm, expected] of cases) {
+  const b = createTurnBudget({});
+  noteUsage(b, withUsage(um, rm), 'router', 'gpt-5.5-pro');
+  check(label, b.cacheReadTokens === expected, `got ${b.cacheReadTokens}, expected ${expected}`);
+}
+
 console.log(failures === 0 ? '\nAll replay checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
 }
