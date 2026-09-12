@@ -15,6 +15,7 @@ import { refreshGoogleToken } from '../../oauth/google';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
 import { hasReadyKbDocuments, retrieveKb, formatKbContext } from '../../kb/retriever';
+import { decodeStoredResult } from '../tool-replay';
 import type { AgentDefinition, AgentNode } from '../../types';
 import type { ChatTurnRequest, EngineOverrideInput } from './types';
 import type { Connector } from '@prisma/client';
@@ -389,15 +390,24 @@ export function isDeferralText(text: string): boolean {
  *  folded into the adjacent assistant message by both adapters' history
  *  mappers so exact record Ids/values survive into later turns (the same
  *  cure ChatPanel applies client-side on the WS path). */
-export function summarizeToolHistoryEntry(m: { content: string; toolCallsJson?: string | null; toolResultsJson?: string | null }): string | null {
+export function summarizeToolHistoryEntry(
+  m: { content: string; toolCallsJson?: string | null; toolResultsJson?: string | null },
+  /** Chars to keep. The caller normally budgets by recency first
+   *  (chat/tool-replay.ts) and passes already-sized text; this flat cap is
+   *  the floor for callers that don't. */
+  maxChars = 600,
+): string | null {
   let name = 'tool';
   try {
     const j = JSON.parse(m.toolCallsJson ?? '{}') as { name?: string };
     if (j.name) name = j.name;
   } catch { /* keep default */ }
-  const output = (m.content ?? '').trim() || (m.toolResultsJson ?? '').trim();
-  if (!output) return null;
-  const clipped = output.length > 600 ? output.slice(0, 600) + '…' : output;
+  const raw = (m.content ?? '').trim() || (m.toolResultsJson ?? '').trim();
+  if (!raw) return null;
+  // Apex stores results double-encoded (JSON.serialize of a String) — the
+  // escaped form costs tokens in backslashes alone.
+  const output = decodeStoredResult(raw);
+  const clipped = output.length > maxChars ? output.slice(0, maxChars) + '…' : output;
   return `[Earlier tool result — ${name}: ${clipped}\nReuse exact Ids/values from here in later turns; never invent or truncate them.]`;
 }
 

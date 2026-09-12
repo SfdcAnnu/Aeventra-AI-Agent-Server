@@ -45,6 +45,19 @@ export const WRITE_TOOL_NAMES = new Set([
   'bulkUpdateSobjectRecords',
 ]);
 
+/** True when a tool name denotes a WRITE. Custom Apex/Flow actions
+ *  (apex__/flow__) and the prebuilt create/update actions (do_*) count —
+ *  they exist to perform writes.
+ *
+ *  Shared deliberately: the action-claim guard uses it to decide whether a
+ *  reply may assert something happened, and the session result cache uses
+ *  it to decide what must never be served from cache (and what invalidates
+ *  it). Those two must never disagree about what a write is. */
+export function isWriteToolName(name: string): boolean {
+  return WRITE_TOOL_NAMES.has(name) ||
+    name.startsWith('apex__') || name.startsWith('flow__') || name.startsWith('do_');
+}
+
 const COMPLETED_CLAIM_RE =
   /\b(?:i(?:'|’)?ve|i\s+have|has\s+been|have\s+been|is\s+now|are\s+now)\s+(?:successfully\s+|officially\s+|now\s+)?(?:scheduled|booked|arranged|registered|logged|created|updated|recorded|set(?:\s+up)?)\b|\byour\s+(?:request|case|meeting|call)\s+is\s+(?:registered|booked|scheduled|logged|confirmed)\b/i;
 
