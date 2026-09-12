@@ -57,10 +57,17 @@ export function redactText(input: string): string {
  *
  * `maxChars` caps any single string — a trace is for diagnosis, not
  * archival, and one runaway tool result should not define the row size.
+ *
  * Cycles are broken rather than throwing: this runs on the post-response
- * path and must never be the thing that fails.
+ * path and must never be the thing that fails. Detection tracks the
+ * current PATH, not everything already seen — an object reached twice by
+ * different routes is shared, not circular, and marking it "[circular]"
+ * silently deletes real content. LangChain objects share sub-objects
+ * constantly (a message's tool_calls array is the same array its
+ * lc_kwargs holds), so the naive version blanked fields that were
+ * perfectly serialisable.
  */
-export function redact(value: unknown, maxChars = 20_000, seen = new WeakSet<object>()): unknown {
+export function redact(value: unknown, maxChars = 20_000, path = new WeakSet<object>()): unknown {
   if (value === null || value === undefined) return value;
 
   if (typeof value === 'string') {
@@ -74,22 +81,28 @@ export function redact(value: unknown, maxChars = 20_000, seen = new WeakSet<obj
   if (typeof value === 'function' || typeof value === 'symbol') return undefined;
 
   if (typeof value === 'object') {
-    if (seen.has(value as object)) return '[circular]';
-    seen.add(value as object);
+    const obj = value as object;
+    if (path.has(obj)) return '[circular]';
+    path.add(obj);
+    try {
+      if (Array.isArray(value)) return value.map(v => redact(v, maxChars, path));
+      if (value instanceof Date) return value.toISOString();
+      if (value instanceof Error) return { name: value.name, message: redactText(value.message) };
+      // Exotic containers: record their shape, not their guts.
+      if (value instanceof Map) return { '[Map]': redact(Object.fromEntries(value), maxChars, path) };
+      if (value instanceof Set) return { '[Set]': redact([...value], maxChars, path) };
 
-    if (Array.isArray(value)) return value.map(v => redact(v, maxChars, seen));
-    if (value instanceof Date) return value.toISOString();
-    if (value instanceof Error) return { name: value.name, message: redactText(value.message) };
-    // Exotic containers: record their shape, not their guts.
-    if (value instanceof Map) return { '[Map]': redact(Object.fromEntries(value), maxChars, seen) };
-    if (value instanceof Set) return { '[Set]': redact([...value], maxChars, seen) };
-
-    const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      // Fails closed: the NAME alone is enough, whatever the value is.
-      out[key] = SECRET_KEY_RE.test(key) ? REDACTED : redact(v, maxChars, seen);
+      const out: Record<string, unknown> = {};
+      for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+        // Fails closed: the NAME alone is enough, whatever the value is.
+        out[key] = SECRET_KEY_RE.test(key) ? REDACTED : redact(v, maxChars, path);
+      }
+      return out;
+    } finally {
+      // Leaving this branch of the tree — the object is no longer an
+      // ancestor, so seeing it again elsewhere is sharing, not a cycle.
+      path.delete(obj);
     }
-    return out;
   }
   return undefined;
 }

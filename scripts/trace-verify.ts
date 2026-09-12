@@ -11,7 +11,7 @@
  *   npx tsx scripts/trace-verify.ts
  */
 import { redact, redactText, redactForStorage, REDACTED } from '../src/trace/redact';
-import { toWireMessages } from '../src/trace/prompt-parts';
+import { toWireMessages, toWireResponse } from '../src/trace/prompt-parts';
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
 
 let failures = 0;
@@ -155,6 +155,59 @@ check('tool calls keep their id and arguments',
 check('a tool result keeps its tool_call_id', (wire[3] as { tool_call_id?: string }).tool_call_id === 'call_1');
 check('redaction still works on the wire shape',
   absent(redact(toWireMessages([new SystemMessage(`key ${SK}`)])), SK));
+
+// ── 7. Responses too, and sharing is not a cycle ─────────────────────
+console.log('\n7. A stored response keeps what matters and nothing else');
+const REPLY = 'Hello! How can I help you with Salesforce today?';
+// Shaped exactly like a real LLMResult, including the shared references
+// that made the naive cycle check blank real fields.
+const sharedToolCalls = [{ id: 'call_9', name: 'soqlQuery', args: { q: 'SELECT Id FROM Account' } }];
+const sharedUsage = {
+  input_tokens: 580, output_tokens: 14, total_tokens: 594,
+  input_token_details: { audio: 0, cache_read: 128 },
+  output_token_details: { audio: 0, reasoning: 6 },
+};
+const message = {
+  id: 'chatcmpl-ENLfEIogDlKn2U00l6Y1jwqalcSI2',
+  content: REPLY,
+  tool_calls: sharedToolCalls,
+  usage_metadata: sharedUsage,
+  response_metadata: { model_name: 'gpt-5.5-2026-04-23', finish_reason: 'stop' },
+  // The duplication LangChain creates: the same values again, same objects.
+  lc_kwargs: { content: REPLY, tool_calls: sharedToolCalls, usage_metadata: sharedUsage },
+};
+const llmResult = {
+  generations: [[{ text: REPLY, message, generationInfo: { finish_reason: 'stop' } }]],
+  llmOutput: { tokenUsage: { totalTokens: 594, promptTokens: 580, completionTokens: 14 } },
+};
+
+const resp = toWireResponse(llmResult);
+const respJson = JSON.stringify(resp);
+check('the reply appears exactly once',
+  respJson.split(REPLY).length - 1 === 1, `appeared ${respJson.split(REPLY).length - 1}x`);
+check('no lc_kwargs survives', !respJson.includes('lc_kwargs'));
+check('token usage is readable, not "[circular]"',
+  (resp.usage as { input_tokens: number }).input_tokens === 580 && !respJson.includes('[circular]'));
+check('cache reads are surfaced', (resp.usage as { cache_read: number }).cache_read === 128);
+check('reasoning tokens are surfaced', (resp.usage as { reasoning: number }).reasoning === 6);
+check('the model and stop reason survive',
+  resp.model === 'gpt-5.5-2026-04-23' && resp.finish_reason === 'stop');
+check('tool calls keep id, name and arguments',
+  respJson.includes('call_9') && respJson.includes('SELECT Id FROM Account'));
+
+// A shared reference is not a cycle. The old check walked a WeakSet of
+// everything seen, so the SECOND appearance of a shared array was blanked.
+const shared = { a: 1 };
+const twice = { first: shared, second: shared };
+const cleanedTwice = redact(twice) as { first: unknown; second: unknown };
+check('the same object referenced twice is kept both times',
+  JSON.stringify(cleanedTwice.second) === '{"a":1}', JSON.stringify(cleanedTwice.second));
+const realCycle: Record<string, unknown> = {};
+realCycle.self = realCycle;
+check('a genuine cycle is still broken', JSON.stringify(redact(realCycle)).includes('[circular]'));
+check('a real LLMResult redacts without losing its usage',
+  (((redact(llmResult) as never as { generations: Array<Array<{ message: { usage_metadata: { input_tokens: number } } }>> })
+    .generations[0][0].message.usage_metadata.input_tokens)) === 580);
 
 console.log(failures === 0 ? '\nAll trace checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
