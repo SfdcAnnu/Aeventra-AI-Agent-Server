@@ -9,7 +9,6 @@
  * being surfaced in the TypeScript client — cleaner to speak the JSON API
  * directly and stay future-proof.
  */
-import { traceable } from 'langsmith/traceable';
 import { logger } from '../../logger';
 import type { AgentNode } from '../../types';
 import { InstallsRepo } from '../../db/installs.repo';
@@ -319,34 +318,27 @@ function redactDebugRequest(body: Record<string, unknown>): Record<string, unkno
  *  outside the chat engine (the agent generator, the builder copilot) can
  *  reuse the exact same request/error handling without duplicating it.
  *
- *  LangSmith: this is a raw fetch (not a LangChain model), so it would be
- *  invisible to tracing — wrapped with traceable() so generator/copilot
- *  calls show up too. The traced INPUT is the redacted body (MCP tool
- *  headers carry a live Salesforce token) and the API key never enters the
- *  trace; with LANGSMITH_TRACING unset the wrapper is a no-op. */
+ *  A raw fetch, not a LangChain model, so the turn recorder's callbacks
+ *  do not see it. That is deliberate: this path serves the generator and
+ *  copilot, not customer turns, and the flight recorder exists for the
+ *  latter. */
 export async function callOpenAi(
   body: Record<string, unknown>,
   apiKey: string,
 ): Promise<OpenAiResponsesResult> {
-  const traced = traceable(
-    async (_loggedInput: Record<string, unknown>): Promise<OpenAiResponsesResult> => {
-      const res = await fetch(OPENAI_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization:  'Bearer ' + apiKey,
-        },
-        body: JSON.stringify(body),
-      });
-      const json = (await res.json()) as OpenAiResponsesResult;
-      if (!res.ok && !json.error) {
-        throw new Error(`OpenAI API error ${res.status}`);
-      }
-      return json;
+  const res = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization:  'Bearer ' + apiKey,
     },
-    { name: 'openai-responses-api', run_type: 'llm' },
-  );
-  return traced(redactDebugRequest(body));
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json()) as OpenAiResponsesResult;
+  if (!res.ok && !json.error) {
+    throw new Error(`OpenAI API error ${res.status}`);
+  }
+  return json;
 }
 
 /** Map our history + system prompt + new user message (+ attachments) → OpenAI Responses `input` array. */

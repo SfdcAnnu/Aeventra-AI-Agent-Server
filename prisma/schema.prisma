@@ -283,3 +283,103 @@ model ChatApproval {
   @@index([orgId, status])
   @@index([orgId, sessionId])
 }
+
+// ── Agent tracing ───────────────────────────────────────────────────
+//
+// An internal flight recorder: one AgentTrace per turn, one
+// AgentTraceStep per model or tool call inside it, holding the exact
+// body sent to the provider and the exact body returned.
+//
+// INTERNAL ONLY. Nothing here is exposed to a subscriber org — it is read
+// through /api/admin/traces, guarded by ADMIN_API_KEY, which is disabled
+// entirely when that variable is unset.
+//
+// Identity is ids, never people: orgId, userId, agentId. No email and no
+// names are stored — a Salesforce id resolves to a person in Salesforce,
+// on the rare occasion that is actually needed.
+//
+// Payloads carry customer conversation content across every tenant, so
+// they expire on their own (TRACE_PAYLOAD_RETENTION_DAYS, default 14)
+// well before the metric rows do (TRACE_RETENTION_DAYS, default 90).
+// Capture is off unless TRACE_CAPTURE=full.
+model AgentTrace {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Filter dimensions. Indexed for the console's actual queries.
+  orgId         String
+  userId        String?
+  agentApiName  String
+  agentId       String?
+  agentName     String?
+  sessionId     String?   // chat / whatsapp
+  correlationId String?   // automation runs
+  recordId      String?
+  // chat | whatsapp | flow | apex | test — where the turn came from
+  channel       String    @default("chat")
+
+  // complete | error — plus the reason, when it failed
+  status       String  @default("complete")
+  errorCode    String?
+  errorMessage String?
+
+  // Cost and speed. Sums of the steps, denormalised so the list view
+  // needs no join.
+  modelCalls   Int @default(0)
+  toolCalls    Int @default(0)
+  tokensIn     Int @default(0)
+  tokensOut    Int @default(0)
+  cachedTokens Int @default(0)
+  latencyMs    Int @default(0)
+
+  // Per-model split: [{ model, calls, tokensIn, tokensOut, cacheRead }]
+  usageByModel Json?
+  // Set when the payloads have been aged out but the metrics row remains.
+  payloadsPurgedAt DateTime?
+
+  steps AgentTraceStep[]
+
+  @@index([orgId, createdAt])
+  @@index([orgId, agentApiName, createdAt])
+  @@index([orgId, userId, createdAt])
+  @@index([orgId, status, createdAt])
+  @@index([sessionId])
+  @@index([correlationId])
+  @@index([createdAt])
+}
+
+model AgentTraceStep {
+  id      String     @id @default(uuid())
+  traceId String
+  trace   AgentTrace @relation(fields: [traceId], references: [id], onDelete: Cascade)
+
+  seq   Int
+  // model_call | tool_call
+  kind  String
+  // router | subagent | narration_followup | guardrail_regen | tools
+  stage String
+  // tool name, or the model id for a model call
+  name  String
+  model String?
+
+  // The exact bodies, redacted. `requestParts` is the same request split
+  // into the blocks it is composed of — instructions, knowledge base,
+  // record context, tools, history — which is what makes a 15,000-token
+  // prompt readable instead of one escaped string.
+  requestJson   Json?
+  requestParts  Json?
+  responseJson  Json?
+
+  tokensIn  Int @default(0)
+  tokensOut Int @default(0)
+  cacheRead Int @default(0)
+  latencyMs Int @default(0)
+
+  isError Boolean @default(false)
+  error   String?
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([traceId, seq])
+}
