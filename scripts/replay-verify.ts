@@ -39,8 +39,8 @@ function check(name: string, cond: boolean, detail = ''): void {
 // Apex persists Content__c as JSON.serialize(<string>).
 const stored = (s: string) => JSON.stringify(s);
 
-const OPP_QUERY = "SELECT Id, Name, StageName, Amount, Category__c FROM Opportunity WHERE Id = '006000000000001AAA' LIMIT 1";
-const OPP_RESULT = '{"records":[{"Id":"006000000000001AAA","StageName":"Closed Lost","Amount":65000,"Category__c":"Price"}],"totalSize":1}';
+const RECORD_QUERY = "SELECT Id, Name, Status__c, Amount, Category__c FROM Widget__c WHERE Id = '006000000000001AAA' LIMIT 1";
+const RECORD_RESULT = '{"records":[{"Id":"006000000000001AAA","Status__c":"Archived","Amount":65000,"Category__c":"Price"}],"totalSize":1}';
 
 function toolRow(name: string, args: object, result: string, id: string | null): ChatHistoryMessage {
   return {
@@ -53,13 +53,13 @@ function toolRow(name: string, args: object, result: string, id: string | null):
 
 // ── 1. Decoding ──────────────────────────────────────────────────────
 console.log('\n1. Stored results decode out of their JSON envelope');
-check('double-encoded result unwraps', decodeStoredResult(stored(OPP_RESULT)) === OPP_RESULT);
-check('plain result passes through', decodeStoredResult(OPP_RESULT) === OPP_RESULT);
+check('double-encoded result unwraps', decodeStoredResult(stored(RECORD_RESULT)) === RECORD_RESULT);
+check('plain result passes through', decodeStoredResult(RECORD_RESULT) === RECORD_RESULT);
 check('malformed input never throws', decodeStoredResult('"{unclosed') === '"{unclosed');
 
 // ── 2. Budgeting ─────────────────────────────────────────────────────
 console.log('\n2. Recency budget replaces the flat 600-char clip');
-const bigSchema = '{"mode":"detail","name":"Opportunity","fields":[' + 'x'.repeat(9000) + ']}';
+const bigSchema = '{"mode":"detail","name":"Widget__c","fields":[' + 'x'.repeat(9000) + ']}';
 const budgetedRecent = budgetToolReplays([bigSchema]);
 check('a recent large result keeps far more than 600 chars',
   budgetedRecent[0].length > 2_500, `got ${budgetedRecent[0].length}`);
@@ -90,9 +90,9 @@ check('artifact handle survives even as the OLDEST entry',
 console.log('\n3. History with call ids replays as real tool-call/result pairs');
 const withIds: ChatHistoryMessage[] = [
   { role: 'user', content: 'Hello' },
-  toolRow('soqlQuery', { query: OPP_QUERY }, OPP_RESULT, 'call_a1'),
-  toolRow('getObjectSchema', { name: 'Opportunity' }, artifactRef, 'call_a2'),
-  { role: 'assistant', content: 'Following up on your quote.' },
+  toolRow('soqlQuery', { query: RECORD_QUERY }, RECORD_RESULT, 'call_a1'),
+  toolRow('getObjectSchema', { name: 'Widget__c' }, artifactRef, 'call_a2'),
+  { role: 'assistant', content: 'Here is what I found.' },
   { role: 'user', content: "It's too high" },
 ];
 const paired = toLangchainMessages(withIds, 'and my budget is 48k', []);
@@ -105,9 +105,9 @@ check('each call has a matching ToolMessage', toolMsgs.length === 2);
 check('ids pair up exactly',
   toolMsgs.every(t => aiWithCalls[0].tool_calls!.some(c => c.id === t.tool_call_id)));
 check('arguments survive the round trip',
-  (aiWithCalls[0]?.tool_calls?.[0]?.args as { query?: string })?.query === OPP_QUERY);
+  (aiWithCalls[0]?.tool_calls?.[0]?.args as { query?: string })?.query === RECORD_QUERY);
 check('result content is decoded, not escaped',
-  toolMsgs[0].content === OPP_RESULT, String(toolMsgs[0].content).slice(0, 80));
+  toolMsgs[0].content === RECORD_RESULT, String(toolMsgs[0].content).slice(0, 80));
 check('the final user message is last', paired[paired.length - 1] instanceof HumanMessage);
 check('no orphaned tool_call_id',
   toolMsgs.every(t => !!t.tool_call_id));
@@ -116,29 +116,29 @@ check('no orphaned tool_call_id',
 console.log('\n4. Pre-fix rows (null id) still replay, as prose');
 const noIds: ChatHistoryMessage[] = [
   { role: 'user', content: 'Hello' },
-  toolRow('soqlQuery', { query: OPP_QUERY }, OPP_RESULT, null),
+  toolRow('soqlQuery', { query: RECORD_QUERY }, RECORD_RESULT, null),
   { role: 'assistant', content: 'Following up.' },
 ];
 const legacy = toLangchainMessages(noIds, 'next', []);
 check('no tool messages emitted without ids',
   legacy.every(m => !(m instanceof ToolMessage)));
 check('the result is still present in context',
-  legacy.some(m => typeof m.content === 'string' && m.content.includes('Closed Lost')));
+  legacy.some(m => typeof m.content === 'string' && m.content.includes('Archived')));
 check('and it is decoded there too',
-  legacy.some(m => typeof m.content === 'string' && m.content.includes('"StageName":"Closed Lost"')));
+  legacy.some(m => typeof m.content === 'string' && m.content.includes('"Status__c":"Archived"')));
 
 // ── 5. Mid-run history slices ────────────────────────────────────────
 console.log('\n5. A slice starting mid-tool-run never opens with an assistant turn');
 const slicedMidRun: ChatHistoryMessage[] = [
-  toolRow('soqlQuery', { query: OPP_QUERY }, OPP_RESULT, 'call_b1'),
-  toolRow('soqlQuery', { query: OPP_QUERY }, OPP_RESULT, 'call_b2'),
+  toolRow('soqlQuery', { query: RECORD_QUERY }, RECORD_RESULT, 'call_b1'),
+  toolRow('soqlQuery', { query: RECORD_QUERY }, RECORD_RESULT, 'call_b2'),
   { role: 'assistant', content: 'Here is what I found.' },
 ];
 const sliced = toLangchainMessages(slicedMidRun, 'ok', []);
 check('first message is a human turn (Anthropic requires it)',
   sliced[0] instanceof HumanMessage, sliced[0]?.constructor.name);
 check('the earlier results are still carried',
-  typeof sliced[0].content === 'string' && sliced[0].content.includes('Closed Lost'));
+  typeof sliced[0].content === 'string' && sliced[0].content.includes('Archived'));
 
 // ── 6. Session result cache ──────────────────────────────────────────
 // Wrapped: this project compiles to CommonJS, which has no top-level await.
@@ -146,7 +146,7 @@ async function main(): Promise<void> {
 console.log('\n6. Session cache: identical reads run once, writes invalidate');
 let reads = 0;
 let writes = 0;
-const readTool = tool(async (_a: { query: string }) => { reads++; return OPP_RESULT; },
+const readTool = tool(async (_a: { query: string }) => { reads++; return RECORD_RESULT; },
   { name: 'soqlQuery', description: 'read', schema: z.object({ query: z.string() }) }) as StructuredToolInterface;
 const writeTool = tool(async (_a: { body: string }) => { writes++; return '{"id":"006x"}'; },
   { name: 'updateSobjectRecord', description: 'write', schema: z.object({ body: z.string() }) }) as StructuredToolInterface;
@@ -156,8 +156,8 @@ const failTool = tool(async () => 'Error: MCP tool failed', // non-answers must 
 const [cachedRead, cachedWrite, cachedFail] =
   withSessionResultCache([readTool, writeTool, failTool], 'session-A');
 
-await cachedRead.invoke({ query: OPP_QUERY } as never);
-await cachedRead.invoke({ query: OPP_QUERY } as never);
+await cachedRead.invoke({ query: RECORD_QUERY } as never);
+await cachedRead.invoke({ query: RECORD_QUERY } as never);
 check('the identical repeat is served from cache', reads === 1, `executed ${reads}x`);
 
 await cachedRead.invoke({ query: 'SELECT Id FROM Contact' } as never);
@@ -179,17 +179,17 @@ check('errors are never cached',
 
 await cachedWrite.invoke({ body: '{}' } as never);
 check('the write executed', writes === 1);
-await cachedRead.invoke({ query: OPP_QUERY } as never);
+await cachedRead.invoke({ query: RECORD_QUERY } as never);
 check('the write invalidated the cached read', reads === 3, `executed ${reads}x`);
 
 // Isolation between sessions.
 const [otherRead] = withSessionResultCache([readTool], 'session-B');
-await otherRead.invoke({ query: OPP_QUERY } as never);
+await otherRead.invoke({ query: RECORD_QUERY } as never);
 check('another session does not share cached results', reads === 4, `executed ${reads}x`);
 
 const [uncached] = withSessionResultCache([readTool], null);
-await uncached.invoke({ query: OPP_QUERY } as never);
-await uncached.invoke({ query: OPP_QUERY } as never);
+await uncached.invoke({ query: RECORD_QUERY } as never);
+await uncached.invoke({ query: RECORD_QUERY } as never);
 check('no session id means no caching at all', reads === 6, `executed ${reads}x`);
 
 invalidateSession('session-A');
@@ -201,17 +201,17 @@ const schemaArtifact = JSON.stringify({
   artifact: 'art_00000000fixture',
   note: 'Large result stored by reference — use read_artifact to fetch further sections.',
   totalChars: 10288,
-  preview: '{"mode":"detail","name":"Opportunity"',
+  preview: '{"mode":"detail","name":"Widget__c"',
 });
 const fullSchema = JSON.stringify({
-  mode: 'detail', name: 'Opportunity',
+  mode: 'detail', name: 'Widget__c',
   fields: Array.from({ length: 60 }, (_, i) => ({ name: i === 59 ? 'Category__c' : `Field${i}__c`, type: 'string' })),
 });
 const chat149: ChatHistoryMessage[] = [
   { role: 'user', content: 'Hello' },
-  toolRow('getObjectSchema', { name: 'Opportunity' }, schemaArtifact, 'call_c1'),
+  toolRow('getObjectSchema', { name: 'Widget__c' }, schemaArtifact, 'call_c1'),
   toolRow('read_artifact', { artifact_id: 'art_00000000fixture' }, fullSchema, 'call_c2'),
-  { role: 'assistant', content: 'Following up on your Widget quote.' },
+  { role: 'assistant', content: 'Here is the summary.' },
 ];
 const replayed = toLangchainMessages(chat149, "It's too high", []);
 const replayedText = replayed.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
@@ -373,7 +373,7 @@ console.log('\n12. Turn-end scans see only THIS turn');
 // ids, and an old write licensing a fresh "I've updated it" claim.
 const priorTurn: ChatHistoryMessage[] = [
   { role: 'user', content: 'what are the line items?' },
-  toolRow('soqlQuery', { query: 'SELECT Id FROM OpportunityLineItem' }, OPP_RESULT, 'call_OLD1'),
+  toolRow('soqlQuery', { query: 'SELECT Id FROM Widget__cLineItem' }, RECORD_RESULT, 'call_OLD1'),
   toolRow('updateSobjectRecord', { body: '{}' }, '{"id":"006x","success":true}', 'call_OLD2'),
   { role: 'assistant', content: 'Here they are.' },
 ];
@@ -396,7 +396,7 @@ check('scanning everything would wrongly report the earlier ones',
 const busyTurn = [
   ...historyReplay,
   new AIMessage({ content: '', tool_calls: [{ id: 'call_NEW', name: 'soqlQuery', args: {}, type: 'tool_call' as const }] }),
-  new ToolMessage({ tool_call_id: 'call_NEW', name: 'soqlQuery', content: OPP_RESULT }),
+  new ToolMessage({ tool_call_id: 'call_NEW', name: 'soqlQuery', content: RECORD_RESULT }),
   new AIMessage('Done.'),
 ];
 const fresh = extractToolCalls(busyTurn.slice(turnStart), { serverByTool: new Map() } as never);

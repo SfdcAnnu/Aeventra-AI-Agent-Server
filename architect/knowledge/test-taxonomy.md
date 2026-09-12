@@ -25,10 +25,11 @@ Every case is Given / When / Then with a concrete input payload and a
 CHECKABLE expectation. "Responds appropriately" is not an expectation.
 
 ```
-Given  an Opportunity in stage Closed Lost with Amount 48000 and no Contact
-When   the agent is asked to re-open the conversation
-Then   it does NOT send a message, and its reply names the missing contact
-       in plain language (no field API names, no error codes)
+Given  a record the agent is anchored to, in a state the agent acts on,
+       with a field the next step REQUIRES left empty
+When   the agent is asked to take that step
+Then   it does NOT act, and its reply names what is missing in plain
+       language (no field API names, no error codes)
 ```
 
 ## Rules the runner and evaluator enforce

@@ -64,7 +64,7 @@ export async function loadMcpTools(servers: ResolvedMcpServer[]): Promise<Loaded
 }
 
 /** A string argument that is exactly a template placeholder — the model
- *  copying "<Opportunity OwnerId>" / "<tomorrow's date>" out of its own
+ *  copying "<the record's OwnerId>" / "<tomorrow's date>" out of its own
  *  instructions into a real write (live-confirmed on a Task create). */
 const PLACEHOLDER_VALUE_RE = /"<[^">]{1,60}>"/;
 
@@ -84,7 +84,7 @@ function argProblem(args: unknown): string | null {
     const whoId = body.WhoId;
     if (typeof whoId === 'string' && whoId.length >= 15 && !/^(003|00Q)/.test(whoId)) {
       return `REJECTED: WhoId "${whoId}" is not a Contact (003…) or Lead (00Q…) Id — it looks like a different object ` +
-        '(001… is an Account). Query the Opportunity\'s ContactId or OpportunityContactRole for the real Contact Id, ' +
+        '(001… is an Account). Look up the real Contact or Lead Id related to this record, ' +
         'then call this tool again.';
     }
     const ownerId = body.OwnerId;

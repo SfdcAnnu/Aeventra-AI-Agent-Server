@@ -363,7 +363,7 @@ function mapHistoryForOpenAi(
     // Tool rows carry the ACTUAL data past turns retrieved — record Ids,
     // amounts, line items. Dropping them (the old behavior) meant the model
     // re-derived or INVENTED those values on later turns (live-confirmed:
-    // a hallucinated '006g...abcdEF' Opportunity Id on the WhatsApp path).
+    // a hallucinated record Id, live-confirmed).
     // Fold each into the preceding assistant message as pinned context.
     if (m.role === 'tool') {
       const summary = summarizeToolHistoryEntry(m);
