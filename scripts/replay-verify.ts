@@ -6,6 +6,13 @@
  * model tokens. Everything here is exercised with synthetic history and a
  * fake tool, so it can be run as often as needed for free.
  *
+ * FIXTURES ARE SYNTHETIC. The record ids, field names and artifact handles
+ * below are invented placeholders that merely have the right SHAPE — no
+ * org's data, and nothing any tenant depends on. Each case reproduces a
+ * defect that was seen in production; the runtime itself stays free of any
+ * object, field or use case, and these fixtures must not become the
+ * exception to that.
+ *
  *   npx tsx scripts/replay-verify.ts
  */
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
@@ -32,8 +39,8 @@ function check(name: string, cond: boolean, detail = ''): void {
 // Apex persists Content__c as JSON.serialize(<string>).
 const stored = (s: string) => JSON.stringify(s);
 
-const OPP_QUERY = "SELECT Id, Name, StageName, Amount, Loss_Reason__c FROM Opportunity WHERE Id = '006g5000006ric9AAA' LIMIT 1";
-const OPP_RESULT = '{"records":[{"Id":"006g5000006ric9AAA","StageName":"Closed Lost","Amount":65000,"Loss_Reason__c":"Price"}],"totalSize":1}';
+const OPP_QUERY = "SELECT Id, Name, StageName, Amount, Category__c FROM Opportunity WHERE Id = '006000000000001AAA' LIMIT 1";
+const OPP_RESULT = '{"records":[{"Id":"006000000000001AAA","StageName":"Closed Lost","Amount":65000,"Category__c":"Price"}],"totalSize":1}';
 
 function toolRow(name: string, args: object, result: string, id: string | null): ChatHistoryMessage {
   return {
@@ -67,17 +74,17 @@ check('total replay stays under the global cap',
   `total ${budgetedMany.reduce((n, s) => n + s.length, 0)}`);
 
 const artifactRef = JSON.stringify({
-  artifact: 'art_27b6b232dc',
+  artifact: 'art_00000000fixture',
   note: 'Large result stored by reference — use read_artifact to fetch further sections.',
   totalChars: 10288,
   preview: 'y'.repeat(500),
 });
 const withArtifact = budgetToolReplays([...Array.from({ length: 20 }, () => bigSchema), artifactRef]);
 check('artifact handle survives intact even far down a long history',
-  withArtifact[20].includes('art_27b6b232dc'));
+  withArtifact[20].includes('art_00000000fixture'));
 const oldArtifact = budgetToolReplays([artifactRef, ...Array.from({ length: 20 }, () => bigSchema)]);
 check('artifact handle survives even as the OLDEST entry',
-  oldArtifact[0].includes('art_27b6b232dc'));
+  oldArtifact[0].includes('art_00000000fixture'));
 
 // ── 3. Real tool pairs ───────────────────────────────────────────────
 console.log('\n3. History with call ids replays as real tool-call/result pairs');
@@ -188,30 +195,30 @@ check('no session id means no caching at all', reads === 6, `executed ${reads}x`
 invalidateSession('session-A');
 invalidateSession('session-B');
 
-// ── 7. The CHAT-0149 regression, end to end ──────────────────────────
+// ── 7. The the live session regression, end to end ──────────────────────────
 console.log('\n7. Regression: the schema that caused the re-read cascade');
 const schemaArtifact = JSON.stringify({
-  artifact: 'art_27b6b232dc',
+  artifact: 'art_00000000fixture',
   note: 'Large result stored by reference — use read_artifact to fetch further sections.',
   totalChars: 10288,
   preview: '{"mode":"detail","name":"Opportunity"',
 });
 const fullSchema = JSON.stringify({
   mode: 'detail', name: 'Opportunity',
-  fields: Array.from({ length: 60 }, (_, i) => ({ name: i === 59 ? 'Loss_Reason__c' : `Field${i}__c`, type: 'string' })),
+  fields: Array.from({ length: 60 }, (_, i) => ({ name: i === 59 ? 'Category__c' : `Field${i}__c`, type: 'string' })),
 });
 const chat149: ChatHistoryMessage[] = [
   { role: 'user', content: 'Hello' },
   toolRow('getObjectSchema', { name: 'Opportunity' }, schemaArtifact, 'call_c1'),
-  toolRow('read_artifact', { artifact_id: 'art_27b6b232dc' }, fullSchema, 'call_c2'),
-  { role: 'assistant', content: 'Following up on your GenWatt quote.' },
+  toolRow('read_artifact', { artifact_id: 'art_00000000fixture' }, fullSchema, 'call_c2'),
+  { role: 'assistant', content: 'Following up on your Widget quote.' },
 ];
 const replayed = toLangchainMessages(chat149, "It's too high", []);
 const replayedText = replayed.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
 check('the artifact handle is still available to read_artifact',
-  replayedText.includes('art_27b6b232dc'));
-check('Loss_Reason__c survives replay (the field it re-read the schema for)',
-  replayedText.includes('Loss_Reason__c'));
+  replayedText.includes('art_00000000fixture'));
+check('Category__c survives replay (the field it re-read the schema for)',
+  replayedText.includes('Category__c'));
 check('full schema is NOT clipped to 600 chars',
   (replayed.find(m => m instanceof ToolMessage && m.tool_call_id === 'call_c2')?.content as string)?.length > 2_000);
 

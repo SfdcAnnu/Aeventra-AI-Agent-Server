@@ -7,7 +7,7 @@
  * message state. That makes THIS file the thing that decides what the
  * model still knows about work it already did.
  *
- * Live-diagnosed failure this replaces (session CHAT-0149): every tool
+ * Live-diagnosed failure this replaces: on one conversation, every tool
  * result was clipped to a flat 600 characters and folded into the
  * assistant's own prose. A 9,244-character object schema came back as its
  * first few fields, so the next turn re-read the artifact, re-described the
