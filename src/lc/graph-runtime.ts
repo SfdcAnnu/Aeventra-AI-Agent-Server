@@ -748,7 +748,7 @@ export function toLangchainMessages(
       // Real tool-call/tool-result pairs. A model treats these as VERIFIED
       // output it already holds; the prose fallback below reads as something
       // it merely SAID, which is why it kept re-running the same queries
-      // (live-diagnosed, session CHAT-0149). Needs the provider's original
+      // (live-diagnosed). Needs the provider's original
       // tool_call id — persisted since AgentChatController stopped writing
       // null — and every call must have its answer, or the provider rejects
       // the request outright (INVALID_TOOL_RESULTS killed a live turn once).

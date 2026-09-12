@@ -1,13 +1,10 @@
 /**
  * tool-result-cache — one session never runs the same read twice.
  *
- * Live-diagnosed (session CHAT-0149): the agent issued the byte-identical
- * query
- *   SELECT Id, Name, StageName, Amount, Loss_Reason__c, … FROM Opportunity
- *   WHERE Id = '006…'
- * on two separate turns three apart, plus four more near-identical
- * Opportunity reads across the conversation. Nothing anywhere remembered
- * that a read had already been answered.
+ * Live-diagnosed: an agent issued the byte-identical record query on two
+ * turns three apart, plus four more near-identical reads of the same
+ * record across one conversation. Nothing anywhere remembered that a read
+ * had already been answered.
  *
  * The replay fixes (chat/tool-replay.ts) are what stop the model NEEDING to
  * re-ask. This is the backstop for when it asks anyway: same session, same

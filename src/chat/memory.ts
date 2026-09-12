@@ -178,7 +178,7 @@ export function maybeUpdateMemoryAsync(args: MemoryUpdateArgs): void {
 
 const SUMMARIZER_SYSTEM = `You maintain conversation memory for a Salesforce AI agent. Merge the EXISTING SUMMARY and EXISTING FACTS with the NEW TURNS.
 Rules:
-- summary: at most 160 words, factual, third person. Preserve every Salesforce record Id VERBATIM (never truncate ids like 006g5000009RkPzAAK). Keep decisions, amounts, objections, promises, and open questions.
+- summary: at most 160 words, factual, third person. Preserve every Salesforce record Id VERBATIM (never truncate ids like 006000000000001AAA). Keep decisions, amounts, objections, promises, and open questions.
 - facts: a flat JSON object of durable, exact values: customer identity, verified (boolean), record ids, amounts, offers made/rejected, preferences. Merge with existing facts; never drop a record id.
 Reply with ONLY this JSON, nothing else: {"summary": "...", "facts": {...}}`;
 
