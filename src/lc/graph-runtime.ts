@@ -211,6 +211,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       : [];
 
     const baseMessages = toLangchainMessages(assembled.history, req.newUserMessage, attachments);
+    // Where THIS turn's messages begin. Replayed history now carries real
+    // tool_calls (it used to be inert prose), so any scan of the whole
+    // list would read earlier turns as if they had just happened.
+    const turnStart = baseMessages.length;
 
     // Phase 5 — call/return specialists as REAL executable tools: the
     // ToolNode runs the child turn and the result comes back as a normal
@@ -441,7 +445,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       for (let attempt = 0; attempt < 2; attempt++) {
         if (checkBudget(budget)) break;
         const claim = findActionClaim(assistantText);
-        if (!claim || turnHasWrite(state.messages) || turnFlags.childWrote) break;
+        if (!claim || turnHasWrite(state.messages.slice(turnStart)) || turnFlags.childWrote) break;
         logger.warn({ orgId: req.context.orgId, claim, attempt }, 'lc_action_claim_without_write');
         try {
           const correction = new HumanMessage(ACTION_CLAIM_CORRECTION);
@@ -502,8 +506,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       }
     }
 
-    const { tokensIn, tokensOut } = sumUsage(state.messages);
-    const toolCalls = extractToolCalls(state.messages, loaded);
+    const { tokensIn, tokensOut } = sumUsage(state.messages.slice(turnStart));
+    const toolCalls = extractToolCalls(state.messages.slice(turnStart), loaded);
 
     if (req.debugMode) {
       debugResponse.push({
@@ -841,7 +845,9 @@ function sumUsage(messages: BaseMessage[]): { tokensIn: number; tokensOut: numbe
  *  genuinely completed action is handled inside the correction prompt.
  *  Custom Apex/Flow actions (apex__ and flow__ prefixes) count — they
  *  exist to perform writes. */
-function turnHasWrite(messages: BaseMessage[]): boolean {
+/** Exported for scripts/replay-verify.ts — see the turn-scoping note at
+ *  its call site. */
+export function turnHasWrite(messages: BaseMessage[]): boolean {
   // Shared with the session result cache (output-guardrails.isWriteToolName)
   // so the two can never disagree about what counts as a write.
   const isWriteName = isWriteToolName;
@@ -898,7 +904,7 @@ function sanitizeToolPairs(messages: BaseMessage[]): BaseMessage[] {
 
 /** Pair each AIMessage tool call with its ToolMessage result — same
  *  ToolCallSummary shape Apex/the chat panel already consume. */
-function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools): ToolCallSummary[] {
+export function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools): ToolCallSummary[] {
   const resultsByCallId = new Map<string, ToolMessage>();
   for (const m of messages) {
     if (m instanceof ToolMessage && m.tool_call_id) resultsByCallId.set(m.tool_call_id, m);
