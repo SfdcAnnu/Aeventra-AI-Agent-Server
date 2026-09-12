@@ -167,8 +167,7 @@
           "pii_redaction",
           "prompt_injection",
           "output_policy",
-          "cost_ceiling",
-          "discount_cap"
+          "cost_ceiling"
         ]
       }
     },

@@ -18,21 +18,45 @@
  *     `bannedPhrases` in the same config.
  */
 
+/** One in-place rewrite: say `to` instead of `from`. */
+export interface PhraseReplacement {
+  from: string;
+  to: string;
+}
+
 export interface GuardrailsConfig {
   customerFacing: boolean;
   bannedPhrases: string[];
+  /** Vocabulary this agent should not say, with what to say instead.
+   *  Supplied entirely by agent data — the platform ships none, because
+   *  what counts as internal jargon depends on the business, not on us. */
+  phraseReplacements: PhraseReplacement[];
 }
 
 /** Parse the root AI node's ConfigJson. Unknown/invalid entries are
  *  ignored rather than erroring. */
 export function readGuardrailsConfig(nodeConfig: unknown): GuardrailsConfig {
-  const cfg = (nodeConfig ?? {}) as { customerFacing?: unknown; bannedPhrases?: unknown; guardrails?: { bannedPhrases?: unknown } };
+  const cfg = (nodeConfig ?? {}) as {
+    customerFacing?: unknown;
+    bannedPhrases?: unknown;
+    phraseReplacements?: unknown;
+    guardrails?: { bannedPhrases?: unknown; phraseReplacements?: unknown };
+  };
   const rawPhrases = Array.isArray(cfg.bannedPhrases)
     ? cfg.bannedPhrases
     : Array.isArray(cfg.guardrails?.bannedPhrases) ? cfg.guardrails.bannedPhrases : [];
+  const rawReplacements = Array.isArray(cfg.phraseReplacements)
+    ? cfg.phraseReplacements
+    : Array.isArray(cfg.guardrails?.phraseReplacements) ? cfg.guardrails.phraseReplacements : [];
   return {
     customerFacing: cfg.customerFacing === true,
     bannedPhrases: rawPhrases.filter((p): p is string => typeof p === 'string' && p.trim().length > 1).slice(0, 50),
+    phraseReplacements: rawReplacements
+      .filter((r): r is PhraseReplacement =>
+        !!r && typeof (r as PhraseReplacement).from === 'string' &&
+        typeof (r as PhraseReplacement).to === 'string' &&
+        (r as PhraseReplacement).from.trim().length > 1)
+      .slice(0, 50),
   };
 }
 
@@ -86,20 +110,20 @@ export const ACTION_CLAIM_CORRECTION =
 
 // ── Internal-language filter ─────────────────────────────────────────
 
-/** Generic internal sales/negotiation vocabulary no customer-facing agent
- *  should emit, replaced in place by scrubReply(). Per-agent additions
- *  come from the bannedPhrases config. */
-const PHRASE_FIXES: Array<{ re: RegExp; fix: string }> = [
-  { re: /\bconcessions?\b/gi, fix: 'offer' },
-  { re: /\b(?:price|pricing)\s+floor\b/gi, fix: 'best price' },
-  { re: /\bfloor\s+price\b/gi, fix: 'best price' },
-  { re: /\bself[-\s]approved\b/gi, fix: 'approved' },
-  { re: /\bdiscount\s+(?:matrix|ladder)\b/gi, fix: 'pricing' },
-  { re: /\b(?:maximum|max)\s+discount\b/gi, fix: 'best discount' },
-  { re: /\bpolicy\s+limits?\b/gi, fix: 'approval level' },
-  { re: /\b(?:as\s+per|per|according\s+to)\s+(?:our|company|internal)\s+policy\b/gi, fix: 'at my level' },
-  { re: /\binternal\s+(?:limits?|thresholds?|caps?|policy|policies)\b/gi, fix: 'my approval level' },
-];
+/**
+ * Vocabulary rewrites are AGENT DATA, not platform code.
+ *
+ * This list used to be hard-coded with sales-negotiation terms — floor
+ * price, discount matrix, concessions. That shipped one business's
+ * vocabulary to every tenant: a clinic booking appointments or a carrier
+ * tracking shipments carried sales rules it could never trigger, and any
+ * org whose jargon differed had no way to say so. What counts as internal
+ * language depends on the business, so the business supplies it, through
+ * the root node's `phraseReplacements` config.
+ */
+function replacementRules(replacements: PhraseReplacement[]): Array<{ re: RegExp; fix: string }> {
+  return replacements.map(r => ({ re: new RegExp(`\b${escapeRe(r.from)}\b`, 'gi'), fix: r.to }));
+}
 
 /** CRM/system narration a customer must never see — whole sentence dropped. */
 const SENTENCE_DROP: RegExp[] = [
@@ -116,9 +140,13 @@ function splitSentences(text: string): string[] {
 }
 
 /** Human-readable violation labels — empty array means the reply is clean. */
-export function findGuardrailViolations(text: string, extraPhrases: string[] = []): string[] {
+export function findGuardrailViolations(
+  text: string,
+  extraPhrases: string[] = [],
+  replacements: PhraseReplacement[] = [],
+): string[] {
   const violations: string[] = [];
-  for (const { re } of PHRASE_FIXES) {
+  for (const { re } of replacementRules(replacements)) {
     re.lastIndex = 0;
     const m = re.exec(text);
     if (m) violations.push(`internal vocabulary "${m[0]}"`);
@@ -137,9 +165,13 @@ export function findGuardrailViolations(text: string, extraPhrases: string[] = [
 /** Mechanical last resort after a failed regeneration: swap internal
  *  vocabulary and drop CRM-internal sentences. Never returns an empty
  *  string — falls back to the original text. */
-export function scrubReply(text: string, extraPhrases: string[] = []): string {
+export function scrubReply(
+  text: string,
+  extraPhrases: string[] = [],
+  replacements: PhraseReplacement[] = [],
+): string {
   let out = text;
-  for (const { re, fix } of PHRASE_FIXES) {
+  for (const { re, fix } of replacementRules(replacements)) {
     re.lastIndex = 0;
     out = out.replace(re, fix);
   }

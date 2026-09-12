@@ -478,7 +478,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // vocabulary and below-floor offers are ENFORCED, not requested — one
     // corrective regeneration, then a mechanical scrub as the last resort.
     if (customerFacing && assistantText) {
-      const violations = findGuardrailViolations(assistantText, guardrails.bannedPhrases);
+      const violations = findGuardrailViolations(assistantText, guardrails.bannedPhrases, guardrails.phraseReplacements);
       if (violations.length > 0 && !checkBudget(budget)) {
         logger.warn({ orgId: req.context.orgId, violations }, 'lc_output_guardrail_regen');
         
@@ -496,12 +496,12 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           noteUsage(budget, corrected, 'guardrail_regen', modelName);
           state = { ...state, messages: [...state.messages, corrected] };
           const retext = lastAssistantText(state.messages);
-          assistantText = findGuardrailViolations(retext, guardrails.bannedPhrases).length > 0
-            ? scrubReply(retext, guardrails.bannedPhrases)
+          assistantText = findGuardrailViolations(retext, guardrails.bannedPhrases, guardrails.phraseReplacements).length > 0
+            ? scrubReply(retext, guardrails.bannedPhrases, guardrails.phraseReplacements)
             : retext;
         } catch (err) {
           logger.error({ orgId: req.context.orgId, err: err instanceof Error ? err.message : err }, 'lc_output_guardrail_regen_failed');
-          assistantText = scrubReply(assistantText, guardrails.bannedPhrases);
+          assistantText = scrubReply(assistantText, guardrails.bannedPhrases, guardrails.phraseReplacements);
         }
       }
     }

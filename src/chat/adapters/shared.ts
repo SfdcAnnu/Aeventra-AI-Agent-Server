@@ -367,8 +367,8 @@ async function buildKbBlock(
  *  future work ("let me calculate… one moment, please") with nothing behind
  *  it. The structural narration guard can't see these (the response DOES
  *  end in a text block), yet to the customer they are a dead end — live-
- *  confirmed on the WhatsApp revival flow, where a "One moment, please."
- *  stall killed a negotiation. Checked against the trailing sentence only,
+ *  confirmed live, where a "One moment, please." stall killed a
+ *  conversation mid-flight. Checked against the trailing sentence only,
  *  so a reply that defers AND THEN answers doesn't false-positive. */
 const DEFERRAL_TAIL_RE = /((one|just a) moment|hold on|please (hold|wait)|bear with me|let me (calculate|check|review|look|see|pull|find|get)|i(?:'|’)?ll (check|calculate|look|review|find|get back)|give me a (moment|second|minute))[^a-zA-Z0-9]*$/i;
 
