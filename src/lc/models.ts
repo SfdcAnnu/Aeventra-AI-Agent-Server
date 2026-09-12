@@ -47,6 +47,58 @@ export interface ModelOptions {
   /** How much a reasoning-era model may think before answering. Ignored
    *  by models that do not reason. */
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  /** Sampling temperature. Omit for the provider default.
+   *  NOT sent to reasoning-era OpenAI models — they accept only the
+   *  default and reject any explicit value. */
+  temperature?: number;
+}
+
+/** The root node's "Answer style" control. Sampling temperature is what it
+ *  actually means; balanced leaves the provider default alone so existing
+ *  agents keep behaving exactly as they did. */
+const TEMPERATURE_FOR_STYLE: Record<string, number | undefined> = {
+  precise: 0.2,
+  balanced: undefined,
+  exploratory: 0.9,
+};
+
+/** The root node's "Thinking effort" control. `standard` maps to undefined
+ *  on purpose — the provider's own default, i.e. today's behaviour — so
+ *  turning this into a live control cannot silently move anyone's bill. */
+const EFFORT_FOR_THINKING: Record<string, 'minimal' | 'low' | 'medium' | 'high' | undefined> = {
+  off: 'minimal',
+  standard: undefined,
+  deep: 'high',
+};
+
+/**
+ * Translate an AI/subagent node's inspector settings into provider options.
+ *
+ * These three controls (Answer style, Thinking effort, Longest reply) were
+ * written to ConfigJson by the builder and the Architect but never read by
+ * the runtime — the panel offered settings that did nothing. This is what
+ * makes them real.
+ */
+export function modelOptionsFromConfig(config: unknown): { options: ModelOptions; maxTokens?: number } {
+  const cfg = (config ?? {}) as {
+    answerStyle?: string;
+    thinkingEffort?: string;
+    maxReplyTokens?: unknown;
+  };
+  const options: ModelOptions = {};
+  if (cfg.answerStyle && cfg.answerStyle in TEMPERATURE_FOR_STYLE) {
+    const t = TEMPERATURE_FOR_STYLE[cfg.answerStyle];
+    if (t !== undefined) options.temperature = t;
+  }
+  if (cfg.thinkingEffort && cfg.thinkingEffort in EFFORT_FOR_THINKING) {
+    const e = EFFORT_FOR_THINKING[cfg.thinkingEffort];
+    if (e !== undefined) options.reasoningEffort = e;
+  }
+  const cap = Number(cfg.maxReplyTokens);
+  return {
+    options,
+    maxTokens: Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : undefined,
+  };
 }
 
 export function buildChatModel(
@@ -58,7 +110,11 @@ export function buildChatModel(
 ): BuiltModel {
   const engineType = engineTypeForSubtype(nodeSubType);
   const creds = resolveEngine(engineType, engineOverride);
-  const modelName = creds.defaultModel || nodeModel || DEFAULT_MODELS[engineType];
+  // The node's own choice wins. The connection's DefaultModel__c is the
+  // fallback for nodes that never picked one — it used to take precedence,
+  // which silently overrode the canvas: a node set to gpt-5.5-pro ran on
+  // whatever the key's default said, making the model picker decorative.
+  const modelName = nodeModel || creds.defaultModel || DEFAULT_MODELS[engineType];
 
   let model: BaseChatModel;
   switch (engineType) {
@@ -79,6 +135,9 @@ export function buildChatModel(
         model: modelName,
         apiKey: creds.apiKey,
         ...(reasoningEra ? {} : { maxTokens }),
+        // Reasoning-era models accept only the default temperature and
+        // reject any explicit value, so Answer style applies to the rest.
+        ...(!reasoningEra && options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(Object.keys(kwargs).length > 0 ? { modelKwargs: kwargs } : {}),
         configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
       });
@@ -89,6 +148,7 @@ export function buildChatModel(
         model: modelName,
         apiKey: creds.apiKey,
         maxTokens,
+        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(creds.endpoint ? { anthropicApiUrl: creds.endpoint } : {}),
       });
       break;
@@ -97,6 +157,7 @@ export function buildChatModel(
         model: modelName,
         apiKey: creds.apiKey,
         maxOutputTokens: maxTokens,
+        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(creds.endpoint ? { baseUrl: creds.endpoint } : {}),
       });
       break;

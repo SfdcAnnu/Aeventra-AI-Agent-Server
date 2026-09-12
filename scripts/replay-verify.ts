@@ -15,6 +15,8 @@ import { z } from 'zod';
 import { toLangchainMessages } from '../src/lc/graph-runtime';
 import { budgetToolReplays, decodeStoredResult, parseToolRow } from '../src/chat/tool-replay';
 import { withSessionResultCache, invalidateSession } from '../src/lc/tool-result-cache';
+import { createTurnBudget, noteUsage, noteToolCall, usageByModel } from '../src/lc/turn-budget';
+import { buildChatModel, modelOptionsFromConfig } from '../src/lc/models';
 import type { ChatHistoryMessage } from '../src/chat/adapters/types';
 
 let failures = 0;
@@ -212,6 +214,106 @@ check('Loss_Reason__c survives replay (the field it re-read the schema for)',
   replayedText.includes('Loss_Reason__c'));
 check('full schema is NOT clipped to 600 chars',
   (replayed.find(m => m instanceof ToolMessage && m.tool_call_id === 'call_c2')?.content as string)?.length > 2_000);
+
+// ── 8. Per-model usage accounting ────────────────────────────────────
+console.log('\n8. Usage is attributed per model, not to whoever answered last');
+const budget = createTurnBudget({});
+const aiMsg = (inTok: number, outTok: number, cacheRead?: number) =>
+  new AIMessage({
+    content: '',
+    usage_metadata: {
+      input_tokens: inTok,
+      output_tokens: outTok,
+      total_tokens: inTok + outTok,
+      ...(cacheRead ? { input_token_details: { cache_read: cacheRead } } : {}),
+    } as never,
+  });
+
+// A realistic multi-model turn: the router answers on one model, hands off
+// to a specialist on another, then a guardrail pass re-runs on the router's.
+noteUsage(budget, aiMsg(1000, 120, 400), 'router', 'gpt-5.5');
+noteUsage(budget, aiMsg(300, 40), 'subagent', 'claude-haiku-4-5');
+noteUsage(budget, aiMsg(200, 30), 'guardrail_regen', 'gpt-5.5');
+
+const rows = usageByModel(budget);
+const gpt = rows.find(r => r.model === 'gpt-5.5');
+const haiku = rows.find(r => r.model === 'claude-haiku-4-5');
+check('each model gets its own row', rows.length === 2, `got ${rows.length}`);
+check('the router model accumulates across its stages',
+  gpt?.tokensIn === 1200 && gpt?.tokensOut === 150 && gpt?.calls === 2,
+  JSON.stringify(gpt));
+check('the specialist is not folded into the router',
+  haiku?.tokensIn === 300 && haiku?.tokensOut === 40, JSON.stringify(haiku));
+check('stages are recorded per model',
+  gpt?.stages.join(',') === 'router,guardrail_regen', gpt?.stages.join(','));
+check('cache reads are broken out', gpt?.cacheRead === 400, String(gpt?.cacheRead));
+check('per-model tokens sum back to the turn totals',
+  rows.reduce((n, r) => n + r.tokensIn, 0) === budget.tokensIn &&
+  rows.reduce((n, r) => n + r.tokensOut, 0) === budget.tokensOut,
+  `${budget.tokensIn}/${budget.tokensOut}`);
+check('rows are ordered by heaviest model first', rows[0].model === 'gpt-5.5');
+
+// Tokens spent with no model name must still be counted.
+const anon = createTurnBudget({});
+noteUsage(anon, aiMsg(50, 5), 'router', undefined);
+const anonRows = usageByModel(anon);
+check('a missing model name is bucketed, never dropped',
+  anonRows.length === 1 && anonRows[0].model === 'unknown' && anonRows[0].tokensIn === 50,
+  JSON.stringify(anonRows));
+
+// Tool calls share the event stream but are not model usage.
+const mixed = createTurnBudget({});
+noteUsage(mixed, aiMsg(10, 2), 'router', 'gpt-5.5');
+noteToolCall(mixed, 'soqlQuery', { q: 1 }, 'tools');
+check('tool-call events are excluded from model usage',
+  usageByModel(mixed).length === 1 && usageByModel(mixed)[0].calls === 1);
+
+// ── 9. The inspector knobs actually reach the provider ───────────────
+console.log('\n9. Answer style / Thinking effort / Longest reply are live');
+const balanced = modelOptionsFromConfig({ answerStyle: 'balanced', thinkingEffort: 'standard' });
+check('balanced + standard changes nothing (existing agents keep behaving)',
+  balanced.options.temperature === undefined &&
+  balanced.options.reasoningEffort === undefined &&
+  balanced.maxTokens === undefined,
+  JSON.stringify(balanced));
+
+const precise = modelOptionsFromConfig({ answerStyle: 'precise' });
+const exploratory = modelOptionsFromConfig({ answerStyle: 'exploratory' });
+check('precise lowers temperature', (precise.options.temperature ?? 1) < 0.5);
+check('exploratory raises it', (exploratory.options.temperature ?? 0) > 0.5);
+
+check('thinking off asks for minimal reasoning',
+  modelOptionsFromConfig({ thinkingEffort: 'off' }).options.reasoningEffort === 'minimal');
+check('thinking deep asks for high reasoning',
+  modelOptionsFromConfig({ thinkingEffort: 'deep' }).options.reasoningEffort === 'high');
+
+check('a reply cap is passed through',
+  modelOptionsFromConfig({ maxReplyTokens: 2048 }).maxTokens === 2048);
+check('a nonsense cap is ignored rather than capping at zero',
+  modelOptionsFromConfig({ maxReplyTokens: 0 }).maxTokens === undefined &&
+  modelOptionsFromConfig({ maxReplyTokens: 'lots' }).maxTokens === undefined);
+check('an empty config is safe', modelOptionsFromConfig(undefined).maxTokens === undefined);
+
+// The node's model must win over the connection's default: the reverse
+// made the canvas picker decorative.
+const nodeWins = buildChatModel('gpt4', 'gpt-5.5-pro',
+  { engineType: 'openai', apiKey: 'sk-test', defaultModel: 'gpt-5.5' } as never);
+check('the node\'s model beats the connection default',
+  nodeWins.modelName === 'gpt-5.5-pro', nodeWins.modelName);
+const connFallback = buildChatModel('gpt4', undefined,
+  { engineType: 'openai', apiKey: 'sk-test', defaultModel: 'gpt-5.5' } as never);
+check('the connection default still applies when the node picked nothing',
+  connFallback.modelName === 'gpt-5.5', connFallback.modelName);
+
+// Reasoning-era OpenAI models reject an explicit temperature outright.
+const reasoning = buildChatModel('gpt4', 'gpt-5.5',
+  { engineType: 'openai', apiKey: 'sk-test' } as never, 4000, { temperature: 0.2 });
+check('no temperature is sent to a reasoning-era model',
+  (reasoning.model as unknown as { temperature?: number }).temperature !== 0.2);
+const classic = buildChatModel('gpt4', 'gpt-4o',
+  { engineType: 'openai', apiKey: 'sk-test' } as never, 4000, { temperature: 0.2 });
+check('but it is sent to a classic one',
+  (classic.model as unknown as { temperature?: number }).temperature === 0.2);
 
 console.log(failures === 0 ? '\nAll replay checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
