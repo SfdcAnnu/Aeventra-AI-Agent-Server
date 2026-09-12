@@ -5,8 +5,13 @@
  *
  *   POST /api/architect/build   { requirement, attachmentText?, maxCostUsd? }
  *     → 202 { jobId }
+ *   POST /api/architect/build   { resumeJobId, maxCostUsd? }
+ *     → 202 { jobId }   — continues a paused build from its checkpoint,
+ *                         re-running only the stages that never finished
  *   GET  /api/architect/build/:jobId
  *     → { status, steps, costUsd, result?, error? }
+ *   GET  /api/architect/builds/resumable
+ *     → { builds: [...] }  — paused builds this org can still continue
  *
  * The requirement is untrusted input end to end: the Analyst treats it as
  * such, no specialist holds write scope, and the only writer (the
@@ -16,25 +21,71 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
-import { createBuildJob, getBuildJob } from '../architect/build-job';
+import { createBuildJob, getBuildJob, resumeBuildJob, listResumableBuilds, type BuildJob } from '../architect/build-job';
 import { rewritePrompt, copilotTurn } from '../architect/assistant';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 
 export const architectRouter = Router();
 
-const buildSchema = z.object({
-  requirement: z.string().min(20, 'Describe the agent in at least a sentence or two.').max(20_000),
-  attachmentText: z.string().max(200_000).nullish(),
-  maxCostUsd: z.number().min(0.1).max(20).optional(),
-});
+// Either start a new build, or continue a paused one. `resumeJobId` makes
+// it the latter; the requirement then comes from the paused build rather
+// than the caller, so it cannot drift from the design already paid for.
+const buildSchema = z.union([
+  z.object({
+    resumeJobId: z.string().uuid(),
+    maxCostUsd: z.number().min(0.1).max(50).optional(),
+  }),
+  z.object({
+    requirement: z.string().min(20, 'Describe the agent in at least a sentence or two.').max(20_000),
+    attachmentText: z.string().max(200_000).nullish(),
+    maxCostUsd: z.number().min(0.1).max(50).optional(),
+  }),
+]);
 
-architectRouter.post('/api/architect/build', sessionAuth, (req, res) => {
+/** What the Building screen polls. `costUsd` is the CHAIN total — what this
+ *  build has cost the customer across every resume — because that, not the
+ *  current run's share, is the number the ceiling governs. */
+function view(job: BuildJob): Record<string, unknown> {
+  return {
+    jobId: job.id,
+    status: job.status,
+    steps: job.steps,
+    costUsd: Number((job.priorCostUsd + job.costUsd).toFixed(4)),
+    thisRunCostUsd: Number(job.costUsd.toFixed(4)),
+    maxCostUsd: job.maxCostUsd,
+    resumedFrom: job.resumedFrom,
+    resumable: job.status === 'paused',
+    elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt,
+    result: job.result,
+    error: job.error,
+  };
+}
+
+architectRouter.post('/api/architect/build', sessionAuth, async (req, res) => {
   const orgId = req.orgId!;
   const parsed = buildSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
     return;
   }
+
+  if ('resumeJobId' in parsed.data) {
+    const job = await resumeBuildJob(orgId, parsed.data.resumeJobId, parsed.data.maxCostUsd);
+    if (!job) {
+      res.status(404).json({
+        error: 'not_resumable',
+        message: 'That build is not paused — only a build stopped at its budget ceiling can be continued.',
+      });
+      return;
+    }
+    logger.info(
+      { orgId, jobId: job.id, resumedFrom: job.resumedFrom, alreadySpentUsd: job.priorCostUsd, maxCostUsd: job.maxCostUsd },
+      'architect_build_resumed',
+    );
+    res.status(202).json({ jobId: job.id, resumedFrom: job.resumedFrom });
+    return;
+  }
+
   const job = createBuildJob(orgId, parsed.data.requirement, {
     attachmentText: parsed.data.attachmentText ?? undefined,
     maxCostUsd: parsed.data.maxCostUsd,
@@ -43,23 +94,28 @@ architectRouter.post('/api/architect/build', sessionAuth, (req, res) => {
   res.status(202).json({ jobId: job.id });
 });
 
-architectRouter.get('/api/architect/build/:jobId', sessionAuth, (req, res) => {
-  const orgId = req.orgId!;
-  const job = getBuildJob(req.params.jobId);
-  if (!job || job.orgId !== orgId) {
+architectRouter.get('/api/architect/builds/resumable', sessionAuth, async (req, res) => {
+  const builds = await listResumableBuilds(req.orgId!);
+  res.json({
+    builds: builds.map(b => ({
+      jobId: b.id,
+      requirement: b.requirement.slice(0, 300),
+      costUsd: Number((b.priorCostUsd + b.costUsd).toFixed(4)),
+      maxCostUsd: b.maxCostUsd,
+      stagesDone: b.steps.filter(s => s.state === 'done' || s.state === 'warn').length,
+      stagesTotal: b.steps.length,
+      startedAt: new Date(b.startedAt).toISOString(),
+    })),
+  });
+});
+
+architectRouter.get('/api/architect/build/:jobId', sessionAuth, async (req, res) => {
+  const job = await getBuildJob(req.params.jobId, req.orgId!);
+  if (!job) {
     res.status(404).json({ error: 'build_not_found' });
     return;
   }
-  res.json({
-    jobId: job.id,
-    status: job.status,
-    steps: job.steps,
-    costUsd: Number(job.costUsd.toFixed(4)),
-    maxCostUsd: job.maxCostUsd,
-    elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt,
-    result: job.result,
-    error: job.error,
-  });
+  res.json(view(job));
 });
 
 // ── ✦ Rewrite an instruction, for the model that will run it ─────────
