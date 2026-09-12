@@ -128,3 +128,43 @@ export function describeRequest(messages: BaseMessage[], params: Record<string, 
   }
   return parts;
 }
+
+/**
+ * Messages as they go ON THE WIRE, not as LangChain holds them.
+ *
+ * A BaseMessage is a Serializable: it keeps `lc_kwargs`, a copy of the
+ * arguments it was constructed with, alongside the resolved fields. Dump
+ * the object and every prompt appears TWICE — once as `content`, once
+ * inside `lc_kwargs` — with `lc_namespace` and circular `additional_kwargs`
+ * around it. That doubles what a trace stores, wastes the payload budget,
+ * and makes the raw view unreadable while showing something the provider
+ * never received.
+ *
+ * This maps each message to the shape the API actually gets, so the raw
+ * view is both smaller and truer.
+ */
+export function toWireMessages(messages: BaseMessage[]): Array<Record<string, unknown>> {
+  const ROLE: Record<string, string> = {
+    system: 'system', human: 'user', ai: 'assistant', tool: 'tool', function: 'function',
+  };
+  return messages.map(m => {
+    const type = m.getType();
+    const out: Record<string, unknown> = {
+      role: ROLE[type] ?? type,
+      content: typeof m.content === 'string' ? m.content : m.content,
+    };
+    const calls = (m as { tool_calls?: Array<{ id?: string; name: string; args: unknown }> }).tool_calls;
+    if (calls?.length) {
+      out.tool_calls = calls.map(c => ({
+        id: c.id,
+        type: 'function',
+        function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
+      }));
+    }
+    const toolCallId = (m as { tool_call_id?: string }).tool_call_id;
+    if (toolCallId) out.tool_call_id = toolCallId;
+    const name = (m as { name?: string }).name;
+    if (name) out.name = name;
+    return out;
+  });
+}

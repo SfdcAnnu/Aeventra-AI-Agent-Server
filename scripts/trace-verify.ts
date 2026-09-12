@@ -11,6 +11,8 @@
  *   npx tsx scripts/trace-verify.ts
  */
 import { redact, redactText, redactForStorage, REDACTED } from '../src/trace/redact';
+import { toWireMessages } from '../src/trace/prompt-parts';
+import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -127,6 +129,32 @@ check('a whole payload is bounded', stored.truncated === true);
 check('a normal payload is stored whole', (redactForStorage({ a: 1 }) as { a: number }).a === 1);
 check('unserializable input returns a marker, not a throw',
   (redactForStorage({ big: BigInt(1) }) as { unserializable?: boolean }) !== undefined);
+
+// ── 6. Messages are stored as sent, not as LangChain holds them ──────
+console.log('\n6. A stored request is the wire body, not LangChain internals');
+const PROMPT = 'You are an agent. Follow the rules.';
+const wire = toWireMessages([
+  new SystemMessage(PROMPT),
+  new HumanMessage('Hello'),
+  new AIMessage({ content: '', tool_calls: [{ id: 'call_1', name: 'soqlQuery', args: { q: 1 }, type: 'tool_call' }] }),
+  new ToolMessage({ tool_call_id: 'call_1', name: 'soqlQuery', content: '{"records":[]}' }),
+]);
+const wireJson = JSON.stringify(wire);
+// The bug this replaces: a raw BaseMessage serialises its content TWICE —
+// once resolved, once inside lc_kwargs — so every prompt appeared doubled
+// in the trace, at double the storage cost.
+check('the system prompt appears exactly once',
+  wireJson.split(PROMPT).length - 1 === 1, `appeared ${wireJson.split(PROMPT).length - 1}x`);
+check('no lc_kwargs leaks through', !wireJson.includes('lc_kwargs'));
+check('no lc_namespace leaks through', !wireJson.includes('lc_namespace'));
+check('no circular markers', !wireJson.includes('[circular]'));
+check("roles are the provider's, not LangChain's",
+  wire.map(m => m.role).join(',') === 'system,user,assistant,tool', wire.map(m => m.role).join(','));
+check('tool calls keep their id and arguments',
+  wireJson.includes('call_1') && wireJson.includes('soqlQuery') && wireJson.includes('"arguments"'));
+check('a tool result keeps its tool_call_id', (wire[3] as { tool_call_id?: string }).tool_call_id === 'call_1');
+check('redaction still works on the wire shape',
+  absent(redact(toWireMessages([new SystemMessage(`key ${SK}`)])), SK));
 
 console.log(failures === 0 ? '\nAll trace checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -20,7 +20,7 @@
 import { prisma } from '../db/client';
 import { logger } from '../logger';
 import { redactForStorage } from './redact';
-import { describeRequest } from './prompt-parts';
+import { describeRequest, toWireMessages } from './prompt-parts';
 import type { RecordedStep } from './recorder';
 import type { BaseMessage } from '@langchain/core/messages';
 
@@ -135,7 +135,7 @@ async function writeOne(job: Job, keepPayloads: boolean): Promise<void> {
           stage: s.stage,
           name: s.name.slice(0, 200),
           model: s.model ?? null,
-          requestJson: keepPayloads ? (redactForStorage(s.request, MAX_BODY_CHARS) as never) : undefined,
+          requestJson: keepPayloads ? (redactForStorage(wireRequest(s), MAX_BODY_CHARS) as never) : undefined,
           requestParts: keepPayloads ? (partsFor(s) as never) : undefined,
           responseJson: keepPayloads ? (redactForStorage(s.response, MAX_BODY_CHARS) as never) : undefined,
           tokensIn: s.tokensIn,
@@ -150,6 +150,22 @@ async function writeOne(job: Job, keepPayloads: boolean): Promise<void> {
       },
     },
   });
+}
+
+/** A model call's request as the provider receives it — LangChain's
+ *  Serializable internals (lc_kwargs, lc_namespace, circular
+ *  additional_kwargs) stripped, so the stored body is the real one and not
+ *  a doubled copy of it. Tool calls pass through unchanged; their input is
+ *  already a plain value. */
+function wireRequest(step: RecordedStep): unknown {
+  if (step.kind !== 'model_call') return step.request;
+  try {
+    const req = step.request as { messages?: BaseMessage[]; params?: Record<string, unknown> } | undefined;
+    if (!req?.messages) return step.request;
+    return { ...(req.params ?? {}), messages: toWireMessages(req.messages) };
+  } catch {
+    return step.request;
+  }
 }
 
 /** The composed view — only meaningful for a model call, and never worth
