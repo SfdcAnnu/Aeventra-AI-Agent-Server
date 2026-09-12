@@ -383,3 +383,50 @@ model AgentTraceStep {
 
   @@index([traceId, seq])
 }
+
+/// A "Describe what you need" build, and everything it has produced so far.
+///
+/// The reason this is a table and not a process variable: a build runs for
+/// minutes across seven paid stages, and the two things that end it early —
+/// the budget ceiling and a host restart — used to discard every stage
+/// already paid for. The customer then re-ran from zero and paid twice for
+/// the same survey and the same design. `checkpoint` is what makes a build
+/// resumable: each stage's output lands here the moment it succeeds, so a
+/// resumed run re-does only what was never finished.
+model ArchitectBuild {
+  id    String @id
+  orgId String
+
+  requirement    String
+  attachmentText String?
+
+  /// queued | running | paused | done | failed
+  status String @default("queued")
+  /// The step list the Building screen renders, with per-stage cost and ms.
+  steps  Json
+
+  /// Stage outputs, keyed by stage: requirement, surveyed, match, spec,
+  /// prerequisites. Restored verbatim on resume — never re-derived, since
+  /// re-deriving is exactly the cost this exists to avoid.
+  checkpoint Json?
+
+  /// Spent by THIS run. `priorCostUsd` is what earlier runs in the same
+  /// resume chain already spent; the ceiling applies to their sum, so a
+  /// resume cannot be used to walk past the limit one run at a time.
+  costUsd      Float  @default(0)
+  priorCostUsd Float  @default(0)
+  maxCostUsd   Float  @default(2)
+
+  /// Set when this run resumed another — the chain, for support.
+  resumedFrom String?
+
+  result Json?
+  error  String?
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  updatedAt  DateTime  @updatedAt
+
+  @@index([orgId, startedAt])
+  @@index([orgId, status])
+}
