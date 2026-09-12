@@ -21,6 +21,7 @@
  * ceilings from env. Generic — no agent-specific values live here.
  */
 import type { AIMessage } from '@langchain/core/messages';
+import type { ModelUsage } from '../chat/adapters/types';
 
 /** Phase 7 — one billable transition. Model calls carry tokens; tool
  *  calls carry the name. Emitted at turn end as the `lc_billing` event —
@@ -133,6 +134,33 @@ function stableStringify(v: unknown): string {
 }
 
 /** Record one tool call; returns its repeat count (1 = first time). */
+/** Collapse the turn's model_call events into one row per model.
+ *
+ *  This is what makes "tokens by model" truthful: a turn that routes on
+ *  gpt-5.5 and hands off to a haiku specialist reports both, with their own
+ *  token counts, instead of charging the whole turn to whichever model
+ *  happened to speak last. Sums back exactly to b.tokensIn / b.tokensOut. */
+export function usageByModel(b: TurnBudget): ModelUsage[] {
+  const byModel = new Map<string, ModelUsage>();
+  for (const e of b.events) {
+    if (e.kind !== 'model_call') continue;
+    // A provider that reported no model name still consumed tokens —
+    // bucket it honestly rather than dropping it from the totals.
+    const key = e.model || 'unknown';
+    let row = byModel.get(key);
+    if (!row) {
+      row = { model: key, stages: [], calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0 };
+      byModel.set(key, row);
+    }
+    row.calls += 1;
+    row.tokensIn += e.tokensIn ?? 0;
+    row.tokensOut += e.tokensOut ?? 0;
+    row.cacheRead += e.cacheRead ?? 0;
+    if (e.stage && !row.stages.includes(e.stage)) row.stages.push(e.stage);
+  }
+  return [...byModel.values()].sort((a, b2) => (b2.tokensIn + b2.tokensOut) - (a.tokensIn + a.tokensOut));
+}
+
 export function noteToolCall(b: TurnBudget, name: string, args: unknown, stage = 'tools'): number {
   if (b.events.length < MAX_EVENTS) b.events.push({ kind: 'tool_call', stage, name });
   const sig = `${name}|${stableStringify(args ?? {})}`;

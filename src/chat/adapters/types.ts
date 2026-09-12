@@ -62,6 +62,27 @@ export interface ChatTurnRequest {
   };
 }
 
+/** Token usage for ONE model within a single turn.
+ *
+ *  A turn is not one model call. The router answers on the root node's
+ *  model, a specialist runs on its own, and utility passes (memory
+ *  summariser, title generator) run on a cheap model — all inside the same
+ *  turn. Reporting one `modelUsed` against the turn's whole token total
+ *  mis-attributes every multi-model turn, so the breakdown travels
+ *  alongside it. */
+export interface ModelUsage {
+  model: string;
+  /** Which parts of the turn ran on this model — router, subagent,
+   *  narration_followup, guardrail_regen. Ordered by first appearance. */
+  stages: string[];
+  calls: number;
+  tokensIn: number;
+  tokensOut: number;
+  /** Prompt-cache hits, already included in tokensIn. Providers bill these
+   *  far cheaper, so they are broken out rather than hidden. */
+  cacheRead: number;
+}
+
 export interface ToolCallSummary {
   id:      string;
   name:    string;
@@ -82,9 +103,16 @@ export interface ChatTurnResult {
   status: 'complete';
   assistantText: string;
   toolCalls: ToolCallSummary[];
+  /** The model that produced the customer-facing answer. Kept for the
+   *  existing ChatMessage__c.ModelUsed__c column; `usage` is the accurate
+   *  per-model breakdown of the SAME turn. */
   modelUsed: string;
   tokensIn: number;
   tokensOut: number;
+  /** Per-model split of tokensIn/tokensOut above. Sums back to them. */
+  usage?: ModelUsage[];
+  /** Wall-clock time for the whole turn, server-side. */
+  latencyMs?: number;
   // Only ever populated for adapters that can't hard-block tool calls
   // (Claude's Managed MCP today — see claude.ts). Empty/undefined means
   // either no restriction was configured, or the provider enforces it
