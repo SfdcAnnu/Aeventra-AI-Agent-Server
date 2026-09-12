@@ -75,6 +75,7 @@ import {
   checkBudget,
   noteUsage,
   noteToolCall,
+  usageByModel,
   REPEAT_BLOCK_AT,
   BUDGET_TRIPPED_REPLY,
   REPEATED_CALL_RESULT,
@@ -548,6 +549,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       modelUsed: usedModel,
       tokensIn,
       tokensOut,
+      // The per-model split of the same totals. `modelUsed` alone cannot
+      // describe a turn that routed on one model and answered on another.
+      usage: usageByModel(budget),
+      latencyMs: Date.now() - t0,
       ...(activeSubagentName !== null ? { activeTopicName: activeSubagentName } : {}),
       ...(req.debugMode ? { debugRequest, debugResponse } : {}),
     };
