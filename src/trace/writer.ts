@@ -20,7 +20,7 @@
 import { prisma } from '../db/client';
 import { logger } from '../logger';
 import { redactForStorage } from './redact';
-import { describeRequest, toWireMessages } from './prompt-parts';
+import { describeRequest, toWireMessages, toWireResponse } from './prompt-parts';
 import type { RecordedStep } from './recorder';
 import type { BaseMessage } from '@langchain/core/messages';
 
@@ -137,7 +137,7 @@ async function writeOne(job: Job, keepPayloads: boolean): Promise<void> {
           model: s.model ?? null,
           requestJson: keepPayloads ? (redactForStorage(wireRequest(s), MAX_BODY_CHARS) as never) : undefined,
           requestParts: keepPayloads ? (partsFor(s) as never) : undefined,
-          responseJson: keepPayloads ? (redactForStorage(s.response, MAX_BODY_CHARS) as never) : undefined,
+          responseJson: keepPayloads ? (redactForStorage(wireResponse(s), MAX_BODY_CHARS) as never) : undefined,
           tokensIn: s.tokensIn,
           tokensOut: s.tokensOut,
           cacheRead: s.cacheRead,
@@ -165,6 +165,17 @@ function wireRequest(step: RecordedStep): unknown {
     return { ...(req.params ?? {}), messages: toWireMessages(req.messages) };
   } catch {
     return step.request;
+  }
+}
+
+/** A model response stripped to what is worth reading. Tool results and
+ *  errors pass through — they are already plain values. */
+function wireResponse(step: RecordedStep): unknown {
+  if (step.kind !== 'model_call' || !step.response) return step.response;
+  try {
+    return toWireResponse(step.response);
+  } catch {
+    return step.response;
   }
 }
 

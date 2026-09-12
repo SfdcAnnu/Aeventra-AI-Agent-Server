@@ -168,3 +168,60 @@ export function toWireMessages(messages: BaseMessage[]): Array<Record<string, un
     return out;
   });
 }
+
+/**
+ * A model response as the provider returned it.
+ *
+ * The raw LLMResult repeats the reply three times — `text`, the message's
+ * `content`, and again inside the message's `lc_kwargs` — and buries the
+ * token usage under a chain of LangChain wrappers. This keeps the things
+ * you actually read when something went wrong: what it said, what it
+ * called, why it stopped, and what it cost.
+ */
+export function toWireResponse(output: unknown): Record<string, unknown> {
+  const res = output as {
+    generations?: Array<Array<{
+      text?: string;
+      message?: {
+        id?: string;
+        content?: unknown;
+        tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>;
+        usage_metadata?: Record<string, unknown>;
+        response_metadata?: Record<string, unknown>;
+      };
+      generationInfo?: Record<string, unknown>;
+    }>>;
+    llmOutput?: Record<string, unknown>;
+  };
+  const gen = res?.generations?.[0]?.[0];
+  if (!gen) return (output ?? {}) as Record<string, unknown>;
+
+  const msg = gen.message ?? {};
+  const usage = (msg.usage_metadata ?? {}) as Record<string, unknown>;
+  const inDet = (usage.input_token_details ?? {}) as Record<string, unknown>;
+  const outDet = (usage.output_token_details ?? {}) as Record<string, unknown>;
+
+  const out: Record<string, unknown> = {
+    id: msg.id,
+    model: (msg.response_metadata as { model_name?: string } | undefined)?.model_name,
+    finish_reason: gen.generationInfo?.finish_reason
+      ?? (msg.response_metadata as { finish_reason?: string } | undefined)?.finish_reason,
+    content: msg.content ?? gen.text ?? '',
+  };
+  if (msg.tool_calls?.length) {
+    out.tool_calls = msg.tool_calls.map(c => ({
+      id: c.id,
+      name: c.name,
+      arguments: c.args,
+    }));
+  }
+  out.usage = {
+    input_tokens: usage.input_tokens ?? null,
+    output_tokens: usage.output_tokens ?? null,
+    total_tokens: usage.total_tokens ?? null,
+    // Broken out because they change what a turn actually costs.
+    cache_read: inDet.cache_read ?? 0,
+    reasoning: outDet.reasoning ?? 0,
+  };
+  return out;
+}
