@@ -649,9 +649,9 @@ async function runBuild(job: BuildJob): Promise<void> {
             'the Prompt Engineer fills them in.\n\n' +
             'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
             'each tool. A node with no edge is invisible at runtime.\n\n' +
-            'One tool node per TOOL, not per object. A generic tool (a SOQL query, a generic record update) ' +
-            'already serves every object — do not emit "Query Accounts", "Query Contacts" and "Query Tasks" ' +
-            'when one query tool covers all three. Duplicates are re-sent to the model on every single turn.\n\n' +
+            'One tool node per TOOL, not one per record type. When a single discovered tool already accepts ' +
+            'the record type as an argument, emit ONE node for it rather than one per type — every node is ' +
+            're-sent to the model on every turn, so near-duplicates cost the client on every conversation.\n\n' +
             'When the requirement says an action needs human approval, set approval.required on THAT tool node.',
           ...(feedback ? { previousAttemptErrors: feedback } : {}),
         }, { rawJson: true, maxOutputTokens: 8000 });
