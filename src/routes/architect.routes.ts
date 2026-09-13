@@ -21,7 +21,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
-import { createBuildJob, getBuildJob, resumeBuildJob, listResumableBuilds, type BuildJob } from '../architect/build-job';
+import { createBuildJob, getBuildJob, resumeBuildJob, listResumableBuilds, deleteBuild, type BuildJob } from '../architect/build-job';
 import { rewritePrompt, copilotTurn } from '../architect/assistant';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 
@@ -107,8 +107,24 @@ architectRouter.get('/api/architect/builds/resumable', sessionAuth, async (req, 
       stagesDone: b.steps.filter(s => s.state === 'done' || s.state === 'warn').length,
       stagesTotal: b.steps.length,
       startedAt: new Date(b.startedAt).toISOString(),
+      // Checkpointed by an older pipeline — resuming replays a design made
+      // under rules that have since changed.
+      stale: b.stale === true,
     })),
   });
+});
+
+// Forget a build and its checkpoint. The build lives here, the agent lives
+// in Salesforce, and deleting the agent deliberately does not touch this —
+// so there has to be a way to say "I am done with this one".
+architectRouter.delete('/api/architect/build/:jobId', sessionAuth, async (req, res) => {
+  const removed = await deleteBuild(req.orgId!, req.params.jobId);
+  if (!removed) {
+    res.status(404).json({ error: 'build_not_found' });
+    return;
+  }
+  logger.info({ orgId: req.orgId, jobId: req.params.jobId }, 'architect_build_deleted');
+  res.json({ deleted: true });
 });
 
 architectRouter.get('/api/architect/build/:jobId', sessionAuth, async (req, res) => {
