@@ -145,6 +145,42 @@ export interface McpToolInventory {
   error?: string;
 }
 
+/**
+ * List an MCP server's tools, waiting out a cold start.
+ *
+ * The survey is the foundation every later stage stands on: a tool it does
+ * not see is a capability the design cannot use and the Gap Reporter then
+ * tells the client to go and build. MCP hosts sleep when idle and take tens
+ * of seconds to wake, so a single attempt turns "the server was asleep"
+ * into "your org cannot do this" — the same org reported 73 capabilities
+ * one day and 58 the next, and a build accordingly told an admin to
+ * provision metadata access it already had.
+ *
+ * Retries are generous on purpose. A minute of waiting is nothing against
+ * a build that costs dollars and ends in a wrong agent.
+ */
+async function listToolsWithRetry(
+  url: string,
+  token: string,
+): Promise<Array<{ name: string; description?: string }>> {
+  const WAITS_MS = [3_000, 10_000, 20_000];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= WAITS_MS.length; attempt++) {
+    try {
+      return await listToolsCached({ remoteUrl: url, accessToken: token });
+    } catch (err) {
+      lastError = err;
+      if (attempt === WAITS_MS.length) break;
+      logger.info(
+        { url, attempt: attempt + 1, waitMs: WAITS_MS[attempt], err: err instanceof Error ? err.message : err },
+        'architect_mcp_list_retrying',
+      );
+      await new Promise(r => setTimeout(r, WAITS_MS[attempt]));
+    }
+  }
+  throw lastError;
+}
+
 export async function listMcpToolsLive(orgId: string): Promise<McpToolInventory[]> {
   const conn = await getOrgConnection(orgId);
   const install = await InstallsRepo.findByOrgId(orgId);
@@ -181,7 +217,7 @@ export async function listMcpToolsLive(orgId: string): Promise<McpToolInventory[
         out.push({ provider: s.provider, url: s.url, tools: [], error: 'not connected' });
         continue;
       }
-      const tools = await listToolsCached({ remoteUrl: s.url, accessToken: token });
+      const tools = await listToolsWithRetry(s.url, token);
       out.push({
         provider: s.provider,
         url: s.url,

@@ -549,6 +549,32 @@ async function runBuild(job: BuildJob): Promise<void> {
   const [objects, invocables, mcp, kbs, manifestBuilt] = await orgGather;
   const manifest: CapabilityManifest = manifestBuilt.manifest;
   const found = manifestBuilt.counts.invocables + manifestBuilt.counts.mcpTools + (kbs.length || 0);
+
+  // A SURVEY THAT PARTLY FAILED CANNOT BE DESIGNED AGAINST.
+  //
+  // Everything downstream treats this inventory as the truth about the org.
+  // When a connected MCP server is unreachable its tools come back empty,
+  // and the build carries on cheerfully: it designs around capabilities the
+  // org actually has, and the Gap Reporter tells the client to go and build
+  // them. That is the worst output this system can produce — confidently
+  // wrong, expensive, and aimed at an admin who will do the work.
+  //
+  // 'not connected' is excluded because it is a real answer: the org has
+  // genuinely not connected that provider, and a gap is the correct result.
+  // What stops the build is a server that should have answered and did not.
+  // Every tool the org can actually call. The reviewer needs this to tell a
+  // real omission from a capability that is already within reach.
+  const mcpToolNames = [...new Set(mcp.flatMap(m => m.tools.map(t => t.name)))];
+
+  const unreachable = mcp.filter(m => m.error && m.error !== 'not connected');
+  if (unreachable.length > 0) {
+    throw new Error(
+      `Could not read the tools from ${unreachable.map(m => m.provider).join(', ')} ` +
+        `(${unreachable[0].error}). Designing an agent without them would quietly leave out things your ` +
+        'org can already do, and list setup work you do not need — so nothing further was spent. ' +
+        'Check the connector is online, then run this again.',
+    );
+  }
   const surveyed = await stage<Record<string, unknown>>(
     job, 'survey', cp.surveyed,
     () => specialist<Record<string, unknown>>(job, engine, 'survey_org', {
@@ -721,7 +747,7 @@ async function runBuild(job: BuildJob): Promise<void> {
       const judge = (): Promise<ReviewResult> =>
         specialist<ReviewResult>(job, engine, 'evaluate', {
           requirement,
-          design: summariseForReview(spec),
+          design: summariseForReview(spec, mcpToolNames),
           instruction:
             'Judge this DESIGN against the requirement. For every capability, successCriteria entry and ' +
             'explicit rule in the requirement, decide whether some node, edge, tool or approval setting ' +
@@ -953,7 +979,7 @@ async function runBuild(job: BuildJob): Promise<void> {
  * what would persuade it. What it gets is the shape — who exists, what is
  * wired to what, which tools are real, and which writes are gated.
  */
-function summariseForReview(spec: AgentSpec): Record<string, unknown> {
+function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<string, unknown> {
   const byId = new Map(spec.nodes.map(n => [n.id, n]));
   return {
     trigger: spec.trigger,
@@ -970,7 +996,18 @@ function summariseForReview(spec: AgentSpec): Record<string, unknown> {
         // The field an unenforced approval rule hides in.
         requiresHumanApproval: n.approval?.required === true,
       })),
+    // The catalog's OWN tool names, not just its label. Without them the
+    // reviewer cannot tell that the agent can already identify the current
+    // user or describe an object, and reports capabilities as missing that
+    // are sitting right there — which now costs a repair round chasing a
+    // gap that does not exist.
     toolCatalogs: spec.nodes.filter(n => n.type === 'tool_catalog').map(n => n.label),
+    // What a catalog node actually puts within reach. Without this the
+    // reviewer cannot tell that the agent can already identify the current
+    // user or describe an object, and reports capabilities as missing that
+    // are sitting right there — which now costs a repair round chasing a
+    // gap that does not exist.
+    toolsReachableViaCatalog: catalogTools,
     wiring: spec.edges.map(e => ({
       from: byId.get(e.from)?.label ?? e.from,
       to: byId.get(e.to)?.label ?? e.to,
