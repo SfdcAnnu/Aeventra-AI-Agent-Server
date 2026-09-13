@@ -556,6 +556,48 @@ export function validateSpecLogic(spec: AgentSpec, manifest?: CapabilityManifest
     }
   }
 
+  // WHAT THE COMPILER CAN ACTUALLY BUILD.
+  //
+  // These four rules lived only in the compiler, and each one killed a
+  // build on its LAST step with every stage paid for — three separate times
+  // in one week, which is the real lesson: a rule enforced only at the end
+  // is a rule the design stages cannot learn from. They are checked here so
+  // the design and prompt rounds, which retry for free, see them.
+  //
+  // The list is deliberately identical to the compiler's own refusals. If
+  // one moves, both move.
+  if (!['inbound_message', 'manual', 'webhook'].includes(spec.trigger?.type)) {
+    errors.push({
+      path: '/trigger/type',
+      message: `trigger '${spec.trigger?.type}' cannot be built yet — use inbound_message, manual or webhook`,
+    });
+  }
+  for (const n of spec.nodes) {
+    if (['approval', 'condition', 'transform', 'end'].includes(n.type)) {
+      errors.push({
+        path: `/nodes/${n.id}/type`,
+        message: `node type '${n.type}' has no runtime yet — express it with agent, subagent, tool or tool_catalog`,
+      });
+    }
+    if (n.type === 'tool' && n.action) {
+      if (n.action.kind === 'http' || n.action.kind === 'code') {
+        errors.push({
+          path: `/nodes/${n.id}/action/kind`,
+          message: `action kind '${n.action.kind}' has no runtime executor yet`,
+        });
+      }
+      // Mirrors the compiler's CRUD_TOOL map. Kept as a literal rather than
+      // imported because the compiler imports THIS file, and the cycle is
+      // not worth the deduplication.
+      if (n.action.kind === 'crud' && !['create', 'update', 'query'].includes(n.action.operation ?? '')) {
+        errors.push({
+          path: `/nodes/${n.id}/action/operation`,
+          message: `crud operation '${n.action.operation ?? '(none)'}' is not supported — use create, update or query`,
+        });
+      }
+    }
+  }
+
   // Split test: sub-agents present but no forcing question answered true.
   const subCount = spec.nodes.filter(n => n.type === 'subagent').length;
   const rationale = spec.architecture?.splitRationale ?? [];
