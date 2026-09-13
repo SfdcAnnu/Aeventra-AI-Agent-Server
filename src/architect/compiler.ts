@@ -414,16 +414,23 @@ export async function compileSpec(
   platformNodes.forEach((p, i) => {
     if (p.specId) indexOfSpec.set(p.specId, i);
   });
-  const connections: Array<{ fromIndex: number; toIndex: number; fromPort: string; toPort: string }> = [];
+  // Every connection carries an id. React Flow keys edges by it and
+  // silently collapses duplicates, so a graph written without ids rendered
+  // as a SINGLE edge on the canvas — a correctly wired agent that looked
+  // completely unwired. The hand-built canvas always wrote them; this
+  // compiler did not, so the fault showed only on generated agents.
+  const edgeId = (from: number, to: number): string => `e${from}:tool-${to}:in`;
+  const connections: Array<{ id: string; fromIndex: number; toIndex: number; fromPort: string; toPort: string }> = [];
   for (const e of spec.edges) {
     const from = indexOfSpec.get(e.from);
     const to = indexOfSpec.get(e.to);
     if (from == null || to == null) continue; // node was not compiled (never silently: v1 rejects those above)
-    connections.push({ fromIndex: from, toIndex: to, fromPort: 'tool', toPort: 'in' });
+    connections.push({ id: edgeId(from, to), fromIndex: from, toIndex: to, fromPort: 'tool', toPort: 'in' });
   }
   const injected = platformNodes.findIndex(p => p.specId === null);
   if (injected >= 0) {
-    connections.push({ fromIndex: indexOfSpec.get(root.id)!, toIndex: injected, fromPort: 'tool', toPort: 'in' });
+    const rootIndex = indexOfSpec.get(root.id)!;
+    connections.push({ id: edgeId(rootIndex, injected), fromIndex: rootIndex, toIndex: injected, fromPort: 'tool', toPort: 'in' });
   }
 
   // ── Status mapping — the activation guard, applied twice ───────────
