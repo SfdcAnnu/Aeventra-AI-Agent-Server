@@ -15,7 +15,10 @@
  *
  *   npx tsx scripts/prereq-verify.ts
  */
-import { normalizePrerequisite, normalizePrerequisites, validateSpecSchema, type AgentSpec } from '../src/architect/spec';
+import {
+  normalizePrerequisite, normalizePrerequisites, validateSpecSchema,
+  attachOrphansToRoot, validateSpecLogic, type AgentSpec,
+} from '../src/architect/spec';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -145,9 +148,58 @@ const blob = normalizePrerequisite({
 check('it split into more than one step', blob.steps.length >= 2, JSON.stringify(blob.steps));
 check('no step is left with list punctuation', blob.steps.every(s => !/^[-*\d.)\s]+$/.test(s)));
 
-console.log(
-  failures === 0
-    ? '\nAll prerequisite checks passed.\n'
-    : `\n${failures} check(s) FAILED.\n`,
-);
+// ── 7. Nothing unreachable can ship ──────────────────────────────────
+// The failure this prevents: a design with twelve tool nodes and not one
+// edge compiled cleanly into an agent that could do nothing, because
+// "edges reference real nodes" is passed trivially by having no edges.
+console.log('\n7. A node the root cannot reach is repaired, then enforced');
+  const orphaned = {
+    specVersion: '1.0', name: 'Orphans', department: 'Sales',
+    trigger: { type: 'manual' },
+    nodes: [
+      { id: 'root', type: 'agent', label: 'Root', instructions: 'Be useful.' },
+      { id: 't1', type: 'tool', label: 'Query Opportunities', action: { kind: 'mcp', toolName: 'soqlQuery' } },
+      { id: 't2', type: 'tool', label: 'Update Account', action: { kind: 'mcp', toolName: 'updateSobjectRecord' } },
+      { id: 's1', type: 'subagent', label: 'Pipeline Analyst', description: 'Answers pipeline questions.' },
+    ],
+    edges: [],
+  } as unknown as AgentSpec;
+
+  const before = validateSpecLogic(orphaned);
+  check('an unwired design is rejected before repair',
+    before.some(e => /no path from the root/.test(e.message)), JSON.stringify(before.map(e => e.message)));
+  check('every orphan is named, not just the first',
+    before.filter(e => /no path from the root/.test(e.message)).length === 3);
+
+  const notes = attachOrphansToRoot(orphaned);
+  check('the repair reports what it wired', notes.length === 3, JSON.stringify(notes));
+  check('and it validates afterwards',
+    !validateSpecLogic(orphaned).some(e => /no path from the root/.test(e.message)));
+  check('a sub-agent is attached as a handoff, not a call',
+    orphaned.edges.find(e => e.to === 's1')?.mode === 'handoff');
+  check('a tool is attached as static',
+    orphaned.edges.find(e => e.to === 't1')?.mode === 'static');
+
+  // A second pass must be a no-op — repairing twice would duplicate edges.
+  const again = attachOrphansToRoot(orphaned);
+  check('repairing an already-wired graph changes nothing', again.length === 0 && orphaned.edges.length === 3);
+
+  // A tool owned by a sub-agent is reachable THROUGH it, not only directly.
+  const nested = {
+    specVersion: '1.0', name: 'Nested', department: 'Sales',
+    trigger: { type: 'manual' },
+    nodes: [
+      { id: 'root', type: 'agent', label: 'Root', instructions: 'x' },
+      { id: 's1', type: 'subagent', label: 'Analyst', description: 'Answers pipeline questions.' },
+      { id: 't1', type: 'tool', label: 'Query', action: { kind: 'mcp', toolName: 'soqlQuery' } },
+    ],
+    edges: [
+      { from: 'root', to: 's1', mode: 'handoff' },
+      { from: 's1', to: 't1', mode: 'static' },
+    ],
+  } as unknown as AgentSpec;
+  check('a tool under a sub-agent counts as reachable',
+    attachOrphansToRoot(nested).length === 0 && nested.edges.length === 2);
+
+console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);

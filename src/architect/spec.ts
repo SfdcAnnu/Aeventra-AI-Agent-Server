@@ -353,6 +353,62 @@ function schemaValidator() {
   return compiled;
 }
 
+/**
+ * Attach anything the root cannot reach to the root, and say so.
+ *
+ * An orphan is unambiguous to repair: the runtime caps hierarchy at two
+ * tiers, so a stranded sub-agent's only legal parent IS the root, and a
+ * stranded tool's default owner is the root too. There is exactly one
+ * correct wiring, and deriving it costs nothing.
+ *
+ * Doing it here rather than letting validation reject is a deliberate
+ * trade. Rejection sends the design back to the model for another paid
+ * attempt at a fact no model needs to supply — and a build that dies after
+ * five completed stages over a missing edge is the expensive failure this
+ * whole path keeps producing. Validation still runs afterwards and still
+ * fails on anything this could not fix, so nothing unreachable can ship;
+ * this only removes the cost of the repair.
+ *
+ * Returns the notes to surface, so a silently rewired graph is never
+ * presented as the one the designer drew.
+ */
+export function attachOrphansToRoot(spec: AgentSpec): string[] {
+  const roots = spec.nodes.filter(n => n.type === 'agent');
+  if (roots.length !== 1) return [];
+  const rootId = roots[0].id;
+
+  const ids = new Set(spec.nodes.map(n => n.id));
+  const outFrom = new Map<string, string[]>();
+  for (const e of spec.edges) {
+    if (!ids.has(e.from) || !ids.has(e.to)) continue;
+    const list = outFrom.get(e.from);
+    if (list) list.push(e.to);
+    else outFrom.set(e.from, [e.to]);
+  }
+
+  const reached = new Set<string>([rootId]);
+  const queue = [rootId];
+  while (queue.length > 0) {
+    for (const next of outFrom.get(queue.shift()!) ?? []) {
+      if (!reached.has(next)) { reached.add(next); queue.push(next); }
+    }
+  }
+
+  const notes: string[] = [];
+  for (const n of spec.nodes) {
+    if (reached.has(n.id)) continue;
+    // 'handoff' for a stranded sub-agent rather than 'call': a call edge
+    // requires the sub-agent to declare a `returns` schema, which an orphan
+    // by definition has not been given — repairing the wiring must not
+    // create a second validation failure.
+    const mode: SpecEdge['mode'] = n.type === 'subagent' ? 'handoff' : 'static';
+    spec.edges.push({ from: rootId, to: n.id, mode });
+    reached.add(n.id);
+    notes.push(`'${n.label}' had no connection — attached it to the main agent.`);
+  }
+  return notes;
+}
+
 export function validateSpecSchema(spec: unknown): SpecError[] {
   const validate = schemaValidator();
   if (validate(spec)) return [];
@@ -392,6 +448,44 @@ export function validateSpecLogic(spec: AgentSpec, manifest?: CapabilityManifest
       errors.push({ path: `/edges/${i}`, message: `call edge to '${e.to}' — the sub-agent must declare a returns schema` });
     }
   });
+
+  // REACHABILITY. The runtime resolves an agent's tools and helpers by
+  // walking edges out of the root — `nextNodes(graph, aiNode.id, 'tool')`.
+  // A node with no path from the root is therefore invisible at runtime, no
+  // matter how correct it looks: it renders on the canvas, it costs tokens
+  // to design, and it can never fire.
+  //
+  // This check did not exist, and a real build shipped because of it — a
+  // design with twelve tool nodes and not one edge to any of them compiled
+  // cleanly into an agent that could do nothing. Edges referencing real
+  // nodes was the only connectivity test, and orphans pass that trivially
+  // by having no edges at all.
+  if (roots.length === 1) {
+    const rootId = roots[0].id;
+    const outFrom = new Map<string, string[]>();
+    for (const e of spec.edges) {
+      if (!ids.has(e.from) || !ids.has(e.to)) continue;
+      const list = outFrom.get(e.from);
+      if (list) list.push(e.to);
+      else outFrom.set(e.from, [e.to]);
+    }
+    const reached = new Set<string>([rootId]);
+    const queue = [rootId];
+    while (queue.length > 0) {
+      for (const next of outFrom.get(queue.shift()!) ?? []) {
+        if (!reached.has(next)) { reached.add(next); queue.push(next); }
+      }
+    }
+    for (const n of spec.nodes) {
+      if (reached.has(n.id)) continue;
+      errors.push({
+        path: `/nodes/${n.id}`,
+        message:
+          `'${n.label}' has no path from the root agent — add an edge from '${rootId}' (or from the ` +
+          'sub-agent that owns it). A node the root cannot reach is invisible at runtime.',
+      });
+    }
+  }
 
   // Split test: sub-agents present but no forcing question answered true.
   const subCount = spec.nodes.filter(n => n.type === 'subagent').length;
