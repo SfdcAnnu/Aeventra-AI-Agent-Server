@@ -318,6 +318,13 @@
           }
         }
       ]
+    },
+    "audience": {
+      "enum": [
+        "customer",
+        "internal"
+      ],
+      "description": "Who reads this agent's replies. \"customer\" means someone outside the business; \"internal\" means an employee. Decide it from the requirement, never from the channel -- a web chat can be a public widget or a staff tool, and the two need opposite treatment. Defaults to internal when the requirement does not say."
     }
   },
   "$defs": {
@@ -396,7 +403,7 @@
         "instructions": {
           "type": "string",
           "maxLength": 12000,
-          "description": "Role, tone and boundaries. NEVER a procedure, and never anything that varies per customer — volatile content above the cache breakpoint destroys the cache."
+          "description": "Role, tone and boundaries. NEVER a procedure, and never anything that varies per customer \u2014 volatile content above the cache breakpoint destroys the cache."
         },
         "returns": {
           "type": "object",
@@ -655,7 +662,7 @@
             "static",
             "conditional"
           ],
-          "description": "call returns a value and the parent resumes. handoff transfers control and CLEARS the frame stack — the caller never resumes. Default to call; handoff is an explicit choice."
+          "description": "call returns a value and the parent resumes. handoff transfers control and CLEARS the frame stack \u2014 the caller never resumes. Default to call; handoff is an explicit choice."
         },
         "contextPolicy": {
           "enum": [
@@ -672,7 +679,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Fields always passed across this edge regardless of policy. If a child needs a field the parent holds, name it here — this is the single most common cause of sub-agent failure."
+          "description": "Fields always passed across this edge regardless of policy. If a child needs a field the parent holds, name it here \u2014 this is the single most common cause of sub-agent failure."
         },
         "windowTurns": {
           "type": "integer",

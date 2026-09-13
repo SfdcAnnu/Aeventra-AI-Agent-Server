@@ -449,7 +449,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         systemMessage,
         ...sanitizeToolPairs(state.messages),
         new HumanMessage('Continue — that was not a complete reply, the customer cannot see it and cannot wait. Do the work NOW (compute the numbers or call the tools you need) and respond with the actual final answer.'),
-      ])) as AIMessage;
+      // Tagged so the trace shows WHY a second call happened. Untagged it
+      // looked like an ordinary router call, and a reader comparing the
+      // first call's text against the UI found two different answers with
+      // nothing to explain the gap.
+      ], { tags: ['narration-followup'] })) as AIMessage;
       noteUsage(budget, followup, 'narration_followup', modelName);
       state = { ...state, messages: [...state.messages, followup] };
       assistantText = lastAssistantText(state.messages);
@@ -515,7 +519,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
               'vocabulary (floor, concession, policy, matrix), no systems, records, tasks or stages.' +
               ' Respond with ONLY the corrected customer message.',
             ),
-          ])) as AIMessage;
+          ], { tags: ['guardrail-regen'] })) as AIMessage;
           noteUsage(budget, corrected, 'guardrail_regen', modelName);
           state = { ...state, messages: [...state.messages, corrected] };
           const retext = lastAssistantText(state.messages);
@@ -609,6 +613,12 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           cachedTokens: budget.cacheReadTokens,
           latencyMs: Date.now() - t0,
           usageByModel: result.usage,
+          // The text that actually reached the customer, AFTER any
+          // regeneration and after the mechanical scrub. Recorded because
+          // it is not always any step's output: the scrub edits the wording
+          // once every model call is done, so comparing the last step to
+          // the UI could show two different answers and no reason why.
+          finalReply: result.assistantText,
         },
         recorder.finish(),
       );

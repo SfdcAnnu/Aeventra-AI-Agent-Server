@@ -19,7 +19,7 @@
  */
 import { prisma } from '../db/client';
 import { logger } from '../logger';
-import { redactForStorage } from './redact';
+import { redactForStorage, redactText } from './redact';
 import { describeRequest, toWireMessages, toWireResponse } from './prompt-parts';
 import type { RecordedStep } from './recorder';
 import type { BaseMessage } from '@langchain/core/messages';
@@ -59,6 +59,8 @@ export interface TraceTotals {
   cachedTokens: number;
   latencyMs: number;
   usageByModel?: unknown;
+  /** What the customer actually saw — see the column's own note. */
+  finalReply?: string | null;
 }
 
 interface Job { ctx: TraceContext; totals: TraceTotals; steps: RecordedStep[] }
@@ -128,6 +130,11 @@ async function writeOne(job: Job, keepPayloads: boolean): Promise<void> {
       cachedTokens: totals.cachedTokens,
       latencyMs: totals.latencyMs,
       usageByModel: (redactForStorage(totals.usageByModel) ?? undefined) as never,
+      // Redacted like any other stored text: a reply can quote a record, and
+      // a credential in an error message has reached a reply before.
+      finalReply: totals.finalReply
+        ? String(redactText(totals.finalReply)).slice(0, 8_000)
+        : null,
       steps: {
         create: steps.map(s => ({
           seq: s.seq,
