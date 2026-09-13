@@ -109,12 +109,19 @@ function resolveModel(
   if (org.models.length === 0) {
     throw new CompileError('No AI models are enabled in this org — connect a provider on the AI Models page first.');
   }
-  if (wanted?.modelId) {
-    if (!org.models.includes(wanted.modelId)) {
-      throw new CompileError(
-        `Node '${nodeLabel}' asks for model '${wanted.modelId}' but it is not enabled on any active connection.`,
-      );
-    }
+  // A model the org does not have falls back to the requested TIER rather
+  // than killing the build. The designer invents these: told to keep one AI
+  // provider across the graph, it emitted modelId 'sales_desk_shared_provider'
+  // — a phrase from the requirement, not a model — and eight paid stages
+  // died on the last one. Tier resolution already picks a real model, and a
+  // working agent on a neighbouring model beats no agent at all. The
+  // substitution is noted, never silent.
+  if (wanted?.modelId && !org.models.includes(wanted.modelId)) {
+    notes.push(
+      `'${nodeLabel}': the design asked for model '${wanted.modelId}', which is not enabled here — ` +
+        'used one of your enabled models instead. Change it on the canvas if you want a different one.',
+    );
+  } else if (wanted?.modelId) {
     return { modelId: wanted.modelId, provider: providerOfModel(wanted.modelId) };
   }
   const tier = wanted?.tier ?? 'large';

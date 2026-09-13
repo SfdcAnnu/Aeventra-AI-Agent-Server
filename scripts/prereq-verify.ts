@@ -238,5 +238,62 @@ console.log('\n7. A node the root cannot reach is repaired, then enforced');
   check('a tool under a sub-agent counts as reachable',
     attachOrphansToRoot(nested).length === 0 && nested.edges.length === 2);
 
+
+// ── 8. Every compiler refusal is caught by the validator first ───────
+// Three separate builds died on their LAST step, each on a rule that lived
+// only in the compiler. The design and prompt stages retry for free; the
+// compiler does not retry at all. So the rules belong where a retry can
+// still fix them.
+console.log('\n8. What the compiler refuses, the validator rejects earlier');
+function logicErrors(spec: unknown): string[] {
+  return validateSpecLogic(spec as AgentSpec).map(e => `${e.path}: ${e.message}`);
+}
+const base = {
+  specVersion: '1.0', name: 'X', department: 'Sales',
+  trigger: { type: 'manual' },
+  nodes: [{ id: 'root', type: 'agent', label: 'Root', instructions: 'x' }],
+  edges: [],
+};
+check('a sub-agent with no description is rejected',
+  logicErrors({
+    ...base,
+    nodes: [...base.nodes, { id: 's1', type: 'subagent', label: 'Analyst' }],
+    edges: [{ from: 'root', to: 's1', mode: 'handoff' }],
+  }).some(e => /needs a description/.test(e)));
+check('an unbuildable trigger is rejected',
+  logicErrors({ ...base, trigger: { type: 'scheduled' } }).some(e => /cannot be built yet/.test(e)));
+check('a node type with no runtime is rejected',
+  logicErrors({
+    ...base,
+    nodes: [...base.nodes, { id: 'c1', type: 'condition', label: 'If' }],
+    edges: [{ from: 'root', to: 'c1', mode: 'static' }],
+  }).some(e => /has no runtime yet/.test(e)));
+check('an action kind with no executor is rejected',
+  logicErrors({
+    ...base,
+    nodes: [...base.nodes, { id: 't1', type: 'tool', label: 'Call', action: { kind: 'http' } }],
+    edges: [{ from: 'root', to: 't1', mode: 'static' }],
+  }).some(e => /no runtime executor/.test(e)));
+check('an unsupported crud operation is rejected',
+  logicErrors({
+    ...base,
+    nodes: [...base.nodes, { id: 't2', type: 'tool', label: 'Del', action: { kind: 'crud', operation: 'delete' } }],
+    edges: [{ from: 'root', to: 't2', mode: 'static' }],
+  }).some(e => /not supported/.test(e)));
+// And the shape that should sail through untouched.
+check('a buildable design raises none of these',
+  logicErrors({
+    ...base,
+    nodes: [
+      ...base.nodes,
+      { id: 's1', type: 'subagent', label: 'Analyst', description: 'Use this for pipeline questions.' },
+      { id: 't1', type: 'tool', label: 'Query', action: { kind: 'crud', operation: 'query' } },
+    ],
+    edges: [
+      { from: 'root', to: 's1', mode: 'handoff' },
+      { from: 's1', to: 't1', mode: 'static' },
+    ],
+  }).length === 0);
+
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
