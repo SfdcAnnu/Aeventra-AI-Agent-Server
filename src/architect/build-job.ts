@@ -632,7 +632,24 @@ async function runBuild(job: BuildJob): Promise<void> {
   // A checkpointed spec that already has instructions belongs to the
   // prompts stage, not this one — only an un-prompted draft short-circuits
   // the design. `promptsDone` is what distinguishes them.
-  const promptsAlreadyWritten = !!cp.spec && specHasPrompts(cp.spec);
+  //
+  // But a saved spec is only reusable while it still VALIDATES. A build
+  // that stopped on a late gate has a checkpoint holding the very spec that
+  // failed, so restoring it unchanged replays the same failure for free and
+  // the customer sees Resume do nothing — which is exactly what happened
+  // when a rule the compiler enforced was missing from validateSpec. When
+  // the saved spec no longer passes, the stage that owns the problem is
+  // re-run instead of reused; the retry rounds and the Prompt Engineer then
+  // get a chance to repair it.
+  const checkpointErrors = cp.spec ? validateSpec(cp.spec, manifest) : [];
+  if (cp.spec && checkpointErrors.length > 0) {
+    logger.info(
+      { jobId: job.id, errors: checkpointErrors.slice(0, 5).map(e => `${e.path}: ${e.message}`) },
+      'architect_checkpoint_spec_invalid_rebuilding',
+    );
+  }
+  const specStillValid = !!cp.spec && checkpointErrors.length === 0;
+  const promptsAlreadyWritten = specStillValid && specHasPrompts(cp.spec!);
   let spec = await stage<AgentSpec>(
     job, 'design', cp.spec,
     async () => {
@@ -704,7 +721,9 @@ async function runBuild(job: BuildJob): Promise<void> {
   spec = await stage<AgentSpec>(
     job, 'prompts', promptsAlreadyWritten ? cp.spec : undefined,
     async () => {
-      let promptFeedback = '';
+      // Hand over what the saved spec got wrong, so the first attempt fixes
+      // it rather than discovering it.
+      let promptFeedback = checkpointErrors.map(e => `${e.path}: ${e.message}`).join('\n');
       for (let attempt = 1; attempt <= 3; attempt++) {
         const withPrompts = await specialist<AgentSpec>(job, engine, 'write_prompts', {
           draftSpec: spec,
@@ -742,7 +761,9 @@ async function runBuild(job: BuildJob): Promise<void> {
   // the client asked for explicitly, because an agent that is quietly
   // wrong is worth less than nothing to the customer who receives it.
   const review = await stage<ReviewResult>(
-    job, 'review', cp.review,
+    // A verdict on a spec that has since been rebuilt is not a verdict on
+    // this one. Re-judge rather than carry a stale pass forward.
+    job, 'review', specStillValid ? cp.review : undefined,
     async () => {
       const judge = (): Promise<ReviewResult> =>
         specialist<ReviewResult>(job, engine, 'evaluate', {

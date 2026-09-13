@@ -534,6 +534,28 @@ export function validateSpecLogic(spec: AgentSpec, manifest?: CapabilityManifest
     }
   }
 
+  // A sub-agent must say WHEN to use it. The lead model routes on this
+  // string and nothing else, so an empty one is a specialist that never
+  // gets called — and the compiler refuses to invent it, rightly, since a
+  // guessed routing description mis-routes silently.
+  //
+  // The rule lived ONLY in the compiler, which meant a design could pass
+  // every validation gate and die at the final step with all eight stages
+  // paid for. Checked here so the design and prompt stages, which have
+  // retry rounds and a Prompt Engineer whose whole job is writing these,
+  // get the chance to fix it for nothing.
+  for (const n of spec.nodes) {
+    if (n.type !== 'subagent') continue;
+    if (!n.description || n.description.trim().length < 10) {
+      errors.push({
+        path: `/nodes/${n.id}/description`,
+        message:
+          `sub-agent '${n.label}' needs a description — one or two sentences on when the lead agent ` +
+          'should hand over to it. This is what the lead model routes on.',
+      });
+    }
+  }
+
   // Split test: sub-agents present but no forcing question answered true.
   const subCount = spec.nodes.filter(n => n.type === 'subagent').length;
   const rationale = spec.architecture?.splitRationale ?? [];
