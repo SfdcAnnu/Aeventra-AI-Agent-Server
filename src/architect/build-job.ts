@@ -40,7 +40,7 @@ import {
   listKnowledgeBases,
   buildCapabilityManifest,
 } from './surveyor-tools';
-import { validateSpec, type AgentSpec, type SpecPrerequisite, type CapabilityManifest } from './spec';
+import { validateSpec, normalizePrerequisites, type AgentSpec, type SpecPrerequisite, type CapabilityManifest } from './spec';
 import { estimateSpec } from './estimate';
 import { compileSpec, CompileError } from './compiler';
 
@@ -220,11 +220,16 @@ export async function getBuildJob(id: string, orgId: string): Promise<BuildJob |
 export async function listResumableBuilds(orgId: string, limit = 10): Promise<BuildJob[]> {
   try {
     const rows = await prisma.architectBuild.findMany({
-      where: { orgId, status: 'paused' },
+      // Failed builds are candidates too — but only the ones that got as far
+      // as a design, which is what `resumeBuildJob` will actually accept.
+      where: { orgId, status: { in: ['paused', 'failed'] } },
       orderBy: { startedAt: 'desc' },
-      take: limit,
+      take: limit * 2,
     });
-    return rows.map(fromRow);
+    return rows
+      .map(fromRow)
+      .filter(b => b.status === 'paused' || !!b.checkpoint?.spec)
+      .slice(0, limit);
   } catch {
     return [];
   }
@@ -285,10 +290,15 @@ export function createBuildJob(orgId: string, requirement: string, opts?: { atta
  * stage already paid for is restored rather than re-run, and inherits the
  * spend so the ceiling still governs the whole chain.
  *
- * Returns null when there is nothing resumable under that id — a finished
- * or failed build is not restartable this way, deliberately: `failed` means
- * a stage produced something invalid, and re-running from its output would
- * just reproduce the same invalid result.
+ * A FAILED build is resumable too, as long as its checkpoint holds a
+ * design. Failures here are overwhelmingly a late gate rejecting a shape
+ * an earlier stage produced — and the repair for that ships in this code,
+ * not in the model's next attempt. Making the customer re-buy the survey
+ * and the design to pick up a fix they already paid to discover is the
+ * same waste the checkpoint exists to end. A build with no spec has
+ * nothing to resume FROM, so that one still starts over.
+ *
+ * Returns null when there is nothing resumable under that id.
  */
 export async function resumeBuildJob(
   orgId: string,
@@ -296,7 +306,10 @@ export async function resumeBuildJob(
   maxCostUsd?: number,
 ): Promise<BuildJob | null> {
   const prior = await getBuildJob(jobId, orgId);
-  if (!prior || prior.status !== 'paused') return null;
+  if (!prior) return null;
+  const resumable =
+    prior.status === 'paused' || (prior.status === 'failed' && !!prior.checkpoint?.spec);
+  if (!resumable) return null;
 
   const spent = prior.priorCostUsd + prior.costUsd;
   return launch({
@@ -563,7 +576,10 @@ async function runBuild(job: BuildJob): Promise<void> {
   // 6 — gaps
   let s = step(job, 'gaps');
   s.state = 'running';
-  let prerequisites: SpecPrerequisite[] = cp.prerequisites ?? [];
+  // Normalised on the RESTORE path too, not just when freshly written: a
+  // build checkpointed before this coercion existed holds the raw shape,
+  // and resuming it would otherwise replay the exact failure it stopped on.
+  let prerequisites: SpecPrerequisite[] = normalizePrerequisites(cp.prerequisites ?? []);
   if (gaps > 0 && !cp.prerequisites) {
     const gapOut = await specialist<{ prerequisites: SpecPrerequisite[]; blockingCount?: number }>(
       job, engine, 'report_gaps',
@@ -575,10 +591,26 @@ async function runBuild(job: BuildJob): Promise<void> {
         instruction:
           `Write ONE prerequisite for EVERY item in partial and missing — ${gaps} in total. ` +
           'Never omit one because the design worked around it; a gap the client is not told about is the ' +
-          'worst outcome this system can produce. Ids run PRE-001 upwards.',
+          'worst outcome this system can produce.\n\n' +
+          'Each prerequisite is an object with EXACTLY these keys and no others:\n' +
+          '  id       — "PRE-001", "PRE-002", … in order\n' +
+          '  kind     — one of: invocable_apex | flow | field | permission | connector | ' +
+          'knowledge_base | record_type | named_credential | data\n' +
+          '  title    — what is missing, under 120 characters\n' +
+          '  why      — what the agent cannot do without it, in the admin\'s words\n' +
+          '  steps    — an array of strings; what a Salesforce admin actually does\n' +
+          '  assignee — one of: salesforce_admin | apex_developer | integration_owner | ' +
+          'data_owner | business_owner\n' +
+          '  blocking — true if the agent cannot go live without it\n' +
+          '  status   — always "pending"\n' +
+          'Optionally: verification, affects (node ids), estimatedEffort (minutes|hours|days).',
       },
     );
-    prerequisites = gapOut.prerequisites ?? [];
+    // Coerced, not trusted. The writer is not given the spec schema, so its
+    // field names drift — and this list is validated against
+    // `additionalProperties: false` at the final gate, where a mismatch used
+    // to destroy a fully paid-for build. See normalizePrerequisites.
+    prerequisites = normalizePrerequisites(gapOut.prerequisites);
 
     // The architecture's hardest promise is that nothing is silently
     // dropped. If the writer returned fewer items than there are gaps,
