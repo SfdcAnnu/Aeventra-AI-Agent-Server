@@ -7,7 +7,7 @@
  * v1 sequence (straight-through; the conversational clarification loop and
  * the test phase arrive next):
  *   understand → survey → match → design (validate + estimate, ≤3 fix
- *   rounds) → prompts → gaps → compile → summary
+ *   rounds) → prompts → review → gaps → compile → summary
  *
  * Hard properties:
  *   - budget ceiling per build, checked BEFORE every model call
@@ -23,6 +23,11 @@
  *     Draft with prerequisites attached — never Active
  *   - open questions the Analyst could not resolve become recorded
  *     assumptions in the result, never silent guesses
+ *   - the finished design is JUDGED AGAINST THE REQUIREMENT before it is
+ *     saved. Every other gate asks whether the spec is valid, which an
+ *     agent that quietly does less than was asked for passes easily. The
+ *     review is the only one that asks whether it does what the client
+ *     said — and anything it finds missing leads the result's notes.
  */
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db/client';
@@ -70,6 +75,8 @@ export interface BuildResult {
   estimate: { costPerRunUsd: number; latencySeconds: number };
   assumptions: string[];
   notes: string[];
+  /** How the finished design measured against the requirement. */
+  review?: ReviewResult;
   confidence: string;
 }
 
@@ -89,7 +96,21 @@ export interface BuildCheckpoint {
   surveyed?: Record<string, unknown>;
   match?: MatchResult;
   spec?: AgentSpec;
+  review?: ReviewResult;
   prerequisites?: SpecPrerequisite[];
+}
+
+/** The Evaluator's verdict on the finished design, judged against the
+ *  REQUIREMENT rather than against the design's own reasoning. */
+export interface ReviewResult {
+  verdict: 'pass' | 'pass_with_risk' | 'blocked' | 'fail';
+  /** Requirement items nothing in the graph covers. The omission this
+   *  whole stage exists to catch. */
+  uncovered?: string[];
+  failures?: Array<Record<string, unknown>>;
+  fixes?: Array<Record<string, unknown>>;
+  /** True when a repair round ran and the verdict below is the re-check. */
+  repaired?: boolean;
 }
 
 export interface BuildJob {
@@ -119,6 +140,7 @@ const STEPS: Array<[string, string]> = [
   ['match', 'Matched what you need to what you have'],
   ['design', 'Designed the agent'],
   ['prompts', 'Wrote its instructions'],
+  ['review', 'Checked it against what you asked for'],
   ['gaps', 'Listed the outstanding setup'],
   ['compile', 'Saved the agent'],
 ];
@@ -550,15 +572,31 @@ async function runBuild(job: BuildJob): Promise<void> {
           if (attempt === 3) throw new Error('The design would not validate after 3 attempts:\n' + feedback);
           continue;
         }
+        // BUDGET IS ADVICE; CORRECTNESS IS NOT.
+        //
+        // A validation error means the design is wrong, and gets all three
+        // attempts. Being over target means the design is expensive, which
+        // is a different kind of problem and must never be solved by
+        // shipping an agent that does less than was asked for. So an
+        // overage buys ONE re-emit, and only when COST breached — a design
+        // that is merely slower than hoped is accepted and labelled, not
+        // rewritten. The previous behaviour spent every remaining attempt
+        // optimising latency and returned an agent missing its specialists.
         const est = estimateSpec(draft, targets);
-        if (!est.withinBudget && attempt < 3) {
+        const costBreached = est.warmUsd > (targets.costUsd ?? Infinity);
+        if (!est.withinBudget && costBreached && attempt === 1) {
           feedback =
-            `The design is over budget (warm $${est.warmUsd.toFixed(3)} vs $${targets.costUsd}, ` +
-            `${est.latencySeconds}s vs ${targets.latencySeconds}s). Apply these levers and re-emit:\n- ` +
-            est.levers.join('\n- ');
+            `The design is over the COST target (warm $${est.warmUsd.toFixed(3)} vs $${targets.costUsd}). ` +
+            'Re-emit it cheaper WITHOUT dropping any capability the requirement asked for — if the only way ' +
+            'to hit the target is to remove something the client asked for, keep the capability and stay ' +
+            'over target. Levers:\n- ' + est.levers.join('\n- ');
           continue;
         }
-        if (!est.withinBudget) overTarget = `over target: $${est.warmUsd.toFixed(3)}/run`;
+        if (!est.withinBudget) {
+          overTarget = costBreached
+            ? `over cost target: $${est.warmUsd.toFixed(3)}/run`
+            : `${est.latencySeconds}s per reply`;
+        }
         return draft;
       }
       throw new Error('No valid design produced.');
@@ -596,7 +634,85 @@ async function runBuild(job: BuildJob): Promise<void> {
     v => { cp.spec = v; },
   );
 
-  // 6 — gaps
+  // 6 — review: does this agent actually do what was asked?
+  //
+  // Nothing checked this before, and things went missing silently — an
+  // explicit approval requirement produced no approval gate, and a
+  // requirement asking for specialists came back as one flat agent. Both
+  // shipped as successes. Every other gate here asks "is this spec VALID",
+  // which a wrong agent passes easily.
+  //
+  // The Evaluator judges against the REQUIREMENT and never sees the
+  // builders' reasoning, so it cannot be talked round by a design that
+  // explains itself well. A `fail` buys one repair round: the design is
+  // re-emitted with the Evaluator's own fix list, re-prompted, and
+  // re-judged. This costs real money on every build — which is the trade
+  // the client asked for explicitly, because an agent that is quietly
+  // wrong is worth less than nothing to the customer who receives it.
+  const review = await stage<ReviewResult>(
+    job, 'review', cp.review,
+    async () => {
+      const judge = (): Promise<ReviewResult> =>
+        specialist<ReviewResult>(job, engine, 'evaluate', {
+          requirement,
+          design: summariseForReview(spec),
+          instruction:
+            'Judge this DESIGN against the requirement. For every capability, successCriteria entry and ' +
+            'explicit rule in the requirement, decide whether some node, edge, tool or approval setting ' +
+            'actually delivers it. List anything the design does NOT deliver in `uncovered`, quoting the ' +
+            'requirement\'s own words. Treat a stated approval or permission rule with no corresponding ' +
+            'approval setting as uncovered. Verdict `fail` only when something the client explicitly asked ' +
+            'for is absent — not for style, naming or efficiency.',
+        });
+
+      const first = await judge();
+      if (first.verdict !== 'fail' || !(first.fixes?.length || first.uncovered?.length)) return first;
+
+      // One repair round, using the Evaluator's own findings as the brief.
+      const brief =
+        'A review found this design does not deliver part of the requirement. Fix exactly these and ' +
+        'change nothing else:\n' +
+        [...(first.uncovered ?? []).map(u => `MISSING: ${u}`),
+         ...(first.fixes ?? []).map(f => JSON.stringify(f))].join('\n');
+
+      const repaired = await specialist<AgentSpec>(job, engine, 'design_flow', {
+        requirement, matched: match.matched, partial: match.partial, missing: match.missing,
+        previousAttemptErrors: brief,
+        instruction:
+          'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else, keeping everything ' +
+          'that already worked. EVERY node must be connected. Set approval.required on any tool the ' +
+          'requirement says needs human approval.',
+      }, { rawJson: true, maxOutputTokens: 8000 });
+      wiringNotes.push(...attachOrphansToRoot(repaired));
+
+      const reprompted = await specialist<AgentSpec>(job, engine, 'write_prompts', {
+        draftSpec: repaired, requirement,
+        instruction: 'Return the SAME AgentSpec JSON with instructions and descriptions filled in — change nothing else.',
+      }, { rawJson: true, maxOutputTokens: 12_000 });
+      wiringNotes.push(...attachOrphansToRoot(reprompted));
+
+      // Only adopt the repair if it is actually valid — a fix that will not
+      // compile is worse than the flaw it was meant to correct.
+      if (validateSpec(reprompted, manifest).length === 0) {
+        spec = reprompted;
+        cp.spec = reprompted;
+        const second = await judge();
+        return { ...second, repaired: true };
+      }
+      return { ...first, repaired: false };
+    },
+    r => ({
+      state: r.verdict === 'pass' ? ('done' as StepState) : ('warn' as StepState),
+      detail: r.verdict === 'pass'
+        ? 'covers everything asked'
+        : r.uncovered?.length
+          ? `${r.uncovered.length} not covered`
+          : r.verdict.replace(/_/g, ' '),
+    }),
+    r => { cp.review = r; },
+  );
+
+  // 7 — gaps
   let s = step(job, 'gaps');
   s.state = 'running';
   // Normalised on the RESTORE path too, not just when freshly written: a
@@ -722,8 +838,16 @@ async function runBuild(job: BuildJob): Promise<void> {
     prerequisites,
     estimate: { costPerRunUsd: Number(est.warmUsd.toFixed(3)), latencySeconds: est.latencySeconds },
     assumptions: requirement.openQuestions ?? [],
-    notes: [...wiringNotes, ...compiled.notes],
-    confidence: buildConfidence(requirement, match, prerequisites),
+    // Anything the review found missing leads the notes. A customer must
+    // meet a shortfall before they meet the agent, not after.
+    notes: [
+      ...(review.uncovered ?? []).map(u => `NOT COVERED — you asked for this and the design does not do it: ${u}`),
+      ...wiringNotes,
+      ...compiled.notes,
+      ...(review.repaired ? ['A review found gaps against your description; the design was rebuilt once to close them.'] : []),
+    ],
+    review,
+    confidence: buildConfidence(requirement, match, prerequisites, review),
   };
   job.status = 'done';
   job.finishedAt = Date.now();
@@ -738,6 +862,41 @@ async function runBuild(job: BuildJob): Promise<void> {
     },
     'architect_build_done',
   );
+}
+
+/**
+ * The design as something to be judged, not as JSON to be admired.
+ *
+ * Deliberately omits the instructions the builders wrote: the Evaluator's
+ * whole value is that it cannot be persuaded by a design that explains
+ * itself well, and prose arguing why an omission was reasonable is exactly
+ * what would persuade it. What it gets is the shape — who exists, what is
+ * wired to what, which tools are real, and which writes are gated.
+ */
+function summariseForReview(spec: AgentSpec): Record<string, unknown> {
+  const byId = new Map(spec.nodes.map(n => [n.id, n]));
+  return {
+    trigger: spec.trigger,
+    agents: spec.nodes
+      .filter(n => n.type === 'agent' || n.type === 'subagent')
+      .map(n => ({ id: n.id, role: n.type, label: n.label, whenToUse: n.description ?? null })),
+    tools: spec.nodes
+      .filter(n => n.type === 'tool')
+      .map(n => ({
+        id: n.id,
+        label: n.label,
+        does: n.description ?? null,
+        calls: n.action?.toolName ?? `${n.action?.operation ?? '?'} ${n.action?.sobject ?? ''}`.trim(),
+        // The field an unenforced approval rule hides in.
+        requiresHumanApproval: n.approval?.required === true,
+      })),
+    toolCatalogs: spec.nodes.filter(n => n.type === 'tool_catalog').map(n => n.label),
+    wiring: spec.edges.map(e => ({
+      from: byId.get(e.from)?.label ?? e.from,
+      to: byId.get(e.to)?.label ?? e.to,
+      mode: e.mode,
+    })),
+  };
 }
 
 /**
@@ -768,8 +927,22 @@ function buildSummarySentences(spec: AgentSpec): string[] {
   return out.slice(0, 8);
 }
 
-function buildConfidence(req: Requirement, match: MatchResult, prereqs: SpecPrerequisite[]): string {
+function buildConfidence(
+  req: Requirement,
+  match: MatchResult,
+  prereqs: SpecPrerequisite[],
+  review?: ReviewResult,
+): string {
   const parts: string[] = [];
+  // The review's verdict leads: it is the only signal here derived from
+  // comparing the finished agent to what was actually asked for.
+  if (review && review.verdict !== 'pass') {
+    parts.push(
+      review.uncovered?.length
+        ? `a review found ${review.uncovered.length} thing(s) you asked for that this design does not do — read the notes before going live`
+        : `a review returned '${review.verdict.replace(/_/g, ' ')}'`,
+    );
+  }
   if (req.openQuestions?.length) parts.push(`I assumed: ${req.openQuestions[0]}`);
   if ((match.partial?.length ?? 0) > 0) {
     parts.push('the partial capability matches are where I am least sure — read the named matches before going live');
