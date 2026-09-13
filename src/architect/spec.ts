@@ -89,6 +89,214 @@ export interface SpecPrerequisite {
   estimatedEffort?: 'minutes' | 'hours' | 'days';
 }
 
+// ── Prerequisite normalisation ───────────────────────────────────────
+//
+// The Gap Reporter writes prose about what an org is missing. It is NOT
+// given the AgentSpec schema (that would cost every build a JSON schema it
+// never emits a spec from), so what comes back is shaped like the request
+// rather than like `prerequisite` — and `additionalProperties: false` then
+// rejects it at the FINAL gate, after all seven stages have been paid for.
+// Live failure: "must have required property 'kind' / 'title' / 'assignee'
+// / 'status' … must NOT have additional properties".
+//
+// Constraining prose to a closed schema by asking nicely does not hold. So
+// the model's output is coerced here instead: aliases are mapped, enums are
+// snapped to the nearest legal value, required fields get honest defaults,
+// and anything unrecognised is dropped — which is what makes
+// `additionalProperties: false` pass by construction rather than by luck.
+
+const PREREQ_KINDS = [
+  'invocable_apex', 'flow', 'field', 'permission', 'connector',
+  'knowledge_base', 'record_type', 'named_credential', 'data',
+] as const;
+
+const ASSIGNEES = [
+  'salesforce_admin', 'apex_developer', 'integration_owner', 'data_owner', 'business_owner',
+] as const;
+
+const STATUSES = ['pending', 'in_progress', 'done', 'waived'] as const;
+const EFFORTS = ['minutes', 'hours', 'days'] as const;
+
+/** First present, non-empty value among the aliases. */
+function pick(src: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const k of keys) {
+    const v = src[k];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return undefined;
+}
+
+function asText(v: unknown): string {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.map(asText).filter(Boolean).join(' ');
+  return '';
+}
+
+/** Snap a free-text value onto an enum: exact match first, then the member
+ *  whose words appear in the text. Falls back rather than failing — a
+ *  prerequisite with a slightly wrong `kind` is infinitely better than a
+ *  build that dies at the last gate. */
+function snap<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  const raw = asText(value).toLowerCase().replace(/[\s-]+/g, '_');
+  if (!raw) return fallback;
+  const exact = allowed.find(a => a === raw);
+  if (exact) return exact;
+  const partial = allowed.find(a => raw.includes(a) || a.includes(raw));
+  if (partial) return partial;
+  // Vocabulary the writer actually reaches for, mapped to the schema's.
+  if (/apex|class|invocable/.test(raw) && allowed.includes('invocable_apex' as T)) return 'invocable_apex' as T;
+  if (/flow|automation/.test(raw) && allowed.includes('flow' as T)) return 'flow' as T;
+  if (/field|column|attribute/.test(raw) && allowed.includes('field' as T)) return 'field' as T;
+  if (/permission|access|profile|sharing/.test(raw) && allowed.includes('permission' as T)) return 'permission' as T;
+  if (/connector|mcp|integration|api|endpoint/.test(raw) && allowed.includes('connector' as T)) return 'connector' as T;
+  if (/knowledge|article|kb|document/.test(raw) && allowed.includes('knowledge_base' as T)) return 'knowledge_base' as T;
+  if (/credential|auth|secret|token/.test(raw) && allowed.includes('named_credential' as T)) return 'named_credential' as T;
+  if (/developer|engineer|code/.test(raw) && allowed.includes('apex_developer' as T)) return 'apex_developer' as T;
+  if (/admin/.test(raw) && allowed.includes('salesforce_admin' as T)) return 'salesforce_admin' as T;
+  if (/business|owner|manager/.test(raw) && allowed.includes('business_owner' as T)) return 'business_owner' as T;
+  return fallback;
+}
+
+function asSteps(v: unknown): string[] {
+  if (Array.isArray(v)) {
+    const out = v.map(asText).map(s => s.trim()).filter(Boolean);
+    if (out.length > 0) return out;
+  }
+  const text = asText(v).trim();
+  if (!text) return [];
+  // A single blob of instructions is common — split it into real steps so
+  // the checklist reads as one, rather than as a paragraph in a box.
+  const lines = text.split(/\n+|(?<=\.)\s+(?=[A-Z0-9])/).map(s => s.replace(/^\s*[-*\d.)\s]+/, '').trim()).filter(Boolean);
+  return lines.length > 0 ? lines : [text];
+}
+
+/**
+ * What KIND of thing is missing, read out of the gap's own words.
+ *
+ * Ordered most-specific first, because the vocabularies overlap: "expose an
+ * invocable Apex method to the integration user" is an Apex gap that also
+ * mentions access, and calling it a permission gap would send it to the
+ * wrong person.
+ */
+function inferKind(text: string): SpecPrerequisite['kind'] {
+  const t = text.toLowerCase();
+  if (/invocable|apex class|apex method|apex action|write.{0,12}apex/.test(t)) return 'invocable_apex';
+  if (/\bflow\b|process builder|screen flow|autolaunched/.test(t)) return 'flow';
+  if (/named credential|auth provider|oauth|api key|secret/.test(t)) return 'named_credential';
+  if (/mcp|connector|integration|external service|endpoint|webhook/.test(t)) return 'connector';
+  if (/knowledge|article|kb\b|documentation|help cent/.test(t)) return 'knowledge_base';
+  if (/record type/.test(t)) return 'record_type';
+  if (/\bfields?\b|picklist|column|attribute/.test(t)) return 'field';
+  if (/permission|profile|access|sharing|visibility|fls/.test(t)) return 'permission';
+  if (/\bdata\b|records exist|populate|backfill|migrat/.test(t)) return 'data';
+  return 'permission';
+}
+
+/** Who does this work, when the writer did not say. The kind already
+ *  implies it — an Apex gap is a developer's, a field is an admin's. */
+const ASSIGNEE_FOR_KIND: Record<string, SpecPrerequisite['assignee']> = {
+  invocable_apex: 'apex_developer',
+  flow: 'salesforce_admin',
+  field: 'salesforce_admin',
+  record_type: 'salesforce_admin',
+  permission: 'salesforce_admin',
+  connector: 'integration_owner',
+  named_credential: 'integration_owner',
+  knowledge_base: 'business_owner',
+  data: 'data_owner',
+};
+
+/**
+ * Coerce whatever the Gap Reporter returned into a schema-valid
+ * prerequisite. Never throws and never returns null: a gap the customer is
+ * not told about is the worst outcome this system can produce, so a
+ * partially-guessed prerequisite always beats a dropped one.
+ */
+export function normalizePrerequisite(input: unknown, index: number): SpecPrerequisite {
+  const src = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+
+  const title =
+    asText(pick(src, 'title', 'name', 'capability', 'label', 'summary', 'gap', 'requirement'))
+      .trim()
+      .slice(0, 120) || `Missing capability ${index + 1}`;
+
+  const why =
+    asText(pick(src, 'why', 'reason', 'impact', 'description', 'detail', 'rationale', 'because'))
+      .trim()
+      .slice(0, 500) || 'The agent cannot do this until it exists in the org.';
+
+  const steps = asSteps(pick(src, 'steps', 'resolution', 'howToFix', 'how_to_fix', 'actions', 'remediation', 'fix'));
+
+  const rawId = asText(src.id).trim();
+  const out: SpecPrerequisite = {
+    // Regenerated unless it already matches — the pattern is ^PRE-[0-9]{3}$
+    // and an id like "PRE-1" or "gap-1" fails schema on its own.
+    id: /^PRE-\d{3}$/.test(rawId) ? rawId : `PRE-${String(index + 1).padStart(3, '0')}`,
+    // With no `kind` field at all — the common case, since the writer has
+    // not been shown the enum — read it out of what the gap actually says.
+    // Defaulting everything to 'permission' would tell an admin to grant
+    // access when the real work is writing an Apex class.
+    kind: src.kind !== undefined || src.type !== undefined || src.category !== undefined
+      ? snap(pick(src, 'kind', 'type', 'category'), PREREQ_KINDS, 'permission')
+      : inferKind(`${title} ${why} ${asText(pick(src, 'steps', 'resolution', 'howToFix', 'actions', 'fix'))}`),
+    title,
+    why,
+    steps: steps.length > 0
+      ? steps.slice(0, 12)
+      : [`Decide who owns "${title}" in your org and what should provide it.`,
+         'Tell Archon once it exists and the agent will be re-checked automatically.'],
+    assignee: 'salesforce_admin', // replaced below, once `kind` is settled
+
+    // Default true: a gap whose severity the writer did not state should
+    // hold activation rather than quietly ship a half-working agent.
+    blocking: typeof src.blocking === 'boolean' ? src.blocking
+      : typeof src.isBlocking === 'boolean' ? (src.isBlocking as boolean)
+      : !/optional|nice.to.have|non.blocking/i.test(asText(pick(src, 'severity', 'priority', 'blocking'))),
+    status: snap(pick(src, 'status', 'state'), STATUSES, 'pending'),
+  };
+
+  // The writer's own words win; otherwise the kind decides, which is more
+  // honest than sending every unattributed gap to the Salesforce admin.
+  const statedAssignee = pick(src, 'assignee', 'owner', 'assignedTo', 'assigned_to', 'responsible');
+  out.assignee = statedAssignee !== undefined
+    ? snap(statedAssignee, ASSIGNEES, ASSIGNEE_FOR_KIND[out.kind] ?? 'salesforce_admin')
+    : (ASSIGNEE_FOR_KIND[out.kind] ?? 'salesforce_admin');
+
+  const verification = asText(pick(src, 'verification', 'verify', 'howToVerify')).trim();
+  if (verification) out.verification = verification.slice(0, 500);
+
+  const affects = pick(src, 'affects', 'affectedNodes', 'nodes', 'affected');
+  if (Array.isArray(affects)) {
+    const ids = affects.map(asText).map(s => s.trim()).filter(Boolean);
+    if (ids.length > 0) out.affects = ids;
+  }
+
+  const effort = pick(src, 'estimatedEffort', 'effort', 'estimate');
+  if (effort !== undefined) out.estimatedEffort = snap(effort, EFFORTS, 'hours');
+
+  const waived = asText(pick(src, 'waivedReason', 'waiveReason')).trim();
+  if (waived) out.waivedReason = waived.slice(0, 500);
+
+  // Nothing else is copied. Unknown keys are dropped here rather than
+  // rejected at the final gate — that is the whole point.
+  return out;
+}
+
+/** Normalise a whole list, renumbering ids so they stay unique and ordered. */
+export function normalizePrerequisites(input: unknown): SpecPrerequisite[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  return input.map((item, i) => {
+    const p = normalizePrerequisite(item, i);
+    // A duplicate id fails nothing in the schema but breaks the checklist's
+    // identity, so renumber the collision rather than ship two PRE-001s.
+    if (seen.has(p.id)) p.id = `PRE-${String(i + 1).padStart(3, '0')}`;
+    seen.add(p.id);
+    return p;
+  });
+}
+
 export interface AgentSpec {
   specVersion: '1.0';
   name: string;

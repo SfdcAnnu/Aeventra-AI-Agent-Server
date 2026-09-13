@@ -54,7 +54,7 @@ function view(job: BuildJob): Record<string, unknown> {
     thisRunCostUsd: Number(job.costUsd.toFixed(4)),
     maxCostUsd: job.maxCostUsd,
     resumedFrom: job.resumedFrom,
-    resumable: job.status === 'paused',
+    resumable: job.status === 'paused' || (job.status === 'failed' && !!job.checkpoint?.spec),
     elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt,
     result: job.result,
     error: job.error,
@@ -74,7 +74,9 @@ architectRouter.post('/api/architect/build', sessionAuth, async (req, res) => {
     if (!job) {
       res.status(404).json({
         error: 'not_resumable',
-        message: 'That build is not paused — only a build stopped at its budget ceiling can be continued.',
+        message:
+          'There is nothing to continue from on that build — it stopped before a design was produced, ' +
+          'so it has to start over.',
       });
       return;
     }
