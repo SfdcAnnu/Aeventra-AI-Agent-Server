@@ -37,6 +37,7 @@ import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { runChatTurn } from '../chat/chat-engine';
 import type { ChatTurnResult } from '../chat/chat-engine';
+import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { checkGuardrails } from '../salesforce/guardrails';
 import { resolveWsChatSession, recordWsTurn } from '../salesforce/ws-chat-persistence';
 import type { EngineOverrideInput } from '../types';
@@ -173,7 +174,16 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       newUserMessage: parsed.data.newUserMessage,
       attachments:    parsed.data.attachments,
       engineOverride: ctx.engineOverride,
-      connectors:     parsed.data.connectors,
+      // A browser cannot know MCP server URLs or catalog metadata, so it
+      // sends none and the server derives them from the agent. Without
+      // this the turn fell through to a legacy env fallback and an agent
+      // tested here ran against a different Salesforce MCP server than the
+      // same agent in production -- or, when that fallback was unreachable,
+      // against no tools at all. A caller that DOES supply connectors is
+      // still trusted, so the HTTP path is unchanged.
+      connectors:     parsed.data.connectors?.length
+        ? parsed.data.connectors
+        : await connectorsForAgent(conn, agent),
       debugMode:      parsed.data.debugMode,
       // Bound identity — NOT read from the message body (see module doc).
       context: {
