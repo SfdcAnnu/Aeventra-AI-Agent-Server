@@ -40,7 +40,7 @@ import {
   listKnowledgeBases,
   buildCapabilityManifest,
 } from './surveyor-tools';
-import { validateSpec, normalizePrerequisites, type AgentSpec, type SpecPrerequisite, type CapabilityManifest } from './spec';
+import { validateSpec, normalizePrerequisites, attachOrphansToRoot, type AgentSpec, type SpecPrerequisite, type CapabilityManifest } from './spec';
 import { estimateSpec } from './estimate';
 import { compileSpec, CompileError } from './compiler';
 
@@ -500,10 +500,21 @@ async function runBuild(job: BuildJob): Promise<void> {
   const gaps = (match.partial?.length ?? 0) + (match.missing?.length ?? 0);
 
   // 4 — design, with validation + estimator gates (≤3 rounds)
+  // A customer waiting on WhatsApp abandons the conversation; an account
+  // executive asking about their pipeline does not. The old internal target
+  // was 8s, which a genuinely multi-specialist design cannot meet — and the
+  // estimator's first lever when over budget is "collapse sub-agents".
+  // Live result: a requirement that explicitly asked for specialists came
+  // back as one flat agent with twelve tools, at $0.043 against a $0.15
+  // cost target. Cost was never the constraint; the latency number alone
+  // was deleting the architecture.
   const customer = /whatsapp|sms|customer|web chat/i.test(job.requirement + (requirement.trigger ?? ''));
-  const targets = customer ? { costUsd: 0.06, latencySeconds: 4 } : { costUsd: 0.15, latencySeconds: 8 };
+  const targets = customer ? { costUsd: 0.06, latencySeconds: 4 } : { costUsd: 0.15, latencySeconds: 25 };
   let feedback = '';
   let overTarget = '';
+  // Wiring the compiler had to repair. Surfaced in the result rather than
+  // applied silently — a graph the customer did not draw must be visible.
+  const wiringNotes: string[] = [];
   // A checkpointed spec that already has instructions belongs to the
   // prompts stage, not this one — only an un-prompted draft short-circuits
   // the design. `promptsDone` is what distinguishes them.
@@ -521,9 +532,18 @@ async function runBuild(job: BuildJob): Promise<void> {
             'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else. Sub-agents need a ' +
             'description (when to use them). Only v1-compilable elements: trigger inbound_message/manual/webhook; ' +
             'node types agent/subagent/tool/tool_catalog; crud create/update/query. Leave instructions minimal — ' +
-            'the Prompt Engineer fills them in.',
+            'the Prompt Engineer fills them in.\n\n' +
+            'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
+            'each tool. A node with no edge is invisible at runtime.\n\n' +
+            'One tool node per TOOL, not per object. A generic tool (a SOQL query, a generic record update) ' +
+            'already serves every object — do not emit "Query Accounts", "Query Contacts" and "Query Tasks" ' +
+            'when one query tool covers all three. Duplicates are re-sent to the model on every single turn.\n\n' +
+            'When the requirement says an action needs human approval, set approval.required on THAT tool node.',
           ...(feedback ? { previousAttemptErrors: feedback } : {}),
         }, { rawJson: true, maxOutputTokens: 8000 });
+        // Free, deterministic repair before the paid one. A missing edge is
+        // not a judgement call — see attachOrphansToRoot.
+        wiringNotes.push(...attachOrphansToRoot(draft));
         const errors = validateSpec(draft, manifest);
         if (errors.length > 0) {
           feedback = errors.map(e => `${e.path}: ${e.message}`).join('\n');
@@ -562,6 +582,9 @@ async function runBuild(job: BuildJob): Promise<void> {
           instruction: 'Return the SAME AgentSpec JSON with instructions and descriptions filled in — change nothing else.',
           ...(promptFeedback ? { previousAttemptErrors: promptFeedback } : {}),
         }, { rawJson: true, maxOutputTokens: 12_000 });
+        // The Prompt Engineer returns the whole spec, so it can drop edges
+        // the designer had — re-check rather than assume they survived.
+        wiringNotes.push(...attachOrphansToRoot(withPrompts));
         const errors = validateSpec(withPrompts, manifest);
         if (errors.length === 0) return withPrompts;
         promptFeedback = errors.map(e => `${e.path}: ${e.message}`).join('\n');
@@ -699,7 +722,7 @@ async function runBuild(job: BuildJob): Promise<void> {
     prerequisites,
     estimate: { costPerRunUsd: Number(est.warmUsd.toFixed(3)), latencySeconds: est.latencySeconds },
     assumptions: requirement.openQuestions ?? [],
-    notes: compiled.notes,
+    notes: [...wiringNotes, ...compiled.notes],
     confidence: buildConfidence(requirement, match, prerequisites),
   };
   job.status = 'done';

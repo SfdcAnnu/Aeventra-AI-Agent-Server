@@ -145,18 +145,29 @@ export function estimateSpec(
   if (targets.latencySeconds != null && latency > targets.latencySeconds) within = false;
 
   // The optimisation levers, in order of impact, when over budget.
+  //
+  // Ordering matters more than it looks: these are fed back to the designer
+  // as instructions, and it applies the first one it can. "Collapse
+  // sub-agents" used to lead, so ANY overage — including one caused purely
+  // by latency, with cost at a third of target — dismantled the
+  // architecture. Structure is the most expensive thing to lose and the
+  // hardest to get back, so it is now the LAST resort: parallelism, context
+  // and tier all get tried first, and collapsing is proposed only when
+  // COST is what actually breached.
+  const overCost = targets.costUsd != null && warmUsd > targets.costUsd;
   const levers: string[] = [];
   if (!within) {
-    if (subAgents > 0 && modelCalls / Math.max(subAgents, 1) > 2) {
-      levers.push('collapse sub-agents that are not forced — each one adds a full call');
-    }
+    levers.push('mark independent sub-agent edges parallel to cut latency');
     const heavy = rows.filter(r => r.policy !== 'isolated' && r.node !== root?.label);
     if (heavy.length) levers.push(`tighten context on: ${heavy.map(r => r.node).join(', ')}`);
     const big = rows.filter(r => r.tier === 'large' && r.calls <= 2);
     if (big.length) levers.push(`drop to a cheaper tier: ${big.map(r => r.node).join(', ')}`);
     const loud = rows.filter(r => r.outTokens > 600);
     if (loud.length) levers.push(`cap reply length on: ${loud.map(r => r.node).join(', ')}`);
-    levers.push('mark independent sub-agent edges parallel to cut latency');
+    // Last, and only for a real cost breach — never to shave seconds.
+    if (overCost && subAgents > 0 && modelCalls / Math.max(subAgents, 1) > 2) {
+      levers.push('as a last resort, collapse sub-agents that are not forced — each one adds a full call');
+    }
   }
 
   return {
