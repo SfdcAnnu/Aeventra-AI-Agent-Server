@@ -283,18 +283,65 @@ export function normalizePrerequisite(input: unknown, index: number): SpecPrereq
   return out;
 }
 
-/** Normalise a whole list, renumbering ids so they stay unique and ordered. */
+/**
+ * Work this PLATFORM does, which a customer must never be told to build.
+ *
+ * A prerequisite is a promise that the client's org is missing something
+ * and that they have to supply it. Applied to the runtime's own mechanics
+ * it becomes false and damaging advice — a live build told an Apex
+ * developer to "design and deploy a Flow or invocable Apex class that
+ * accepts input from multiple specialists and merges their results",
+ * which is the router, shipped, working, and the entire product. A
+ * customer who follows that builds a competing implementation of something
+ * they already own, and rightly stops trusting the checklist.
+ *
+ * Matched against the title and the reason together, because the giveaway
+ * is usually the justification rather than the heading.
+ */
+const PLATFORM_RESPONSIBILITY = [
+  // Routing and multi-agent coordination — the router's whole job.
+  /\b(orchestrat|multi[- ]?specialist|multi[- ]?agent|combine .{0,30}specialist|merge .{0,30}(result|response)|route .{0,20}(between|to) (agent|specialist|helper))/i,
+  // Which model or vendor runs a node — configured on the canvas.
+  /\b(ai|llm|model) provider\b|\bprovider (consistency|uniformity|selection|configuration)\b|\bsame (ai )?provider\b/i,
+  // Conversation memory and context windows — runtime concerns.
+  /\b(conversation (memory|state|history)|context (window|policy|management))\b/i,
+  // Approval routing — the platform's approval gate.
+  /\b(approval (routing|workflow|queue|mechanism|framework))\b/i,
+  // Prompt and instruction authoring — written by the Prompt Engineer.
+  /\b(system prompt|prompt engineering|write .{0,20}instructions for the (agent|assistant))\b/i,
+];
+
+function isPlatformResponsibility(p: SpecPrerequisite): boolean {
+  const text = `${p.title} ${p.why}`;
+  return PLATFORM_RESPONSIBILITY.some(re => re.test(text));
+}
+
+/**
+ * Normalise a whole list, drop anything that is this platform's own job,
+ * and renumber so ids stay unique and ordered.
+ *
+ * Dropping is deliberate and safe in one direction only: a prerequisite
+ * wrongly removed costs the client nothing, because the platform genuinely
+ * does that work. The patterns above therefore describe runtime mechanics
+ * specifically, never the org-side capabilities (a Flow, an Apex action, a
+ * field, a permission) that are the honest majority of this list.
+ */
 export function normalizePrerequisites(input: unknown): SpecPrerequisite[] {
   if (!Array.isArray(input)) return [];
   const seen = new Set<string>();
-  return input.map((item, i) => {
-    const p = normalizePrerequisite(item, i);
+  const out: SpecPrerequisite[] = [];
+  let seq = 0;
+  for (const item of input) {
+    const p = normalizePrerequisite(item, seq);
+    if (isPlatformResponsibility(p)) continue;
     // A duplicate id fails nothing in the schema but breaks the checklist's
     // identity, so renumber the collision rather than ship two PRE-001s.
-    if (seen.has(p.id)) p.id = `PRE-${String(i + 1).padStart(3, '0')}`;
+    p.id = `PRE-${String(++seq).padStart(3, '0')}`;
+    if (seen.has(p.id)) continue;
     seen.add(p.id);
-    return p;
-  });
+    out.push(p);
+  }
+  return out;
 }
 
 export interface AgentSpec {
