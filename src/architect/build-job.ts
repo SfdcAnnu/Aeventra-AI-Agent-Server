@@ -302,7 +302,10 @@ export function createBuildJob(orgId: string, requirement: string, opts?: { atta
     checkpoint: {},
     costUsd: 0,
     priorCostUsd: 0,
-    maxCostUsd: opts?.maxCostUsd ?? 2.0,
+    // Eight stages now, one of them a review that exists to stop a wrong
+    // agent reaching a customer. $2 was set when there were seven and no
+    // review, and a single failed design stage can spend half of it.
+    maxCostUsd: opts?.maxCostUsd ?? 4.0,
     startedAt: Date.now(),
   });
 }
@@ -406,6 +409,10 @@ async function stage<T>(
   return value;
 }
 
+/** A reasoning model that spent its whole allowance thinking and answered
+ *  with nothing. Distinct from a model that answered badly. */
+const RETURNED_NOTHING = /did not return a JSON object — it returned \(nothing at all\)/;
+
 async function specialist<T>(
   job: BuildJob,
   engine: ArchitectEngine,
@@ -414,15 +421,37 @@ async function specialist<T>(
   opts?: { rawJson?: boolean; maxOutputTokens?: number },
 ): Promise<T> {
   guardBudget(job, `calling the ${id.replace(/_/g, ' ')} specialist`);
-  const { result, usage } = await callSpecialist<T>({
-    specialistId: id,
-    input,
-    engine,
-    rawJson: opts?.rawJson,
-    maxOutputTokens: opts?.maxOutputTokens,
-  });
-  job.costUsd += usage.costUsd;
-  return result;
+  const call = async (maxOutputTokens?: number): Promise<T> => {
+    const { result, usage } = await callSpecialist<T>({
+      specialistId: id,
+      input,
+      engine,
+      rawJson: opts?.rawJson,
+      maxOutputTokens,
+    });
+    job.costUsd += usage.costUsd;
+    return result;
+  };
+
+  try {
+    return await call(opts?.maxOutputTokens);
+  } catch (err) {
+    // An empty answer means the budget ran out mid-thought, not that the
+    // task was impossible — so retrying it unchanged just buys the same
+    // silence twice. Retry ONCE with real room. The cost of one wider call
+    // is far below the cost of discarding a build that has already paid for
+    // five stages, which is exactly what used to happen here.
+    const message = err instanceof Error ? err.message : String(err);
+    if (!RETURNED_NOTHING.test(message)) throw err;
+
+    const wider = Math.min((opts?.maxOutputTokens ?? 8_000) * 2, 32_000);
+    logger.warn(
+      { jobId: job.id, specialist: id, from: opts?.maxOutputTokens ?? null, to: wider },
+      'architect_specialist_empty_retrying_wider',
+    );
+    guardBudget(job, `retrying the ${id.replace(/_/g, ' ')} specialist with more room`);
+    return await call(wider);
+  }
 }
 
 interface Requirement {

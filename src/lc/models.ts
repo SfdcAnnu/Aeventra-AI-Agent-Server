@@ -110,6 +110,31 @@ export function modelOptionsFromConfig(config: unknown): { options: ModelOptions
   };
 }
 
+/**
+ * How much room a reasoning model needs for thinking, ON TOP of the answer.
+ *
+ * This used to be a flat 4,000 for every effort level, which is roughly
+ * right for the default and badly wrong for `high`: a high-effort model
+ * reasons for as long as it is allowed, and since the cap covers thinking
+ * AND the reply, it spent the entire allowance thinking and returned empty
+ * content. Live: the Architect's Flow Designer, at tier large and deep
+ * effort, with 8,000 requested — every one of the 12,000 tokens went to
+ * reasoning, the build died on an empty response, and the customer was
+ * charged large-tier output rates for nothing.
+ *
+ * Headroom now scales with how hard the model was told to think.
+ */
+function reasoningHeadroom(effort: ModelOptions['reasoningEffort']): number {
+  switch (effort) {
+    case 'minimal': return 2_000;
+    case 'low':     return 4_000;
+    case 'high':    return 20_000;
+    // 'medium' and the provider default both reason more than the old flat
+    // allowance assumed.
+    default:        return 10_000;
+  }
+}
+
 export function buildChatModel(
   nodeSubType: string,
   nodeModel: string | undefined,
@@ -141,7 +166,7 @@ export function buildChatModel(
           useResponsesApi: true,
           // Reasoning shares this budget with the visible answer, same as
           // the chat-completions reasoning path — give thinking headroom.
-          maxTokens: maxTokens + 4_000,
+          maxTokens: maxTokens + reasoningHeadroom(options.reasoningEffort),
           ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
           configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
         });
@@ -155,7 +180,7 @@ export function buildChatModel(
         // entirely on thinking and return empty content (live-confirmed on
         // gpt-5.5: the Flow Designer came back with nothing). Give the
         // thinking its own headroom on top of the caller's cap.
-        kwargs.max_completion_tokens = maxTokens + 4_000;
+        kwargs.max_completion_tokens = maxTokens + reasoningHeadroom(options.reasoningEffort);
         if (options.reasoningEffort) kwargs.reasoning_effort = options.reasoningEffort;
       }
       if (options.jsonMode) kwargs.response_format = { type: 'json_object' };
