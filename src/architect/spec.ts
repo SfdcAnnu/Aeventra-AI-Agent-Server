@@ -353,6 +353,9 @@ export interface AgentSpec {
   trigger: { type: string; channel?: string; sobject?: string; condition?: string; cron?: string };
   nodes: SpecNode[];
   edges: SpecEdge[];
+  /** Who reads the replies — decided from the requirement, never from the
+   *  channel. Drives the customer-facing guardrails; absent means internal. */
+  audience?: 'customer' | 'internal';
   knowledge?: Array<{ knowledgeBaseId: string; attachedTo: string; topK?: number; minScore?: number }>;
   budgets: { maxSteps: number; maxCostUsd: number; timeoutSeconds: number; maxDepth?: number };
   guardrails?: string[];

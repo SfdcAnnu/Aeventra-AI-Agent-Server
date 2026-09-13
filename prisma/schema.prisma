@@ -334,6 +334,17 @@ model AgentTrace {
 
   // Per-model split: [{ model, calls, tokensIn, tokensOut, cacheRead }]
   usageByModel Json?
+
+  /// THE REPLY THE CUSTOMER ACTUALLY SAW.
+  ///
+  /// Not derivable from the steps, which is why it is stored. A turn can
+  /// rewrite its answer after the model produces it -- a guardrail
+  /// regeneration replaces it with a second model call, and the mechanical
+  /// scrub edits the text after every model call has finished, so the final
+  /// wording can exist in NO step at all. A reader comparing the last step
+  /// against the UI then finds two different answers and no explanation.
+  /// Trimmed, because this is for confirming what was said, not archiving it.
+  finalReply String?
   // Set when the payloads have been aged out but the metrics row remains.
   payloadsPurgedAt DateTime?
 

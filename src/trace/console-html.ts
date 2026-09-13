@@ -235,7 +235,12 @@ async function open(id){
     ['Tokens in / out',t.tokensIn.toLocaleString()+' / '+t.tokensOut.toLocaleString()],
     ['Cached',t.cachedTokens.toLocaleString()]]
     .map(([k,v])=>'<div><div class="k">'+k+'</div><div class="v mono">'+esc(v)+'</div></div>').join('')+
-    (t.errorMessage?'<div style="grid-column:1/-1"><div class="k">Failure</div><div class="v mono" style="color:var(--crit)">'+esc(t.errorMessage)+'</div></div>':'');
+    (t.errorMessage?'<div style="grid-column:1/-1"><div class="k">Failure</div><div class="v mono" style="color:var(--crit)">'+esc(t.errorMessage)+'</div></div>':'')+
+    // The answer as delivered. Shown beside the numbers rather than buried
+    // among the steps because it is the one thing a reader is checking the
+    // steps AGAINST, and it is not always any step's output: a regeneration
+    // replaces it, and the scrub edits it after the last model call.
+    (t.finalReply?'<div style="grid-column:1/-1"><div class="k">Reply the customer saw</div><div class="v" style="white-space:pre-wrap">'+esc(t.finalReply)+'</div></div>':'');
 
   if(!t.steps.length){
     $('steps').innerHTML='<div class="empty">'+(t.payloadsPurgedAt?'Payloads for this turn have aged out. The numbers above remain.':'No steps recorded.')+'</div>';

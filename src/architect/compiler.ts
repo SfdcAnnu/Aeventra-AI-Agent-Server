@@ -249,7 +249,22 @@ export async function compileSpec(
   const inEdge = new Map<string, AgentSpec['edges'][number]>();
   for (const e of spec.edges) if (!inEdge.has(e.to)) inEdge.set(e.to, e);
 
-  const customerChannel = ['whatsapp', 'sms', 'email', 'web'].includes(spec.trigger.channel ?? '');
+  // WHO READS THE REPLIES, not how they arrive.
+  //
+  // This was inferred from the transport channel, with 'web' counted as
+  // customer-facing. But a web chat is a public widget OR a staff tool, and
+  // the two want opposite treatment -- live, an internal assistant for
+  // account executives was marked customer-facing because its channel was
+  // 'web'. The requirement says who the audience is; the channel cannot.
+  //
+  // So an explicit `audience` wins, and the channel is only consulted when
+  // the designer did not say. The remaining channels are ones that reach a
+  // third party by definition; 'web' is deliberately not among them,
+  // because guessing 'internal' wrongly costs an unenforced guardrail while
+  // guessing 'customer' wrongly silently rewrites an employee's answers.
+  const customerChannel = spec.audience
+    ? spec.audience === 'customer'
+    : ['whatsapp', 'sms', 'email'].includes(spec.trigger.channel ?? '');
 
   // ── Map nodes ──────────────────────────────────────────────────────
   const platformNodes: PlatformNode[] = [];

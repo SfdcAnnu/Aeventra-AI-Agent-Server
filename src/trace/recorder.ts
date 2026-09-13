@@ -83,7 +83,9 @@ export class TurnRecorder extends BaseCallbackHandler {
   private static stageFrom(tags?: string[]): string {
     if (!tags) return 'router';
     if (tags.includes('subagent-turn')) return 'subagent';
-    if (tags.includes('claim-guard')) return 'guardrail_regen';
+    if (tags.includes('claim-guard')) return 'claim_guard';
+    if (tags.includes('guardrail-regen')) return 'guardrail_regen';
+    if (tags.includes('narration-followup')) return 'narration_followup';
     return 'router';
   }
 

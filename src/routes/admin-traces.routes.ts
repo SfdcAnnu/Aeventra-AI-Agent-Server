@@ -83,7 +83,7 @@ adminTracesRouter.get('/api/admin/traces', adminAuth, async (req, res) => {
         agentName: true, sessionId: true, recordId: true, channel: true, status: true,
         errorCode: true, errorMessage: true, modelCalls: true, toolCalls: true,
         tokensIn: true, tokensOut: true, cachedTokens: true, latencyMs: true,
-        usageByModel: true, payloadsPurgedAt: true,
+        usageByModel: true, payloadsPurgedAt: true, finalReply: true,
       },
     }),
     prisma.agentTrace.count({ where }),

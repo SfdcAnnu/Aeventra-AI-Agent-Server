@@ -669,7 +669,10 @@ async function runBuild(job: BuildJob): Promise<void> {
             'One tool node per TOOL, not one per record type. When a single discovered tool already accepts ' +
             'the record type as an argument, emit ONE node for it rather than one per type — every node is ' +
             're-sent to the model on every turn, so near-duplicates cost the client on every conversation.\n\n' +
-            'When the requirement says an action needs human approval, set approval.required on THAT tool node.',
+            'When the requirement says an action needs human approval, set approval.required on THAT tool node.\n\n' +
+            'Set `audience`: "customer" if the replies are read by someone outside the business, "internal" if ' +
+            'they are read by an employee. Decide it from the requirement, never from the channel — a web chat ' +
+            'can be a public widget or a staff tool, and the two need opposite handling.',
           ...(feedback ? { previousAttemptErrors: feedback } : {}),
         }, { rawJson: true, maxOutputTokens: 8000 });
         // Free, deterministic repair before the paid one. A missing edge is
