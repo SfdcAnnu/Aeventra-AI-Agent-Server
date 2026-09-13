@@ -18,6 +18,12 @@ import type { ResolvedMcpServer } from '../chat/adapters/shared';
 
 export interface LoadedMcpTools {
   tools: StructuredToolInterface[];
+  /** Servers that were configured but could not be listed this turn. The
+   *  runtime tells the MODEL about these: an agent that silently loses its
+   *  tools does not fall silent, it improvises — live-confirmed, a user
+   *  identity question was handed to a schema specialist because that was
+   *  the only thing left on the list. Saying so is the honest degrade. */
+  unavailable: string[];
   /** raw tool name → server label, for ToolCallSummary.serverName. */
   serverByTool: Map<string, string>;
   close: () => Promise<void>;
@@ -126,10 +132,22 @@ function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterf
   ) as StructuredToolInterface;
 }
 
+/** Short, bounded retry for a host that is merely asleep.
+ *
+ *  MCP hosts spin down when idle and answer the first request slowly or not
+ *  at all. One attempt turns "the server was waking up" into "this agent
+ *  has no tools" for the whole turn. Deliberately far shorter than the
+ *  Architect survey retry: a customer is waiting on this one, so it rides
+ *  out a blip and then degrades honestly rather than holding the turn for a
+ *  full cold start. The tool-list cache means only the first turn after an
+ *  idle period pays even this. */
+const LIST_RETRY_WAITS_MS = [1_500, 4_000];
+
 async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTools> {
   const tools: StructuredToolInterface[] = [];
   const serverByTool = new Map<string, string>();
   const clients: MultiServerMCPClient[] = [];
+  const unavailable: string[] = [];
 
   // One client per server (not one multi-client) so each server's
   // allowedTools filter applies to ITS tools only, and one cold/broken
@@ -150,7 +168,21 @@ async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTo
         prefixToolNameWithServerName: false,
         additionalToolNamePrefix: '',
       });
-      const loaded = await client.getTools();
+      let loaded: Awaited<ReturnType<typeof client.getTools>> | null = null;
+      for (let attempt = 0; attempt <= LIST_RETRY_WAITS_MS.length; attempt++) {
+        try {
+          loaded = await client.getTools();
+          break;
+        } catch (err) {
+          if (attempt === LIST_RETRY_WAITS_MS.length) throw err;
+          logger.info(
+            { server: s.name, attempt: attempt + 1, waitMs: LIST_RETRY_WAITS_MS[attempt] },
+            'mcp_tools_list_retrying',
+          );
+          await new Promise(r => setTimeout(r, LIST_RETRY_WAITS_MS[attempt]));
+        }
+      }
+      if (!loaded) throw new Error('tool listing returned nothing');
       clients.push(client);
       const allowed = new Set(s.allowedTools);
       let kept = 0;
@@ -169,11 +201,13 @@ async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTo
       // Mirror of the original's degrade-don't-die stance on cold hosts:
       // a server that can't be reached loses ITS tools for this turn only.
       logger.error({ server: s.name, url: s.url, err: err instanceof Error ? err.message : err }, 'mcp_tools_load_failed');
+      unavailable.push(s.name);
     }
   }
 
   return {
     tools,
+    unavailable,
     serverByTool,
     close: async () => {
       await Promise.allSettled(clients.map(c => c.close()));

@@ -208,8 +208,23 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       rootTuning.options,
     );
 
+    // A connector that could not be listed is stated, not hidden. Without
+    // this the model simply cannot see that its tools are missing, and an
+    // agent that cannot see the gap improvises across it — live-confirmed,
+    // "who am I signed in as" was routed to a schema specialist because the
+    // identity tool had silently vanished from the list. Volatile by
+    // nature (it is about right now), so it sits below the cache
+    // breakpoint with the other per-turn facts.
+    const connectorNotice = loaded.unavailable.length > 0
+      ? `TOOLS UNAVAILABLE RIGHT NOW: ${loaded.unavailable.join(', ')}. Any tool from ` +
+        'these is not callable this turn. If the user asks for something that needs one, say plainly that ' +
+        'you cannot reach it at the moment and ask them to try again shortly. Do NOT answer from memory, ' +
+        'guess, or substitute a different tool or specialist for the one you are missing.'
+      : null;
+
     const promptParts = await buildSystemPromptParts(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
+      connectorNotice,
     );
     const systemMessage = cacheAwareSystem(aiNode.nodeSubType, promptParts);
 
