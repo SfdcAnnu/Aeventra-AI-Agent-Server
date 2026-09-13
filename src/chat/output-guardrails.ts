@@ -125,13 +125,33 @@ function replacementRules(replacements: PhraseReplacement[]): Array<{ re: RegExp
   return replacements.map(r => ({ re: new RegExp(`\b${escapeRe(r.from)}\b`, 'gi'), fix: r.to }));
 }
 
-/** CRM/system narration a customer must never see — whole sentence dropped. */
-const SENTENCE_DROP: RegExp[] = [
-  /\bCRM\b/,
-  /\bsalesforce\b/i,
-  /\bopportunity\s+stage\b/i,
-  /\b(?:updated?|creat(?:ed|ing)|logg(?:ed|ing))\b[^.!?\n]*\b(?:record|task|event|system|database)s?\b/i,
-];
+/**
+ * THERE IS NO BUILT-IN VOCABULARY LIST, deliberately.
+ *
+ * One used to live here: CRM, salesforce, "opportunity stage", and a
+ * pattern for record/task/system narration. It survived the cleanup that
+ * removed this server's other business logic, on the reasoning that it was
+ * a "universal customer-facing protection". It was not. It was ONE
+ * customer's vocabulary -- a WhatsApp sales agent whose buyers should never
+ * hear CRM jargon -- compiled into the platform every other agent runs on.
+ *
+ * What it cost: an INTERNAL assistant for account executives, people who
+ * work in Salesforce all day, could not say the word "Salesforce". Every
+ * reply mentioning it was silently regenerated, so the model's answer and
+ * the customer's answer differed with nothing in the trace explaining why,
+ * and a second model call was billed on turns that needed none.
+ *
+ * Which words an agent may not say is a property of THAT AGENT'S AUDIENCE,
+ * and only its author knows it. So it comes from the agent's own config
+ * (bannedPhrases / phraseReplacements, set on the Guardrails screen) and
+ * from nowhere else. An agent that configures nothing is filtered by
+ * nothing.
+ *
+ * The action-claim guard below stays, because it IS universal: a reply
+ * asserting a write that no write tool performed is false for every agent
+ * in every domain. That is a statement about this runtime, not about
+ * anyone's vocabulary.
+ */
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -155,10 +175,6 @@ export function findGuardrailViolations(
     const m = new RegExp(`\\b${escapeRe(phrase)}\\b`, 'i').exec(text);
     if (m) violations.push(`banned phrase "${m[0]}"`);
   }
-  for (const re of SENTENCE_DROP) {
-    const m = re.exec(text);
-    if (m) violations.push(`CRM-internal narration "${m[0]}"`);
-  }
   return violations;
 }
 
@@ -178,7 +194,12 @@ export function scrubReply(
   for (const phrase of extraPhrases) {
     out = out.replace(new RegExp(`\\b${escapeRe(phrase)}\\b`, 'gi'), '');
   }
-  const kept = splitSentences(out).filter(s => !SENTENCE_DROP.some(re => re.test(s)));
-  if (kept.length > 0) out = kept.join(' ');
+  // A configured banned phrase takes the SENTENCE carrying it: a reply
+  // with the word cut out mid-clause reads worse than one a sentence short.
+  if (extraPhrases.length > 0) {
+    const banned = extraPhrases.map(p => new RegExp(`\b${escapeRe(p)}\b`, 'i'));
+    const kept = splitSentences(out).filter(sentence => !banned.some(re => re.test(sentence)));
+    if (kept.length > 0) out = kept.join(' ');
+  }
   return out.trim().length > 0 ? out.trim() : text;
 }
