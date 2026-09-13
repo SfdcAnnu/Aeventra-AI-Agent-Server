@@ -132,6 +132,8 @@ export interface BuildJob {
   finishedAt?: number;
   result?: BuildResult;
   error?: string;
+  /** Set only on listings: checkpointed by an older pipeline. */
+  stale?: boolean;
 }
 
 const STEPS: Array<[string, string]> = [
@@ -238,6 +240,40 @@ export async function getBuildJob(id: string, orgId: string): Promise<BuildJob |
   }
 }
 
+/**
+ * Forget a build and everything it checkpointed.
+ *
+ * Needed because a checkpoint outlives the agent it was going to create:
+ * the build lives in Postgres, the agent in Salesforce, and deleting the
+ * agent deliberately does not touch the build — that separation is what
+ * makes a failed build resumable at all. Without this, a checkpoint the
+ * client has finished with sits in their "you can finish these" list
+ * forever, offering to rebuild something they deleted on purpose.
+ */
+export async function deleteBuild(orgId: string, jobId: string): Promise<boolean> {
+  jobs.delete(jobId);
+  try {
+    const { count } = await prisma.architectBuild.deleteMany({ where: { id: jobId, orgId } });
+    return count > 0;
+  } catch (err) {
+    logger.warn({ jobId, err: err instanceof Error ? err.message : err }, 'architect_build_delete_failed');
+    return false;
+  }
+}
+
+/**
+ * Was this build checkpointed by an older pipeline?
+ *
+ * Its saved stage list is the evidence: a build that ran when there were
+ * seven stages cannot have been through a review that did not exist yet.
+ * Resuming one replays a design made under rules that have since changed,
+ * which reproduces the very agent the fixes were written to prevent — so
+ * it is offered with a warning rather than silently or not at all.
+ */
+function isStale(job: BuildJob): boolean {
+  return job.steps.length !== STEPS.length;
+}
+
 /** Paused builds an org could resume, newest first. */
 export async function listResumableBuilds(orgId: string, limit = 10): Promise<BuildJob[]> {
   try {
@@ -251,6 +287,7 @@ export async function listResumableBuilds(orgId: string, limit = 10): Promise<Bu
     return rows
       .map(fromRow)
       .filter(b => b.status === 'paused' || !!b.checkpoint?.spec)
+      .map(b => ({ ...b, stale: isStale(b) }))
       .slice(0, limit);
   } catch {
     return [];
