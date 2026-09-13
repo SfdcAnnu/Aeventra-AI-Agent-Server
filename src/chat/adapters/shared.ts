@@ -435,6 +435,43 @@ export interface SystemPromptParts {
 /** The cache-aware split. NOTHING volatile may enter `stable`: the old
  *  layout put a per-second timestamp as line two of the prompt, which
  *  would have made every request a cache write and none a read. */
+/**
+ * A node's worked examples, as a block the model can pattern-match on.
+ *
+ * Examples do more for output SHAPE than any amount of instruction prose —
+ * an author who cannot describe the format they want can nearly always show
+ * one. Stored per node so a specialist can demonstrate its own narrow job
+ * rather than inheriting the lead agent's.
+ *
+ * Rendered rather than injected as real message pairs: a fabricated
+ * exchange in the history is indistinguishable from something the user
+ * actually said, and the tool-result replay this runtime does every turn
+ * would then have to reason about turns that never happened. Labelled
+ * clearly as examples instead, which keeps the real transcript honest.
+ *
+ * Tolerant of whatever the author typed — a half-filled pair is skipped,
+ * not an error, because a config mistake must never take an agent down.
+ */
+export function renderFewShotExamples(raw: unknown): string | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const blocks: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const e = item as { input?: unknown; output?: unknown; note?: unknown };
+    const input = typeof e.input === 'string' ? e.input.trim() : '';
+    const output = typeof e.output === 'string' ? e.output.trim() : '';
+    if (!input || !output) continue;
+    const note = typeof e.note === 'string' && e.note.trim() ? `\n(${e.note.trim()})` : '';
+    blocks.push(`User: ${input}\nYou: ${output}${note}`);
+  }
+  if (blocks.length === 0) return null;
+  return (
+    'EXAMPLES — these show the style and shape of a good answer. They are illustrations, ' +
+    'not real conversation history and not facts about this customer. Follow their FORM; ' +
+    'never reuse their content as data.\n\n' + blocks.join('\n\n')
+  );
+}
+
 export async function buildSystemPromptParts(
   agent: AgentDefinition,
   aiNode: AgentNode,
@@ -444,7 +481,7 @@ export async function buildSystemPromptParts(
   memoryPreamble?: string | null,
   extraContext?: string | null,
 ): Promise<SystemPromptParts> {
-  const config = (aiNode.config as { systemPrompt?: string }) ?? {};
+  const config = (aiNode.config as { systemPrompt?: string; fewShotExamples?: unknown }) ?? {};
 
   const stableParts: string[] = [];
   // Identity only — the name is the client's own agent data. No channel,
@@ -459,6 +496,12 @@ export async function buildSystemPromptParts(
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     stableParts.push(config.systemPrompt);
   }
+  // Worked examples, immediately after the instructions they illustrate.
+  // Inside the STABLE block on purpose: examples never vary by turn, so
+  // they cache with the prompt and cost the cached rate on every turn
+  // after the first rather than full input price forever.
+  const examples = renderFewShotExamples(config.fewShotExamples);
+  if (examples) stableParts.push(examples);
    if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
     stableParts.push('BUSINESS RULES / KNOWLEDGE (always apply these):\n' + agent.knowledgeBase);
   }
