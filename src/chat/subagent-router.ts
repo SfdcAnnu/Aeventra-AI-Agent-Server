@@ -171,13 +171,33 @@ export function resolveSubagentActions(
  * actually needs it.
  */
 export function toSyntheticAiNode(subagentNode: AgentNode, topLevelAiNode: AgentNode): AgentNode {
-  const cfg = subagentNode.config as { systemPrompt?: string; model?: string };
+  const cfg = subagentNode.config as {
+    systemPrompt?: string;
+    model?: string;
+    fewShotExamples?: unknown;
+    answerStyle?: string;
+    thinkingEffort?: string;
+    maxReplyTokens?: unknown;
+  };
   return {
     id: subagentNode.id,
     name: subagentNode.name,
     nodeType: 'ai',
     nodeSubType: subagentNode.nodeSubType || topLevelAiNode.nodeSubType,
-    config: { systemPrompt: cfg.systemPrompt ?? '', model: cfg.model },
+    // Carry the whole inspector surface across, not just the prompt. This
+    // relabel is the ONLY path a sub-agent's own settings take to the
+    // runtime, so anything dropped here is a control that silently does
+    // nothing on a sub-agent while working on the root — which is how the
+    // per-node answer style, thinking effort and reply cap would behave
+    // the moment they were added to the panel.
+    config: {
+      systemPrompt: cfg.systemPrompt ?? '',
+      model: cfg.model,
+      fewShotExamples: cfg.fewShotExamples,
+      answerStyle: cfg.answerStyle,
+      thinkingEffort: cfg.thinkingEffort,
+      maxReplyTokens: cfg.maxReplyTokens,
+    },
     positionX: subagentNode.positionX,
     positionY: subagentNode.positionY,
     sortOrder: subagentNode.sortOrder,
