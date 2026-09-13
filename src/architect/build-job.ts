@@ -732,7 +732,15 @@ async function runBuild(job: BuildJob): Promise<void> {
         });
 
       const first = await judge();
-      if (first.verdict !== 'fail' || !(first.fixes?.length || first.uncovered?.length)) return first;
+      // What triggers a repair is the UNCOVERED LIST, not the verdict.
+      // Gating on `fail` alone shipped an agent with five things the client
+      // asked for missing, because the Evaluator named all five and still
+      // returned a softer verdict — the omissions were reported and then
+      // acted on by nobody. A named omission is a defect whatever adjective
+      // accompanies it.
+      const somethingMissing = !!(first.uncovered?.length || first.fixes?.length);
+      const badVerdict = first.verdict === 'fail' || first.verdict === 'blocked';
+      if (!somethingMissing && !badVerdict) return first;
 
       // One repair round, using the Evaluator's own findings as the brief.
       const brief =
@@ -808,7 +816,13 @@ async function runBuild(job: BuildJob): Promise<void> {
           'data_owner | business_owner\n' +
           '  blocking — true if the agent cannot go live without it\n' +
           '  status   — always "pending"\n' +
-          'Optionally: verification, affects (node ids), estimatedEffort (minutes|hours|days).',
+          'Optionally: verification, affects (node ids), estimatedEffort (minutes|hours|days).\n\n' +
+          'A prerequisite is something missing from the CLIENT\'S ORG that they must supply: a Flow, an ' +
+          'invocable Apex action, a field, a record type, a permission, a connector, a knowledge base, or ' +
+          'data. NEVER write one for work this platform already does — routing between specialists and ' +
+          'merging their answers, choosing or enforcing the AI provider and model, conversation memory and ' +
+          'context, the approval gate, or writing the agent\'s instructions. Telling a client to build any ' +
+          'of those tells them to rebuild the product they are using.',
       },
     );
     // Coerced, not trusted. The writer is not given the spec schema, so its

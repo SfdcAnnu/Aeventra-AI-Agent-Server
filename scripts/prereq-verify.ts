@@ -148,6 +148,43 @@ const blob = normalizePrerequisite({
 check('it split into more than one step', blob.steps.length >= 2, JSON.stringify(blob.steps));
 check('no step is left with list punctuation', blob.steps.every(s => !/^[-*\d.)\s]+$/.test(s)));
 
+// ── 6b. The platform's own job is never the client's homework ────────
+// Live failure: a build told an Apex developer to "design and deploy a Flow
+// or invocable Apex class that accepts input from multiple specialists and
+// merges their results" — which is the router, shipped and working. A
+// client who follows that rebuilds the product they are already using.
+console.log('\n6b. Prerequisites never ask the client to rebuild the platform');
+const PLATFORM_WORK = [
+  { title: 'No orchestration logic for multi-specialist response handling',
+    why: 'Assistants cannot combine results from multiple specialists into a coordinated result.',
+    owner: 'apex developer' },
+  { title: 'Unified AI provider configuration not enforced',
+    why: 'There is no automated confirmation that all assistant functions use the same AI provider.',
+    owner: 'integration owner' },
+  { title: 'Conversation memory is not managed',
+    why: 'The agent has no conversation state between turns.', owner: 'admin' },
+];
+const filtered = normalizePrerequisites(PLATFORM_WORK);
+check('every platform-responsibility item is dropped', filtered.length === 0,
+  JSON.stringify(filtered.map(p => p.title)));
+
+// The other direction matters more: a real org gap must survive.
+const REAL_GAPS = [
+  { title: 'Invocable Apex to create a Task', why: 'No Apex action exists to log an activity.', owner: 'apex developer' },
+  { title: 'Forecast fields on Opportunity', why: 'The named fields do not exist on the object.', owner: 'admin' },
+  { title: 'Salesforce MCP connector', why: 'The connector is not installed, so no tool can run.', owner: 'integration owner' },
+  { title: 'Knowledge base of help articles', why: 'No published articles exist to answer from.', owner: 'business owner' },
+];
+const realKept = normalizePrerequisites(REAL_GAPS);
+check('every genuine org gap survives', realKept.length === 4, JSON.stringify(realKept.map(p => p.title)));
+check('and ids are renumbered contiguously',
+  realKept.map(p => p.id).join(',') === 'PRE-001,PRE-002,PRE-003,PRE-004', realKept.map(p => p.id).join(','));
+
+const mixed = normalizePrerequisites([PLATFORM_WORK[0], REAL_GAPS[0], PLATFORM_WORK[1], REAL_GAPS[1]]);
+check('a mixed list keeps only the real gaps, renumbered', 
+  mixed.length === 2 && mixed[0].id === 'PRE-001' && mixed[1].id === 'PRE-002',
+  JSON.stringify(mixed.map(p => [p.id, p.title])));
+
 // ── 7. Nothing unreachable can ship ──────────────────────────────────
 // The failure this prevents: a design with twelve tool nodes and not one
 // edge compiled cleanly into an agent that could do nothing, because
