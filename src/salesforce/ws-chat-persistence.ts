@@ -138,6 +138,27 @@ function mergeUsageByModel(existingJson: string | null | undefined, usage: Model
  * @returns how many rows were written, so the caller can advance its
  *          sequence counter past them.
  */
+/**
+ * Whether this org's ChatMessage__c has TurnStatus__c yet. The field ships
+ * with the package, but an org that has not deployed it must keep
+ * persisting turns — an unknown field fails the whole insert. Cached per
+ * org for the life of the process; a redeploy of the server re-checks.
+ */
+const turnStatusFieldByOrg = new Map<string, Promise<boolean>>();
+async function hasTurnStatusField(conn: Connection): Promise<boolean> {
+  const key = conn.instanceUrl ?? 'default';
+  let p = turnStatusFieldByOrg.get(key);
+  if (!p) {
+    p = conn
+      .sobject('ChatMessage__c')
+      .describe()
+      .then(d => d.fields.some(f => f.name === 'TurnStatus__c'))
+      .catch(() => false);
+    turnStatusFieldByOrg.set(key, p);
+  }
+  return p;
+}
+
 export async function recordWsTurn(
   conn: Connection,
   sessionId: string,
@@ -170,9 +191,11 @@ export async function recordWsTurn(
   }
 
   const cachedTokens = (result.usage ?? []).reduce((n, u) => n + (u.cacheRead ?? 0), 0);
+  const withStatus = await hasTurnStatusField(conn);
   rows.push({
     ChatSession__c: sessionId,
     Role__c: 'Assistant',
+    ...(withStatus ? { TurnStatus__c: 'Complete' } : {}),
     Content__c: result.assistantText,
     ModelUsed__c: result.modelUsed ?? null,
     TokensIn__c: result.tokensIn,
@@ -219,5 +242,58 @@ export async function recordWsTurn(
     UsageByModelJson__c: mergeUsageByModel(prev?.UsageByModelJson__c, result.usage),
   });
 
+  return rows.length;
+}
+
+/**
+ * Write a turn that FAILED — the user's message and an assistant row marked
+ * Failed carrying the error text — and count it as a turn on the session.
+ *
+ * Before this, a failed turn left no trace in Salesforce: the browser saw
+ * the error and nothing else did, so Conversations showed a gap and no
+ * dashboard could count chat failures at all. Tokens are not known for a
+ * failed turn and are recorded as zero.
+ */
+export async function recordWsTurnFailure(
+  conn: Connection,
+  sessionId: string,
+  seqStart: number,
+  userText: string,
+  errorMessage: string,
+): Promise<number> {
+  const withStatus = await hasTurnStatusField(conn);
+  const rows: Array<Record<string, unknown>> = [
+    {
+      ChatSession__c: sessionId,
+      Role__c: 'User',
+      Content__c: userText,
+      SequenceNumber__c: seqStart,
+      ApprovalStatus__c: 'NotRequired',
+    },
+    {
+      ChatSession__c: sessionId,
+      Role__c: 'Assistant',
+      ...(withStatus ? { TurnStatus__c: 'Failed' } : {}),
+      Content__c: ('\u26a0 ' + errorMessage).slice(0, 4000),
+      TokensIn__c: 0,
+      TokensOut__c: 0,
+      SequenceNumber__c: seqStart + 1,
+      ApprovalStatus__c: 'NotRequired',
+    },
+  ];
+  await conn.sobject('ChatMessage__c').create(rows);
+
+  const current = await conn.query<{ Title__c: string | null; TotalTurns__c: number | null }>(
+    `SELECT Title__c, TotalTurns__c FROM ChatSession__c WHERE Id = '${sessionId}' LIMIT 1`,
+  );
+  const prev = current.records[0];
+  const now = new Date();
+  await conn.sobject('ChatSession__c').update({
+    Id: sessionId,
+    LastActivityAt__c: now.toISOString(),
+    ExpiresAt__c: new Date(now.getTime() + EXPIRY_HOURS * 60 * 60 * 1000).toISOString(),
+    ...(prev && !prev.Title__c ? { Title__c: titleFrom(userText) } : {}),
+    TotalTurns__c: (prev?.TotalTurns__c ?? 0) + 1,
+  });
   return rows.length;
 }
