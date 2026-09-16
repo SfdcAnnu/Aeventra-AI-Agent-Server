@@ -39,7 +39,7 @@ import { runChatTurn } from '../chat/chat-engine';
 import type { ChatTurnResult } from '../chat/chat-engine';
 import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { checkGuardrails } from '../salesforce/guardrails';
-import { resolveWsChatSession, recordWsTurn } from '../salesforce/ws-chat-persistence';
+import { resolveWsChatSession, recordWsTurn, recordWsTurnFailure } from '../salesforce/ws-chat-persistence';
 import type { EngineOverrideInput } from '../types';
 
 const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
@@ -167,7 +167,9 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       return;
     }
 
-    const result = await runChatTurn({
+    let result: ChatTurnResult;
+    try {
+      result = await runChatTurn({
       agent,
       sessionId: ctx.sessionId,
       history:   parsed.data.history,
@@ -192,7 +194,14 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
         recordContextId: null,
         recordContextType: null,
       },
-    });
+      });
+    } catch (err) {
+      // The turn threw. Record it as a failed turn so Conversations and the
+      // dashboards see it; the outer catch still tells the browser.
+      void persistTurnFailure(ws, conn, ctx, agent.id, agent.department, parsed.data.newUserMessage, (err as Error).message)
+        .catch(e => logger.error({ err: e, orgId: ctx.orgId }, 'ws_turn_failure_persist_failed'));
+      throw err;
+    }
     ws.send(JSON.stringify(result));
 
     // Best-effort accounting, after the response is already on the wire —
@@ -229,6 +238,26 @@ async function persistTurnUsage(
   // Advance by however many rows were actually written — a turn with tool
   // calls writes more than the user+assistant pair.
   const written = await recordWsTurn(conn, state.chatSessionId, state.nextSeq, userText, result);
+  state.nextSeq += written;
+}
+
+/** The failed-turn twin of persistTurnUsage — same session resolution,
+ *  same sequence bookkeeping, a Failed assistant row instead of a reply. */
+async function persistTurnFailure(
+  ws: WebSocket,
+  conn: Connection,
+  ctx: ConnectionContext,
+  agentId: string,
+  department: string | undefined,
+  userText: string,
+  errorMessage: string,
+): Promise<void> {
+  let state = wsSessionState.get(ws);
+  if (!state) {
+    state = await resolveWsChatSession(conn, ctx.sessionId, agentId, ctx.userId, department);
+    wsSessionState.set(ws, state);
+  }
+  const written = await recordWsTurnFailure(conn, state.chatSessionId, state.nextSeq, userText, errorMessage);
   state.nextSeq += written;
 }
 
