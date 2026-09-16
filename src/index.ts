@@ -6,6 +6,7 @@ import { logger } from './logger';
 import { agentRouter } from './routes/agent.routes';
 import { healthRouter } from './routes/health.routes';
 import { connectorsRouter } from './routes/connectors.routes';
+import { wakeRouter } from './routes/wake.routes';
 import { setupRouter } from './routes/setup.routes';
 import { chatRouter } from './routes/chat.routes';
 import { architectRouter } from './routes/architect.routes';
@@ -33,6 +34,7 @@ function buildApp(): express.Express {
   app.use(setupRouter);      // app-level OAuth setup (no session yet)
   app.use(agentRouter);      // /api/agent/execute — sessionAuth-guarded (autonomous runs)
   app.use(connectorsRouter); // sessionAuth-guarded
+  app.use(wakeRouter);       // /api/connectors/wake — sessionAuth-guarded cold-start probe
   app.use(chatRouter);
   app.use(architectRouter); // /api/architect/* — sessionAuth-guarded async builds       // /api/chat/* — sessionAuth-guarded
   app.use(engineRouter);     // /api/engine/test — sessionAuth-guarded
