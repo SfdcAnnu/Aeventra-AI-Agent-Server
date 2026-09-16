@@ -181,6 +181,10 @@ const copilotSchema = z.object({
       config: z.record(z.unknown()),
     })).max(40),
   }).nullish(),
+  // Home screen: no open agent, but the dashboard's own numbers, and the
+  // copilot may hand a requirement to the Architect (see assistant.ts).
+  mode: z.enum(['builder', 'home']).optional(),
+  platform: z.record(z.unknown()).optional(),
 });
 
 architectRouter.post('/api/architect/copilot', sessionAuth, async (req, res) => {
@@ -196,6 +200,8 @@ architectRouter.post('/api/architect/copilot', sessionAuth, async (req, res) => 
       message: parsed.data.message,
       history: parsed.data.history,
       agent: parsed.data.agent ?? undefined,
+      mode: parsed.data.mode,
+      platform: parsed.data.platform,
     });
     res.json(out);
   } catch (err) {

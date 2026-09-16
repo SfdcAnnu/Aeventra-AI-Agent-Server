@@ -59,6 +59,38 @@ When you rewrite instructions, write them FOR THE MODEL that node runs on, using
 Speak the way the person does: no API names, no JSON, no node ids in your reply — use the names on the
 canvas. Be brief. For a plain question, emit no operations at all.`;
 
+/**
+ * The same copilot on the Home screen. No agent is open there, so there is
+ * nothing to change by operation; instead it has the platform's own
+ * numbers (what the dashboard shows) and the org context, and it can start
+ * an agent build — which is the Architect pipeline, not this model — when
+ * that is what the person asked for.
+ */
+const HOME_ROLE = `You are Archon, the copilot on the Home screen of the Archon AI agent platform. The person is an
+admin or builder who runs AI agents on their Salesforce org.
+
+You do three things:
+  1. ANSWER questions about what the platform is doing right now, using the platform snapshot you are given
+     (today's activity, failures, approvals waiting, agents and their status, recent chats). Quote the numbers
+     from the snapshot; if the snapshot has no figure for something, say it is not tracked here rather than
+     estimating.
+  2. ANSWER questions about what their Salesforce org can already do, using the org context (invocable Apex,
+     Flows, MCP tools, and the object described when one was named). Never name a tool, Flow or invocable that
+     is not listed there.
+  3. START AN AGENT BUILD when the person asks you to create, build or set up an agent. You do not design it
+     yourself — the Architect does, stage by stage, and the person watches. Your part is to hand it a clear
+     requirement: restate what the agent should do in one or two full sentences drawn from what they said, and
+     set action.kind to "build_agent" with that requirement. If what they said is too thin to build from (no
+     idea of what the agent should do, or for whom), ask ONE short clarifying question instead and set
+     action.kind to "none".
+
+Never claim a build has happened, or that anything was created, saved or changed — the build runs after you
+answer, and the person sees its stages. When you start one, your reply is a single sentence saying what you are
+handing to the Architect.
+
+Speak the way the person does: plain sentences, no API names, no JSON, no ids. Be brief. Emit no operations —
+there is no open agent here.`;
+
 let styleCache: string | null = null;
 function modelStyles(): string {
   if (!styleCache) {
@@ -177,13 +209,27 @@ export interface CopilotInput {
     department?: string;
     nodes: CopilotGraphNode[];
   };
+  /** 'builder' (default): inside an open agent, proposes operations.
+   *  'home': the Home screen — platform questions and starting builds. */
+  mode?: 'builder' | 'home';
+  /** What the Home dashboard is showing — passed by the page so the
+   *  copilot answers from the same numbers the person is looking at. */
+  platform?: Record<string, unknown>;
 }
+
+/** What the copilot decided the person wants done, beyond an answer. Only
+ *  the Home mode produces anything but 'none'. */
+export type CopilotAction = { kind: 'none' } | { kind: 'build_agent'; requirement: string };
 
 export interface CopilotResult {
   reply: string;
   operations: CopilotOperation[];
+  action: CopilotAction;
   costUsd: number;
 }
+
+/** The Architect refuses anything shorter (see AgentArchitectRestService). */
+const MIN_REQUIREMENT_CHARS = 20;
 
 /** Cheap, bounded org context: what exists, not everything about it. */
 async function orgContext(orgId: string, message: string): Promise<Record<string, unknown>> {
@@ -230,18 +276,44 @@ export async function copilotTurn(
     contextPolicy: n.config.contextPolicy,
   }));
 
-  const { result, usage } = await callSpecialist<{ reply?: string; operations?: CopilotOperation[] }>({
+  const home = input.mode === 'home';
+
+  const { result, usage } = await callSpecialist<{
+    reply?: string;
+    operations?: CopilotOperation[];
+    action?: { kind?: string; requirement?: string };
+  }>({
     specialistId: 'plan_change',
     engine,
-    includeKnowledge: true,
+    includeKnowledge: !home, // the spec schema is for changing an open agent; Home has none
     tierOverride: 'medium',
     maxOutputTokens: 3000,
-    instructionsOverride: COPILOT_ROLE,
+    instructionsOverride: home ? HOME_ROLE : COPILOT_ROLE,
     schemaOverride: {
       type: 'object',
-      required: ['reply', 'operations'],
+      required: home ? ['reply', 'action'] : ['reply', 'operations'],
       properties: {
         reply: { type: 'string', description: "Your answer, in the person's vocabulary. No ids, no JSON." },
+        ...(home
+          ? {
+              action: {
+                type: 'object',
+                required: ['kind'],
+                description:
+                  'What to do after answering. "build_agent" ONLY when the person asked for an agent to be created, ' +
+                  'built or set up AND you have enough to describe it; otherwise "none".',
+                properties: {
+                  kind: { type: 'string', enum: ['none', 'build_agent'] },
+                  requirement: {
+                    type: 'string',
+                    description:
+                      'For build_agent: one or two full sentences stating what the agent should do, for whom, and ' +
+                      'on what — drawn from what the person said, nothing invented.',
+                  },
+                },
+              },
+            }
+          : {}),
         operations: {
           type: 'array',
           description:
@@ -267,11 +339,14 @@ export async function copilotTurn(
       },
     },
     input: {
-      task:
-        'Answer the user, and emit an operation for every change you agree to make. ' +
-        'Return JSON: { "reply": "...", "operations": [...] }.',
-      promptStyleGuidance: modelStyles(),
+      task: home
+        ? 'Answer the user from the platform snapshot and org context, and decide whether they asked for an agent ' +
+          'to be built. Return JSON: { "reply": "...", "action": { "kind": "none" | "build_agent", "requirement": "..." }, "operations": [] }.'
+        : 'Answer the user, and emit an operation for every change you agree to make. ' +
+          'Return JSON: { "reply": "...", "operations": [...] }.',
+      promptStyleGuidance: home ? undefined : modelStyles(),
       openAgent: input.agent ? { apiName: input.agent.apiName, name: input.agent.name, department: input.agent.department, nodes } : null,
+      platformSnapshot: home ? (input.platform ?? null) : undefined,
       orgContext: ctx,
       conversation: (input.history ?? []).slice(-8),
       userMessage: input.message,
@@ -327,7 +402,20 @@ export async function copilotTurn(
     }
   }
 
+  // The build hand-off is the only action, and only Home can raise it. A
+  // requirement the Architect would refuse is downgraded to a plain answer
+  // rather than starting a build that fails on its first check.
+  let action: CopilotAction = { kind: 'none' };
+  if (home && result?.action?.kind === 'build_agent') {
+    const requirement = String(result.action.requirement ?? '').trim();
+    if (requirement.length >= MIN_REQUIREMENT_CHARS) action = { kind: 'build_agent', requirement };
+    else logger.warn({ orgId, requirementChars: requirement.length }, 'architect_copilot_build_requirement_too_thin');
+  }
+
   const reply = String(result?.reply ?? '').trim() || "I'm not sure how to help with that one.";
-  logger.info({ orgId, ops: operations.length, costUsd: Number(usage.costUsd.toFixed(4)) }, 'architect_copilot_turn');
-  return { reply, operations, costUsd: usage.costUsd };
+  logger.info(
+    { orgId, mode: home ? 'home' : 'builder', ops: operations.length, action: action.kind, costUsd: Number(usage.costUsd.toFixed(4)) },
+    'architect_copilot_turn',
+  );
+  return { reply, operations: home ? [] : operations, action, costUsd: usage.costUsd };
 }
