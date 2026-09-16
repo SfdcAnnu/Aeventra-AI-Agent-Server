@@ -87,6 +87,12 @@ export async function probe(
     if (r.status >= 500) {
       return { ...target, url, status: 'waking', ms, httpStatus: r.status, message: `Host answered ${r.status} — still starting.` };
     }
+    // Render's edge answers 404 with this header when NO service is
+    // deployed at the hostname (suspended, deleted, renamed). Nothing is
+    // booting behind it, so "online" would be a lie.
+    if (r.status === 404 && r.headers.get('x-render-routing') === 'no-server') {
+      return { ...target, url, status: 'unreachable', ms, httpStatus: r.status, message: 'No service is deployed at this address on Render.' };
+    }
     return { ...target, url, status: 'online', ms, httpStatus: r.status };
   } catch (err) {
     const ms = Date.now() - started;
