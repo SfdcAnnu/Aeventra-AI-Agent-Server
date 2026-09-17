@@ -166,17 +166,19 @@ export async function recordWsTurn(
   userText: string,
   result: ChatTurnResult,
 ): Promise<number> {
-  const rows: Array<Record<string, unknown>> = [
-    {
-      ChatSession__c: sessionId,
-      Role__c: 'User',
-      Content__c: userText,
-      SequenceNumber__c: seqStart,
-      ApprovalStatus__c: 'NotRequired',
-    },
-  ];
+  // A continuation turn (the one after an approved action ran) has no
+  // user text — the transcript goes tool result, then the reply.
+  const rows: Array<Record<string, unknown>> = userText
+    ? [{
+        ChatSession__c: sessionId,
+        Role__c: 'User',
+        Content__c: userText,
+        SequenceNumber__c: seqStart,
+        ApprovalStatus__c: 'NotRequired',
+      }]
+    : [];
 
-  let seq = seqStart + 1;
+  let seq = seqStart + rows.length;
   for (const call of result.toolCalls ?? []) {
     const output = typeof call.output === 'string' ? call.output : JSON.stringify(call.output ?? '');
     rows.push({

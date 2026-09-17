@@ -65,6 +65,7 @@ const turnSchema = z.object({
     recordContextType: z.string().nullish(),
   }),
   debugMode: z.boolean().optional(),
+  continuation: z.object({ toolName: z.string().min(1).max(200), resultText: z.string().max(20_000) }).nullish(),
 });
 
 chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
@@ -100,6 +101,7 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
       engineOverride: parsed.data.engineOverride,
       connectors:     parsed.data.connectors,
       debugMode:      parsed.data.debugMode,
+      continuation:   parsed.data.continuation ?? null,
       context: {
         orgId,
         userId: parsed.data.context.userId,

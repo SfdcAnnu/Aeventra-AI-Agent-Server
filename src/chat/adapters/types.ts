@@ -26,6 +26,11 @@ export interface ConnectorInput {
   connectorId?: string | null;   // Node-side Connector row id (token lookup)
   accessMode?: string | null;    // salesforce_mcp only: 'Org' | 'PerUser'
   customTools?: Array<{ type: string; name: string; label?: string | null }> | null; // org's own Apex actions / Flows
+  /** 'catalog' (default): a tool catalog node — its allowedTools are the toolset.
+   *  'nodes': derived from tool nodes alone — strictly scoped per node (connector-scope.ts). */
+  scope?: 'catalog' | 'nodes' | null;
+  /** Extra request headers for this server (the metadata server's instance-URL hint). */
+  headers?: Record<string, string> | null;
 }
 
 export interface EngineOverrideInput {
@@ -54,6 +59,9 @@ export interface ChatTurnRequest {
    *  FACTS + CONVERSATION SO FAR blocks. Adapters splice it into the system
    *  prompt via buildSystemPrompt — never send it as a history message. */
   memoryPreamble?: string | null;
+  /** The turn that follows an approved action: newUserMessage is empty and
+   *  the runtime runs on the shared continuation text instead (connector-scope.ts). */
+  continuation?: { toolName: string; resultText: string } | null;
   context: {
     orgId: string;
     userId: string;

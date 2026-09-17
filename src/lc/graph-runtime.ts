@@ -43,6 +43,9 @@ import {
 import { z } from 'zod';
 import { logger } from '../logger';
 import { InstallsRepo } from '../db/installs.repo';
+import { getOrgConnection } from '../salesforce/per-org-connection';
+import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
+import { augmentConnectorsWithToolNodes } from '../chat/tool-node-connectors';
 import type { AgentDefinition, AgentNode, AgentAction } from '../types';
 import { buildGraph } from '../orchestrator/graph';
 import {
@@ -123,6 +126,14 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   if (!install?.sfAccessToken) {
     throw new Error('Org has no Salesforce tokens. Admin must run Synapse Setup first.');
   }
+
+  // Connections the tool nodes name without a catalog node, and the turn
+  // that follows an approved action (see chat/connector-scope.ts).
+  req = {
+    ...req,
+    connectors: await augmentConnectorsWithToolNodes(req.agent, req.connectors ?? [], await getOrgConnection(req.context.orgId), install.sfInstanceUrl),
+    newUserMessage: req.continuation && !req.newUserMessage.trim() ? continuationMessage(req.continuation) : req.newUserMessage,
+  };
 
   const graph = buildGraph(req.agent);
   const { topLevelActions, handoffTools, callAgents } = resolveTopLevelToolsAndSubagents(req.agent, graph, aiNode);
@@ -996,28 +1007,4 @@ export function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools
 /** Verbatim port of chat-engine.ts's private helper — folds resolved tool-
  *  node actions into the connectors payload (MCP names → allowedTools,
  *  Apex/Flow → customTools). */
-export function mergeActionsIntoConnectors(
-  connectors: ConnectorInput[] | undefined,
-  actions: AgentAction[],
-): ConnectorInput[] | undefined {
-  if (actions.length === 0 || !connectors) return connectors;
-  const sfIndex = connectors.findIndex(c => c.provider === 'salesforce_mcp');
-  if (sfIndex === -1) return connectors;
-
-  const list = connectors.map(c => ({ ...c, allowedTools: [...c.allowedTools], customTools: c.customTools ? [...c.customTools] : [] }));
-  const sf = list[sfIndex];
-
-  for (const action of actions) {
-    if (action.actionType === 'MCP') {
-      if (sf.allowedTools.length > 0 && !sf.allowedTools.includes(action.toolName)) {
-        sf.allowedTools.push(action.toolName);
-      }
-      continue;
-    }
-    const type = action.actionType === 'Apex' ? 'apex' : 'flow';
-    if (!sf.customTools!.some(t => t.type === type && t.name === action.toolName)) {
-      sf.customTools!.push({ type, name: action.toolName, label: action.name });
-    }
-  }
-  return list;
-}
+export { mergeActionsIntoConnectors };

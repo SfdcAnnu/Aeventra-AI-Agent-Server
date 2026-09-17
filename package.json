@@ -1,7 +1,7 @@
 {
   "name": "archon-server-langchain",
   "version": "0.1.0",
-  "description": "LangChain/LangGraph replica of the Archon agent server — same API contract, same DB, framework AI core.",
+  "description": "LangChain/LangGraph replica of the Archon agent server \u00e2\u20ac\u201d same API contract, same DB, framework AI core.",
   "main": "dist/index.js",
   "type": "commonjs",
   "scripts": {
@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=20"
@@ -50,6 +51,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
     "pino-pretty": "^11.2.2",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "vitest": "^5.0.1"
   }
 }

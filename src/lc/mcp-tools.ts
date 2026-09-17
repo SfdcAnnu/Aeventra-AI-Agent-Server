@@ -42,7 +42,7 @@ const toolCache = new Map<string, CacheEntry>();
 
 function cacheKey(servers: ResolvedMcpServer[]): string {
   return servers
-    .map(s => `${s.name}|${s.url}|${s.token.slice(-12)}|${[...s.allowedTools].sort().join(',')}`)
+    .map(s => `${s.name}|${s.url}|${s.token.slice(-12)}|${[...s.allowedTools].sort().join(',')}|${JSON.stringify(s.headers ?? {})}`)
     .sort()
     .join('||');
 }
@@ -159,7 +159,7 @@ async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTo
           [s.name]: {
             transport: 'http',
             url: s.url,
-            headers: { Authorization: `Bearer ${s.token}` },
+            headers: { Authorization: `Bearer ${s.token}`, ...(s.headers ?? {}) },
           },
         },
         // Tool names must stay EXACTLY as the server publishes them —
