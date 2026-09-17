@@ -236,7 +236,10 @@ async function orgContext(orgId: string, message: string): Promise<Record<string
   const wantsObject = /\b(field|object|record|opportunity|account|contact|case|lead|quote|order)\b/i.test(message);
   const [invocables, mcp] = await Promise.all([
     listInvocables(orgId).catch(() => []),
-    listMcpToolsLive(orgId).catch(() => []),
+    // Fast: an interactive turn is bounded by the Apex callout ceiling, so a
+    // sleeping MCP server is omitted this turn, never woken in series. The
+    // Setup page's wake button is how a run warms them up front.
+    listMcpToolsLive(orgId, { fast: true }).catch(() => []),
   ]);
   const ctx: Record<string, unknown> = {
     invocableApex: invocables.filter(i => i.kind === 'apex').slice(0, 40).map(i => i.name),
@@ -261,7 +264,11 @@ export async function copilotTurn(
   const engine = await resolveArchitectEngine(conn);
   const [ctx, manifestBuilt] = await Promise.all([
     orgContext(orgId, input.message),
-    buildCapabilityManifest(orgId).catch(() => null),
+    // Home has no open agent to change, so no operations to validate against
+    // the manifest — skip the second live MCP listing entirely there. In the
+    // builder it is needed, but fast: an interactive turn cannot wake cold
+    // servers in series without blowing the Apex callout budget.
+    input.mode === 'home' ? Promise.resolve(null) : buildCapabilityManifest(orgId, { fast: true }).catch(() => null),
   ]);
 
   const nodes = (input.agent?.nodes ?? []).map(n => ({
