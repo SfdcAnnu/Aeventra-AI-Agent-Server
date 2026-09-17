@@ -13,7 +13,7 @@
  * time AND again at compile time, because orgs change between the two.
  */
 import { getOrgConnection } from '../salesforce/per-org-connection';
-import { resolveProviderToken } from '../chat/adapters/shared';
+import { ensureMcpServerAwake, resolveProviderToken } from '../chat/adapters/shared';
 import { listToolsCached } from '../mcp/tool-list-cache';
 import { InstallsRepo } from '../db/installs.repo';
 import { prisma } from '../db/client';
@@ -163,7 +163,12 @@ async function listToolsWithRetry(
   url: string,
   token: string,
 ): Promise<Array<{ name: string; description?: string }>> {
-  const WAITS_MS = [3_000, 10_000, 20_000];
+  // A cold free-tier host needs 30–60s; the waits below give it ~70s on top
+  // of the wake ping, which is what a build's first stage used to die on.
+  const WAITS_MS = [3_000, 10_000, 20_000, 30_000];
+  // Ping the base URL first so the tool listing is not the request that
+  // pays for the cold start (same helper the chat runtime uses per turn).
+  await ensureMcpServerAwake(url);
   let lastError: unknown;
   for (let attempt = 0; attempt <= WAITS_MS.length; attempt++) {
     try {

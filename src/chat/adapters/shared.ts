@@ -137,7 +137,7 @@ async function fetchToolNames(baseUrl: string): Promise<Set<string> | null> {
 const mcpAwakeAt = new Map<string, number>();
 const MCP_AWAKE_TTL_MS = 5 * 60 * 1000;
 
-async function ensureMcpServerAwake(base: string): Promise<void> {
+export async function ensureMcpServerAwake(base: string): Promise<void> {
   const last = mcpAwakeAt.get(base);
   if (last && Date.now() - last < MCP_AWAKE_TTL_MS) return;
   for (let attempt = 1; attempt <= 5; attempt++) {
