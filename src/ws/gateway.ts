@@ -125,6 +125,8 @@ const turnMessageSchema = z.object({
     })).nullish(),
   })).optional(),
   debugMode: z.boolean().optional(),
+  // The turn after an approved action executed: no user text, the result.
+  continuation: z.object({ toolName: z.string().min(1).max(200), resultText: z.string().max(20_000) }).nullish(),
 });
 
 async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string): Promise<void> {
@@ -187,6 +189,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
         ? parsed.data.connectors
         : await connectorsForAgent(conn, agent),
       debugMode:      parsed.data.debugMode,
+      continuation:   parsed.data.continuation ?? null,
       // Bound identity — NOT read from the message body (see module doc).
       context: {
         orgId: ctx.orgId,
@@ -209,7 +212,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
     // a failed one. This is what makes the guardrail check above actually
     // see WS-path usage on the NEXT turn (see ws-chat-persistence.ts).
     if (result.status === 'complete') {
-      void persistTurnUsage(ws, conn, ctx, agent.id, agent.department, parsed.data.newUserMessage, result)
+      void persistTurnUsage(ws, conn, ctx, agent.id, agent.department, parsed.data.continuation ? '' : parsed.data.newUserMessage, result)
         .catch(err => logger.error({ err, orgId: ctx.orgId }, 'ws_turn_persist_failed'));
     }
   } catch (err) {

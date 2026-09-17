@@ -23,7 +23,8 @@ import { resolveMcpServers } from './adapters/shared';
 import { buildConnectorInputsFromAgent } from './adapters/connectors-from-agent';
 import { loadMcpTools } from '../lc/mcp-tools';
 import { buildPrebuiltTools } from '../lc/prebuilt-tools';
-import { mergeActionsIntoConnectors } from '../lc/graph-runtime';
+import { mergeActionsIntoConnectors } from './connector-scope';
+import { augmentConnectorsWithToolNodes } from './tool-node-connectors';
 import type { ChatTurnRequest } from './adapters/types';
 
 export async function executeApprovedAction(approval: ChatApproval): Promise<string> {
@@ -37,7 +38,7 @@ export async function executeApprovedAction(approval: ChatApproval): Promise<str
   if (!aiNode) throw new Error('Agent has no AI orchestrator node.');
 
   const graph = buildGraph(agent);
-  const baseConnectors = await buildConnectorInputsFromAgent(agent, aiNode, conn);
+  const baseConnectors = await augmentConnectorsWithToolNodes(agent, await buildConnectorInputsFromAgent(agent, aiNode, conn), conn, install.sfInstanceUrl);
   const reqLike: ChatTurnRequest = {
     agent,
     sessionId: approval.sessionId,

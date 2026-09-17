@@ -9,6 +9,8 @@
  *                          record context.
  */
 import { config } from '../../config';
+import { PLATFORM_PROVIDER, SALESFORCE_TOKEN_PROVIDERS } from '../connector-scope';
+import { mintPlatformToken } from '../../platform/token';
 import { logger } from '../../logger';
 import { ConnectorsRepo } from '../../db/connectors.repo';
 import { refreshGoogleToken } from '../../oauth/google';
@@ -91,6 +93,7 @@ export interface ResolvedMcpServer {
   url:          string;      // full .../mcp URL
   token:        string;      // bearer for that MCP server
   allowedTools: string[];    // empty = expose all tools
+  headers?:     Record<string, string>; // extra request headers (instance-URL hint)
 }
 
 // ── allowedTools sanitization ───────────────────────────────────────
@@ -189,9 +192,17 @@ export async function resolveProviderToken(args: {
   connectorId?: string | null;
   accessMode?: string | null;
   sfAccessToken?: string | null;
+  /** The turn's session and agent — carried into the platform tool token. */
+  sessionId?: string | null;
+  agentApiName?: string | null;
 }): Promise<string | null> {
   const { orgId, userId, provider, connectorId, accessMode, sfAccessToken } = args;
-  if (provider === 'salesforce_mcp') {
+  if (provider === PLATFORM_PROVIDER) {
+    return mintPlatformToken({ orgId, userId, sessionId: args.sessionId ?? null, agentApiName: args.agentApiName ?? null });
+  }
+  // The Salesforce Metadata server takes the same Salesforce token as the
+  // Platform server: the person's own connection when they have one.
+  if (SALESFORCE_TOKEN_PROVIDERS.has(provider)) {
     const personal = await ConnectorsRepo
       .getByOrgProviderAndUser(orgId, 'salesforce_mcp', userId)
       .catch(() => null);
@@ -266,6 +277,7 @@ export async function resolveMcpServers(
         token = await resolveProviderToken({
           orgId: req.context.orgId, userId: req.context.userId,
           provider: c.provider, connectorId: c.connectorId, accessMode: c.accessMode, sfAccessToken,
+          sessionId: req.sessionId, agentApiName: req.agent.apiName,
         });
       } catch (err) {
         throw err; // PerUser hard-fail must still surface to the caller
@@ -295,7 +307,7 @@ export async function resolveMcpServers(
         logger.info({ provider: c.provider, customCount: custom.length }, 'mcp_custom_tools_attached');
       }
 
-      out.push({ name, url, token, allowedTools });
+      out.push({ name, url, token, allowedTools, headers: c.headers ?? undefined });
     }
     return out;
   }

@@ -14,6 +14,8 @@ import { engineRouter } from './routes/engine.routes';
 import { kbRouter } from './routes/kb.routes';
 import { runsRouter } from './routes/runs.routes';
 import { wsRouter } from './routes/ws.routes';
+import { platformRouter } from './platform/mcp-endpoint';
+import { systemAgentsRouter } from './routes/system-agents.routes';
 import { adminTracesRouter, adminTracesEnabled } from './routes/admin-traces.routes';
 import { startTraceRetention } from './trace/retention';
 import { traceCaptureEnabled } from './trace/recorder';
@@ -41,6 +43,8 @@ function buildApp(): express.Express {
   app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
   app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
   app.use(wsRouter);         // /api/ws/ticket — sessionAuth-guarded (Apex-only)
+  app.use(platformRouter);   // /platform/* — the server's own tools as an MCP endpoint (per-turn token)
+  app.use(systemAgentsRouter); // /api/system-agents/* — platform-shipped agents written into the org's records
 
   // Internal flight recorder. Mounted ONLY when ADMIN_API_KEY is set, so a
   // default deployment has no cross-tenant surface at all — forgetting to
