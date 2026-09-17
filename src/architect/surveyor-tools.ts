@@ -186,7 +186,28 @@ async function listToolsWithRetry(
   throw lastError;
 }
 
-export async function listMcpToolsLive(orgId: string): Promise<McpToolInventory[]> {
+export interface ListMcpOptions {
+  /** Fast mode: no cold-start wake, no retry, a short per-server deadline,
+   *  all servers probed in parallel. For an interactive turn bounded by the
+   *  Apex callout ceiling — a sleeping server is simply omitted this turn
+   *  rather than woken. The background build keeps the robust wake+retry
+   *  path (fast omitted). */
+  fast?: boolean;
+  /** Per-server deadline in fast mode. */
+  perServerMs?: number;
+}
+
+async function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms); });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+export async function listMcpToolsLive(orgId: string, opts: ListMcpOptions = {}): Promise<McpToolInventory[]> {
   const conn = await getOrgConnection(orgId);
   const install = await InstallsRepo.findByOrgId(orgId);
 
@@ -208,31 +229,22 @@ export async function listMcpToolsLive(orgId: string): Promise<McpToolInventory[
     /* org without the custom-server object — nothing to add */
   }
 
-  const out: McpToolInventory[] = [];
-  for (const s of servers) {
+  // Parallel, not serial: a serial walk of cold free-tier hosts summed past
+  // the 120s Apex callout ceiling once a fourth MCP server was added.
+  const perServerMs = opts.perServerMs ?? 7_000;
+  const probe = async (s: { provider: string; url: string }): Promise<McpToolInventory> => {
     try {
-      const token = await resolveProviderToken({
-        orgId,
-        userId: '',
-        provider: s.provider,
-        connectorId: null,
-        sfAccessToken: install?.sfAccessToken ?? null,
-      });
-      if (!token) {
-        out.push({ provider: s.provider, url: s.url, tools: [], error: 'not connected' });
-        continue;
-      }
-      const tools = await listToolsWithRetry(s.url, token);
-      out.push({
-        provider: s.provider,
-        url: s.url,
-        tools: tools.map(t => ({ name: t.name, description: (t.description ?? '').slice(0, 200) })),
-      });
+      const token = await resolveProviderToken({ orgId, userId: '', provider: s.provider, connectorId: null, sfAccessToken: install?.sfAccessToken ?? null });
+      if (!token) return { provider: s.provider, url: s.url, tools: [], error: 'not connected' };
+      const tools = opts.fast
+        ? await withDeadline(listToolsCached({ remoteUrl: s.url, accessToken: token }), perServerMs)
+        : await listToolsWithRetry(s.url, token);
+      return { provider: s.provider, url: s.url, tools: tools.map(t => ({ name: t.name, description: (t.description ?? '').slice(0, 200) })) };
     } catch (err) {
-      out.push({ provider: s.provider, url: s.url, tools: [], error: err instanceof Error ? err.message.slice(0, 150) : 'unreachable' });
+      return { provider: s.provider, url: s.url, tools: [], error: err instanceof Error ? err.message.slice(0, 150) : 'unreachable' };
     }
-  }
-  return out;
+  };
+  return Promise.all(servers.map(probe));
 }
 
 // ── Knowledge bases ──────────────────────────────────────────────────
@@ -262,14 +274,14 @@ export async function listKnowledgeBases(orgId: string): Promise<Array<{ agentAp
  * compile time. CRUD identities come from the integration user's real
  * object permissions (describeGlobal flags), so "can do" not "exists".
  */
-export async function buildCapabilityManifest(orgId: string): Promise<{
+export async function buildCapabilityManifest(orgId: string, opts: ListMcpOptions = {}): Promise<{
   manifest: CapabilityManifest;
   counts: Record<string, number>;
 }> {
   const [objects, invocables, mcp] = await Promise.all([
     listObjects(orgId),
     listInvocables(orgId),
-    listMcpToolsLive(orgId),
+    listMcpToolsLive(orgId, opts),
   ]);
 
   const entries: string[] = [];
