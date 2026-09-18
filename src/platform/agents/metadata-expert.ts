@@ -29,7 +29,9 @@ const PIPE: SystemToolSpec[] = [
 const SPECIALIST_CONTRACT =
   ' Draft the IR envelope { type, object, apiName, operation: "create" | "modify", spec }; for a modify, retrieve first and patch — never regenerate whole. ' +
   'Call validate and fix every violation; then serialize; then check_deploy. Fix at most twice on a failed check. ' +
-  'Return exactly one JSON object: { "status": "ready" | "failed" | "question", "type", "object", "apiName", "changeId", "diff", "warnings": [], "reason" }. No transcript. You never deploy.';
+  'Describe an object ONCE — describe_object with includeFields true and no fieldsLike — and take every field you need from that one result; never describe the same object twice in a task. ' +
+  'Return exactly one JSON object: { "status": "ready" | "failed" | "question", "type", "object", "apiName", "changeId", "diff", "warnings": [], "reason" }. ' +
+  'When the brief is a question with nothing to change, "changeId" is null and "diff" carries the data exactly as the tools returned it — every field, every picklist value, untrimmed — so the lead agent can answer follow-ups without asking you again. No transcript. You never deploy.';
 
 export const metadataExpertAgent: SystemAgentSpec = {
   apiName: 'metadata_expert',

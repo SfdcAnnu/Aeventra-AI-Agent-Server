@@ -20,7 +20,7 @@
  * (`budgets: { maxTokens, maxMs, maxSteps }`), clamped to platform
  * ceilings from env. Generic — no agent-specific values live here.
  */
-import type { AIMessage } from '@langchain/core/messages';
+import { ToolMessage, type AIMessage, type BaseMessage } from '@langchain/core/messages';
 import type { ModelUsage } from '../chat/adapters/types';
 
 /** Phase 7 — one billable transition. Model calls carry tokens; tool
@@ -52,6 +52,9 @@ export interface TurnBudget {
   callCounts: Map<string, number>;
   /** Set when a brake fires — later passes (corrections, regens) skip. */
   tripped: string | null;
+  /** Model calls the root may still make after a specialist tripped the
+   *  brake with work in hand — one, so the person gets that work. */
+  graceLeft: number;
 }
 
 const envInt = (name: string, fallback: number): number => {
@@ -92,6 +95,7 @@ export function createTurnBudget(rootNodeConfig: unknown): TurnBudget {
     events: [],
     callCounts: new Map(),
     tripped: null,
+    graceLeft: 0,
   };
 }
 
@@ -221,3 +225,23 @@ export const BUDGET_TRIPPED_REPLY =
 export const REPEATED_CALL_RESULT =
   'BLOCKED — you already called this tool with these exact arguments in this turn. Use the earlier result from ' +
   'the conversation, take a different action, or give your final answer now.';
+
+/**
+ * What a specialist had in hand when the brake fell: the tools it ran and
+ * its last results, for the root to report instead of the generic reply.
+ * Null when nothing ran — then there is nothing worth reporting.
+ *
+ * Live: the Flow Specialist resolved, validated and serialized a flow in
+ * 20 tool calls and was stopped on the call that would have written its
+ * report; the whole turn ended as "our team will follow up".
+ */
+export function partialWorkReport(messages: BaseMessage[]): string | null {
+  const results = messages.filter((m): m is ToolMessage => m instanceof ToolMessage);
+  if (!results.length) return null;
+  const names = [...new Set(results.map(r => r.name ?? 'tool'))];
+  const tail = results.slice(-3).map(r => {
+    const text = typeof r.content === 'string' ? r.content : JSON.stringify(r.content);
+    return `${r.name ?? 'tool'}: ${text.length > 1500 ? `${text.slice(0, 1500)} …` : text}`;
+  });
+  return `STOPPED BY THE TURN BUDGET before writing a report. Tools run: ${names.join(', ')}. Last results:\n${tail.join('\n')}`;
+}
