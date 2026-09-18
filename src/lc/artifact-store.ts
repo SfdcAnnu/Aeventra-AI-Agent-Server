@@ -148,3 +148,18 @@ export function buildReadArtifactTool(): StructuredToolInterface {
     },
   ) as StructuredToolInterface;
 }
+
+/** A stored result in full (text capped at 200k chars), for the chat UI —
+ *  the model pages through the same entry with read_artifact. */
+export function readArtifact(id: string): { id: string; kind: 'json-records' | 'text'; text?: string; records?: unknown[]; totalChars: number; truncated: boolean } | null {
+  const entry = store.get(id);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > TTL_MS) { store.delete(id); return null; }
+  return {
+    id,
+    kind: entry.kind,
+    ...(entry.kind === 'json-records' ? { records: entry.records ?? [] } : { text: entry.data.slice(0, 200_000) }),
+    totalChars: entry.data.length,
+    truncated: entry.truncated || (entry.kind === 'text' && entry.data.length > 200_000),
+  };
+}
