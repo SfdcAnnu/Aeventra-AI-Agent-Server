@@ -143,6 +143,9 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // message state. Phase 6: activeCalls caps concurrent specialists per
   // fan-out (ToolNode executes a response's tool calls with Promise.all).
   const turnFlags = { childWrote: false, activeCalls: 0 };
+  // Specialist calls made this turn, keyed by the ask_* call that made
+  // them — attached to the turn's tool-call summaries for the client.
+  const nestedCalls: Array<{ callId: string | undefined; name: string; calls: ToolCallSummary[] }> = [];
   const MAX_PARALLEL_CALLS = Number(process.env.TURN_MAX_PARALLEL_CALLS) > 0
     ? Number(process.env.TURN_MAX_PARALLEL_CALLS) : 4;
 
@@ -265,7 +268,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     const callAgentTools = callAgents.map(c => {
       const subagentNode = req.agent.nodes.find(n => n.id === c.subagentNodeId);
       return tool(
-        async ({ task }: { task: string }) => {
+        async ({ task }: { task: string }, config?: unknown) => {
           if (!subagentNode) return 'That specialist is unavailable.';
           if (checkBudget(budget)) return 'Budget exhausted — answer with what you already have.';
           if (turnFlags.activeCalls >= MAX_PARALLEL_CALLS) {
@@ -279,6 +282,9 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
               buildCallContext(policy, task), budget,
             );
             if (turnHasWrite(out.messages)) turnFlags.childWrote = true;
+            if (out.toolCalls?.length) {
+              nestedCalls.push({ callId: (config as { toolCall?: { id?: string } } | undefined)?.toolCall?.id, name: c.name, calls: out.toolCalls });
+            }
             const text = lastAssistantText(out.messages) || '(the specialist produced no result)';
             return spillIfLarge(c.name, text);
           } catch (err) {
@@ -545,7 +551,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     }
 
     const { tokensIn, tokensOut } = sumUsage(state.messages.slice(turnStart));
-    const toolCalls = extractToolCalls(state.messages.slice(turnStart), loaded);
+    const toolCalls = extractToolCalls(state.messages.slice(turnStart), loaded, nestedCalls);
 
     if (req.debugMode) {
       debugResponse.push({
@@ -676,7 +682,7 @@ async function runSubagentTurn(
   assembled: { preamble: string | null },
   baseMessages: BaseMessage[],
   budget: TurnBudget,
-): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[] }> {
+): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[]; toolCalls?: ToolCallSummary[] }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
   const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions.filter(a => a.actionType !== 'Prebuilt'));
@@ -758,7 +764,8 @@ async function runSubagentTurn(
         },
       },
     );
-    return { messages: out.messages.slice(baseMessages.length), modelName, toolNames: subTools.map(t => t.name) };
+    const turnMessages = out.messages.slice(baseMessages.length);
+    return { messages: turnMessages, modelName, toolNames: subTools.map(t => t.name), toolCalls: extractToolCalls(turnMessages, loaded) };
   } finally {
     await loaded.close();
   }
@@ -973,8 +980,20 @@ function sanitizeToolPairs(messages: BaseMessage[]): BaseMessage[] {
 
 /** Pair each AIMessage tool call with its ToolMessage result — same
  *  ToolCallSummary shape Apex/the chat panel already consume. */
-export function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools): ToolCallSummary[] {
+export function extractToolCalls(
+  messages: BaseMessage[],
+  loaded: LoadedMcpTools,
+  nested: Array<{ callId: string | undefined; name: string; calls: ToolCallSummary[] }> = [],
+): ToolCallSummary[] {
   const resultsByCallId = new Map<string, ToolMessage>();
+  // Attach by call id when the runtime handed the handler one; otherwise
+  // by name in order, which is exact when a specialist is called once.
+  const pending = [...nested];
+  const takeNested = (id: string, name: string): ToolCallSummary[] | undefined => {
+    let i = pending.findIndex(n => n.callId && n.callId === id);
+    if (i < 0) i = pending.findIndex(n => !n.callId && n.name === name);
+    return i < 0 ? undefined : pending.splice(i, 1)[0].calls;
+  };
   for (const m of messages) {
     if (m instanceof ToolMessage && m.tool_call_id) resultsByCallId.set(m.tool_call_id, m);
   }
@@ -998,6 +1017,7 @@ export function extractToolCalls(messages: BaseMessage[], loaded: LoadedMcpTools
         output,
         isError: result?.status === 'error',
         serverName: loaded.serverByTool.get(call.name),
+        ...(call.name.startsWith('ask_') ? { nested: takeNested(call.id ?? '', call.name) } : {}),
       });
     }
   }

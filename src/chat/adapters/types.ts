@@ -98,6 +98,10 @@ export interface ToolCallSummary {
   output?: unknown;
   isError?: boolean;
   serverName?: string; // which connector/MCP server this call went through
+  /** For a call into a specialist (ask_*): the tool calls the specialist
+   *  made in its own turn, so a client can show the work, not only the
+   *  hand-off. One level — specialists have no specialists. */
+  nested?: ToolCallSummary[];
 }
 
 /** A tool call the model made outside its connector's configured allowedTools. */
