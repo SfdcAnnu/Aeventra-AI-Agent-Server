@@ -9,17 +9,13 @@ import { z } from 'zod';
 import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
 import { getOrgConnection } from '../salesforce/per-org-connection';
-import { syncSystemAgent, type SystemAgentSpec } from '../platform/system-agents';
-import { metadataSmokeAgent } from '../platform/agents/metadata-smoke';
-
-export const SYSTEM_AGENTS: Record<string, SystemAgentSpec> = {
-  [metadataSmokeAgent.apiName]: metadataSmokeAgent,
-};
+import { syncSystemAgent } from '../platform/system-agents';
+import { SYSTEM_AGENTS } from '../platform/agents/registry';
 
 export const systemAgentsRouter = Router();
 
 systemAgentsRouter.get('/api/system-agents', sessionAuth, (_req, res) => {
-  res.json({ agents: Object.values(SYSTEM_AGENTS).map(s => ({ apiName: s.apiName, name: s.name, version: s.version })) });
+  res.json({ agents: Object.values(SYSTEM_AGENTS).map(s => ({ apiName: s.apiName, name: s.name, version: s.version, managed: s.managed !== false })) });
 });
 
 const syncSchema = z.object({ apiName: z.string().min(1).max(120) });

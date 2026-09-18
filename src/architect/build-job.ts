@@ -128,6 +128,9 @@ export interface BuildJob {
   priorCostUsd: number;
   maxCostUsd: number;
   resumedFrom?: string;
+  /** Pause after this stage with the work saved — a stage tool running the
+   *  build one stage at a time. In memory only; each run names its own. */
+  stopAfter?: string;
   startedAt: number;
   finishedAt?: number;
   result?: BuildResult;
@@ -161,6 +164,13 @@ const jobs = new Map<string, BuildJob>();
  * The budget ceiling, reached. Not a failure: everything already paid for
  * is in the checkpoint, and the build resumes from exactly here.
  */
+/** Thrown when a run reaches the stage it was asked to stop after. */
+class StagePause extends Error {
+  constructor(public readonly key: string, public readonly label: string) {
+    super(`stopped after ${key}`);
+  }
+}
+
 class BudgetPause extends Error {
   constructor(readonly about: string) {
     super(`Paused before ${about} — the budget ceiling was reached.`);
@@ -308,7 +318,11 @@ function launch(job: BuildJob): BuildJob {
     // honestly and the resume starts in the right place.
     for (const s of job.steps) if (s.state === 'running') s.state = 'pending';
     job.finishedAt = Date.now();
-    if (err instanceof BudgetPause) {
+    if (err instanceof StagePause) {
+      job.status = 'paused';
+      job.error = `Stopped after "${err.label}" as asked — everything so far is saved; the next stage resumes from here.`;
+      logger.info({ jobId: job.id, orgId: job.orgId, after: err.key }, 'architect_build_stopped_after_stage');
+    } else if (err instanceof BudgetPause) {
       job.status = 'paused';
       job.error =
         `Stopped at the $${job.maxCostUsd.toFixed(2)} ceiling, before ${err.about}. ` +
@@ -328,7 +342,7 @@ function launch(job: BuildJob): BuildJob {
   return job;
 }
 
-export function createBuildJob(orgId: string, requirement: string, opts?: { attachmentText?: string; maxCostUsd?: number }): BuildJob {
+export function createBuildJob(orgId: string, requirement: string, opts?: { attachmentText?: string; maxCostUsd?: number; stopAfter?: string }): BuildJob {
   return launch({
     id: randomUUID(),
     orgId,
@@ -343,6 +357,7 @@ export function createBuildJob(orgId: string, requirement: string, opts?: { atta
     // agent reaching a customer. $2 was set when there were seven and no
     // review, and a single failed design stage can spend half of it.
     maxCostUsd: opts?.maxCostUsd ?? 4.0,
+    stopAfter: opts?.stopAfter,
     startedAt: Date.now(),
   });
 }
@@ -366,6 +381,7 @@ export async function resumeBuildJob(
   orgId: string,
   jobId: string,
   maxCostUsd?: number,
+  stopAfter?: string,
 ): Promise<BuildJob | null> {
   const prior = await getBuildJob(jobId, orgId);
   if (!prior) return null;
@@ -391,6 +407,7 @@ export async function resumeBuildJob(
     // total is always what the ceiling means.
     maxCostUsd: maxCostUsd ?? Number((spent + 2).toFixed(2)),
     resumedFrom: prior.id,
+    stopAfter,
     startedAt: Date.now(),
   });
 }
@@ -398,6 +415,14 @@ export async function resumeBuildJob(
 // ── Helpers ──────────────────────────────────────────────────────────
 function step(job: BuildJob, key: string): BuildStep {
   return job.steps.find(s => s.key === key)!;
+}
+
+/** Entering `key`: if the run was asked to stop after the stage before it,
+ *  stop now — the previous stage's work is in the checkpoint. */
+function guardStop(job: BuildJob, key: string): void {
+  if (!job.stopAfter) return;
+  const i = STEPS.findIndex(([k]) => k === key);
+  if (i > 0 && STEPS[i - 1][0] === job.stopAfter) throw new StagePause(job.stopAfter, STEPS[i - 1][1]);
 }
 
 function guardBudget(job: BuildJob, about: string): void {
@@ -421,6 +446,7 @@ async function stage<T>(
   describe: (value: T) => { detail: string; state?: StepState },
   keep?: (value: T) => void,
 ): Promise<T> {
+  guardStop(job, key);
   const s = step(job, key);
 
   if (cached !== undefined) {
@@ -837,6 +863,7 @@ async function runBuild(job: BuildJob): Promise<void> {
   );
 
   // 7 — gaps
+  guardStop(job, 'gaps');
   let s = step(job, 'gaps');
   s.state = 'running';
   // Normalised on the RESTORE path too, not just when freshly written: a
@@ -938,6 +965,7 @@ async function runBuild(job: BuildJob): Promise<void> {
   // Never short-circuited by the checkpoint: it is the one stage that
   // writes Salesforce records, and a resumed build that skipped it would
   // report success having created nothing.
+  guardStop(job, 'compile');
   s = step(job, 'compile');
   s.state = 'running';
   const compileStartedAt = Date.now();
