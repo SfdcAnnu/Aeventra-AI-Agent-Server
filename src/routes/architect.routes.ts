@@ -18,6 +18,7 @@
  * compiler) writes Archon records only.
  */
 import { Router } from 'express';
+import { buildDetail } from '../architect/build-detail';
 import { z } from 'zod';
 import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
@@ -134,6 +135,18 @@ architectRouter.get('/api/architect/build/:jobId', sessionAuth, async (req, res)
     return;
   }
   res.json(view(job));
+});
+
+// Everything the build has produced so far, stage by stage, for the chat's
+// build workspace: questions, gaps, the design as a preview graph (laid
+// out, not saved), instructions, review, setup list. Read-only.
+architectRouter.get('/api/architect/build/:jobId/detail', sessionAuth, async (req, res) => {
+  const job = await getBuildJob(req.params.jobId, req.orgId!);
+  if (!job) {
+    res.status(404).json({ error: 'build_not_found' });
+    return;
+  }
+  res.json(buildDetail(job));
 });
 
 // ── ✦ Rewrite an instruction, for the model that will run it ─────────
