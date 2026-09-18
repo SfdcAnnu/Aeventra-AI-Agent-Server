@@ -10,32 +10,11 @@
 import { z } from 'zod';
 import { AgentCache } from '../chat/agent-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
-import type { PlatformPrincipal } from './token';
-
-export interface PlatformToolResult {
-  text: string;
-  structured?: Record<string, unknown>;
-  isError?: boolean;
-}
-
-export interface PlatformTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
-  name: string;
-  title: string;
-  description: string;
-  inputSchema: Shape;
-  readOnly: boolean;
-  handler: (args: z.infer<z.ZodObject<Shape>>, principal: PlatformPrincipal) => Promise<PlatformToolResult>;
-}
-
-function define<Shape extends z.ZodRawShape>(t: PlatformTool<Shape>): PlatformTool<z.ZodRawShape> {
-  return t as unknown as PlatformTool<z.ZodRawShape>;
-}
-
-const ok = (structured: Record<string, unknown>, text?: string): PlatformToolResult => ({
-  text: text ?? JSON.stringify(structured, null, 2),
-  structured,
-});
-const fail = (message: string): PlatformToolResult => ({ text: `Error: ${message}`, structured: { error: message }, isError: true });
+import { define, ok, fail, type PlatformTool, type PlatformToolResult } from './tool-kit';
+import { ARCHITECT_TOOLS } from './architect-tools';
+import { INSPECTOR_TOOLS } from './inspector-tools';
+import { AGENT_TOOLS } from './agent-tools';
+export type { PlatformTool, PlatformToolResult };
 
 const listAgents = define({
   name: 'list_agents',
@@ -99,7 +78,7 @@ const agentDetails = define({
   },
 });
 
-export const PLATFORM_TOOLS: PlatformTool[] = [listAgents, agentDetails];
+export const PLATFORM_TOOLS: PlatformTool[] = [listAgents, agentDetails, ...INSPECTOR_TOOLS, ...ARCHITECT_TOOLS, ...AGENT_TOOLS];
 
 export function platformToolCatalogue(): Array<{ name: string; title: string; description: string; readOnly: boolean }> {
   return PLATFORM_TOOLS.map(t => ({ name: t.name, title: t.title, description: t.description, readOnly: t.readOnly }));

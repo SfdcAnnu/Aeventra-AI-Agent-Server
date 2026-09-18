@@ -17,6 +17,7 @@
 import type { Connection } from 'jsforce';
 import { loadAgentDefinition } from '../salesforce/client';
 import type { AgentDefinition } from '../types';
+import { logger } from '../logger';
 
 const TTL_MS = 60_000;
 
@@ -42,6 +43,7 @@ export const AgentCache = {
     if (inflight) return inflight;
 
     const p = loadAgentDefinition(apiName, conn)
+      .then(row => ensureSystemAgent(orgId, apiName, conn, row))
       .then(row => {
         if (row) cache.set(k, { data: row, expiresAt: Date.now() + TTL_MS });
         return row;
@@ -69,3 +71,29 @@ export const AgentCache = {
     pending.clear();
   },
 };
+
+/**
+ * A platform-shipped agent is created in the org the first time it is
+ * asked for, and a managed one is rewritten when the shipped version is
+ * newer than the org's copy — so a fresh org has the copilot on first
+ * use, and a server release updates it without anyone clicking sync.
+ * Imported lazily: the sync module imports this cache.
+ */
+async function ensureSystemAgent(orgId: string, apiName: string, conn: Connection, row: AgentDefinition | null): Promise<AgentDefinition | null> {
+  const { systemAgentSpec } = await import('../platform/agents/registry');
+  const spec = systemAgentSpec(apiName);
+  if (!spec) return row;
+  const managed = spec.managed !== false;
+  const orgVersion = (row?.canvasJson as { system?: { version?: number } } | undefined)?.system?.version ?? 0;
+  const needs = !row || (managed && orgVersion < spec.version);
+  if (!needs) return row;
+  try {
+    const { syncSystemAgent } = await import('../platform/system-agents');
+    const r = await syncSystemAgent(conn, orgId, spec);
+    logger.info({ orgId, apiName, created: r.created, written: r.written, version: spec.version }, 'system_agent_ensured');
+    return await loadAgentDefinition(apiName, conn);
+  } catch (err) {
+    logger.error({ orgId, apiName, err: (err as Error).message }, 'system_agent_ensure_failed');
+    return row;
+  }
+}

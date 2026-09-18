@@ -49,6 +49,12 @@ export interface SystemAgentSpec {
   apiName: string;
   name: string;
   version: number;
+  /** true (default): the platform owns it — re-synced when the version
+   *  changes, read-only on the canvas, cannot be deleted. false: seeded
+   *  once, then the org's own agent to edit, wire and delete. */
+  managed?: boolean;
+  /** 'Org' (default) or 'PerUser'. */
+  accessMode?: 'Org' | 'PerUser';
   department: string;
   description: string;
   root: {
@@ -164,29 +170,55 @@ export interface SyncResult {
   apiName: string;
   nodes: number;
   created: boolean;
+  /** false when an org-owned (unmanaged) agent already existed and was left alone. */
+  written: boolean;
   engine: string;
   model: string;
 }
 
-/** Write (or rewrite) the spec's records in the org. Idempotent. */
+/** Whether this org's AgentDefinition__c has IsSystem__c yet — the field
+ *  ships with the package; an org that has not deployed it still gets
+ *  its agents. Cached per org for the life of the process. */
+const isSystemFieldByOrg = new Map<string, Promise<boolean>>();
+async function hasIsSystemField(conn: Connection): Promise<boolean> {
+  const key = conn.instanceUrl ?? 'default';
+  let p = isSystemFieldByOrg.get(key);
+  if (!p) {
+    p = conn.sobject('AgentDefinition__c').describe().then(d => d.fields.some(f => f.name === 'IsSystem__c')).catch(() => false);
+    isSystemFieldByOrg.set(key, p);
+  }
+  return p;
+}
+
+/** Write (or rewrite) the spec's records in the org. Idempotent. A managed
+ *  spec rewrites the nodes every time (the org's on/off status is kept);
+ *  an unmanaged one is created once and never touched again. */
 export async function syncSystemAgent(conn: Connection, orgId: string, spec: SystemAgentSpec): Promise<SyncResult> {
   const engine = await resolveArchitectEngine(conn);
   const { nodes, connections } = layoutSystemAgent(spec, engine);
+  const managed = spec.managed !== false;
+  const withSystemFlag = await hasIsSystemField(conn);
 
   const existing = await conn.query<{ Id: string }>(
     `SELECT Id FROM AgentDefinition__c WHERE ApiName__c = '${spec.apiName.replace(/'/g, "\\'")}' LIMIT 1`,
   );
   let agentId = existing.records[0]?.Id ?? null;
+  if (agentId && !managed) {
+    logger.info({ orgId, apiName: spec.apiName, agentId }, 'system_agent_left_to_org');
+    return { agentId, apiName: spec.apiName, nodes: 0, created: false, written: false, engine: engine.engineType, model: modelForTier(engine, spec.root.tier) };
+  }
   const defFields: Record<string, unknown> = {
     Name: spec.name,
     ApiName__c: spec.apiName,
     Department__c: spec.department,
-    Description__c: `${spec.description}\n\n[system agent · v${spec.version} · managed by the platform]`,
-    Status__c: 'Active',
+    Description__c: managed ? `${spec.description}\n\n[built-in · v${spec.version} · managed by the platform]` : spec.description,
     ExecuteType__c: 'Chat',
-    AccessMode__c: 'Org',
-    CanvasJson__c: JSON.stringify({ connections, system: { apiName: spec.apiName, version: spec.version } }),
+    AccessMode__c: spec.accessMode ?? 'Org',
+    // `system` in the canvas JSON is what marks the agent read-only for the
+    // builder and the update tool; an org-owned seed carries no marker.
+    CanvasJson__c: JSON.stringify(managed ? { connections, system: { apiName: spec.apiName, version: spec.version } } : { connections }),
     Version__c: spec.version,
+    ...(withSystemFlag ? { IsSystem__c: managed } : {}),
   };
   let created = false;
   if (agentId) {
@@ -194,7 +226,8 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
     const old = await conn.query<{ Id: string }>(`SELECT Id FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`);
     if (old.records.length > 0) await conn.sobject('AgentNode__c').destroy(old.records.map(r => r.Id));
   } else {
-    const ins = await conn.sobject('AgentDefinition__c').insert(defFields);
+    // Status is the org's switch: set once on create, never on re-sync.
+    const ins = await conn.sobject('AgentDefinition__c').insert({ ...defFields, Status__c: 'Active' });
     if (!ins.success) throw new Error('Could not create the system agent record.');
     agentId = ins.id as string;
     created = true;
@@ -217,5 +250,5 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
   AgentCache.invalidate(orgId, spec.apiName);
   forgetProviderUrls();
   logger.info({ orgId, apiName: spec.apiName, agentId, nodes: nodes.length, created, engine: engine.engineType }, 'system_agent_synced');
-  return { agentId: agentId!, apiName: spec.apiName, nodes: nodes.length, created, engine: engine.engineType, model: modelForTier(engine, spec.root.tier) };
+  return { agentId: agentId!, apiName: spec.apiName, nodes: nodes.length, created, written: true, engine: engine.engineType, model: modelForTier(engine, spec.root.tier) };
 }
