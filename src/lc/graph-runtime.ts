@@ -83,6 +83,7 @@ import {
   usageByModel,
   REPEAT_BLOCK_AT,
   BUDGET_TRIPPED_REPLY,
+  partialWorkReport,
   REPEATED_CALL_RESULT,
   type TurnBudget,
 } from './turn-budget';
@@ -324,6 +325,21 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // corrective tool result instead of executing.
     const routerNode = async (state: typeof TurnState.State) => {
       const brake = checkBudget(budget);
+      if (brake && budget.graceLeft > 0) {
+        // A specialist tripped the brake with work in hand (see subNode):
+        // one last call, on the model without tools, so the person gets
+        // that work instead of the generic reply.
+        budget.graceLeft = 0;
+        budget.steps += 1;
+        const wrapUp = (await routerBase.invoke([
+          systemMessage,
+          ...state.messages,
+          new HumanMessage("The turn's budget is spent. Reply to the person now from what you already have: what the specialist completed and what is still open. Do not call tools."),
+        ])) as AIMessage;
+        noteUsage(budget, wrapUp, 'router', modelName);
+        logger.warn({ orgId: req.context.orgId, brake, steps: budget.steps }, 'lc_turn_budget_wrap_up');
+        return new Command({ goto: END, update: { messages: [wrapUp] } });
+      }
       if (brake) {
         budget.tripped = brake;
         logger.warn({ orgId: req.context.orgId, brake, steps: budget.steps, tokensUsed: budget.tokensUsed }, 'lc_turn_budget_tripped');
@@ -728,7 +744,15 @@ async function runSubagentTurn(
       const brake = checkBudget(budget);
       if (brake) {
         budget.tripped = brake;
-        logger.warn({ orgId: req.context.orgId, brake, stage: 'subagent' }, 'lc_turn_budget_tripped');
+        // The specialist may have done the real work (a serialized change, a
+        // fetched describe) and only lacked the call that writes its report.
+        // Hand the root what exists, and let the root answer once more.
+        const partial = partialWorkReport(state.messages.slice(baseMessages.length));
+        logger.warn({ orgId: req.context.orgId, brake, stage: 'subagent', partial: !!partial }, 'lc_turn_budget_tripped');
+        if (partial) {
+          budget.graceLeft = 1;
+          return { messages: [new AIMessage(partial)] };
+        }
         return { messages: [new AIMessage(BUDGET_TRIPPED_REPLY)] };
       }
       budget.steps += 1;
