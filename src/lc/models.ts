@@ -155,11 +155,26 @@ export function buildChatModel(
     case 'openai': {
       const reasoningEra = NEEDS_MAX_COMPLETION_TOKENS.test(modelName);
 
-      // Responses-only models take the library's own typed options. Passing
-      // chat-completions kwargs (max_completion_tokens, response_format)
-      // through to /v1/responses would be rejected, so this path stays
-      // separate rather than bolting onto the branch below.
-      if (RESPONSES_API_ONLY.test(modelName)) {
+      // The Responses API path. Two kinds of node take it:
+      //  - -pro models, which chat-completions does not serve at all;
+      //  - reasoning-era models with an explicit effort (Thinking: Deep or
+      //    Off). OpenAI stopped accepting `reasoning_effort` together with
+      //    function tools on /v1/chat/completions — live: the Metadata
+      //    Expert's Flow Specialist (gpt-5.5, Deep) failed with 400
+      //    "Function tools with reasoning_effort are not supported for
+      //    gpt-5.5 in /v1/chat/completions. To use function tools, use
+      //    /v1/responses". Every node here may be handed tools, so the
+      //    effort goes through the endpoint that accepts both.
+      // Chat-completions kwargs (max_completion_tokens, response_format)
+      // would be rejected by /v1/responses, so this path builds its own:
+      // the reasoning block and the JSON format go in as raw Responses
+      // params, because the library only recognises o-series names as
+      // reasoning models and would silently drop `reasoningEffort` for
+      // gpt-5.x (its isReasoningModel is /^o\d/).
+      if (RESPONSES_API_ONLY.test(modelName) || (reasoningEra && options.reasoningEffort)) {
+        const responsesKwargs: Record<string, unknown> = {};
+        if (options.reasoningEffort) responsesKwargs.reasoning = { effort: options.reasoningEffort };
+        if (options.jsonMode) responsesKwargs.text = { format: { type: 'json_object' } };
         model = new ChatOpenAI({
           model: modelName,
           apiKey: creds.apiKey,
@@ -167,7 +182,7 @@ export function buildChatModel(
           // Reasoning shares this budget with the visible answer, same as
           // the chat-completions reasoning path — give thinking headroom.
           maxTokens: maxTokens + reasoningHeadroom(options.reasoningEffort),
-          ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+          ...(Object.keys(responsesKwargs).length > 0 ? { modelKwargs: responsesKwargs } : {}),
           configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
         });
         break;
@@ -180,8 +195,9 @@ export function buildChatModel(
         // entirely on thinking and return empty content (live-confirmed on
         // gpt-5.5: the Flow Designer came back with nothing). Give the
         // thinking its own headroom on top of the caller's cap.
+        // No reasoning_effort here: a reasoning-era node with an explicit
+        // effort took the Responses path above.
         kwargs.max_completion_tokens = maxTokens + reasoningHeadroom(options.reasoningEffort);
-        if (options.reasoningEffort) kwargs.reasoning_effort = options.reasoningEffort;
       }
       if (options.jsonMode) kwargs.response_format = { type: 'json_object' };
       model = new ChatOpenAI({
