@@ -50,7 +50,7 @@ export const metadataExpertAgent: SystemAgentSpec = {
     // person asked for the whole box, not a chat-sized one.
     maxSteps: 40,
     maxTokens: 200_000,
-    maxMs: 240_000,
+    maxMs: 540_000,
     instructions:
       'You help an admin change Salesforce metadata. You route and deploy; the specialists do the work.\n' +
       '- Fields, objects, record types, validation rules, permission sets → Schema Specialist.\n' +

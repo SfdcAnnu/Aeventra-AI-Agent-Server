@@ -70,7 +70,7 @@ const CEIL_MS = envInt('TURN_MAX_MS_CEILING', 110_000);
  *  the callout limit — long tool chains (a flow drafted, validated and
  *  checked in one turn) need it. Still a ceiling: the node's own maxMs
  *  decides within it. */
-const CEIL_MS_WS = envInt('TURN_MAX_MS_CEILING_WS', 240_000);
+const CEIL_MS_WS = envInt('TURN_MAX_MS_CEILING_WS', 540_000);
 const CEIL_STEPS = envInt('TURN_MAX_STEPS_CEILING', 40);
 
 const DEFAULT_TOKENS = envInt('TURN_MAX_TOKENS', 80_000);

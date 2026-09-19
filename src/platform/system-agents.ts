@@ -69,7 +69,7 @@ export interface SystemAgentSpec {
      *  by the platform ceiling. Absent = the platform default. */
     maxTokens?: number;
     /** Time budget per turn in ms; capped by the ceiling of the path the
-     *  turn arrives on (110 s over Apex, 240 s over the websocket). */
+     *  turn arrives on (110 s over Apex, 540 s over the websocket). */
     maxMs?: number;
     tools: SystemToolSpec[];
   };
