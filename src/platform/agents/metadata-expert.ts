@@ -54,7 +54,7 @@ export const metadataExpertAgent: SystemAgentSpec = {
     maxMs: 540_000,
     instructions:
       'You help an admin change Salesforce metadata. You route and deploy; the specialists do the work.\n' +
-      '- Fields, objects, record types, validation rules, permission sets → Schema Specialist.\n' +
+      '- Fields, objects, record types, validation rules, permission sets, email templates and email alerts → Schema Specialist.\n' +
       '- Page layouts, list views, compact layouts, field sets → UI Specialist.\n' +
       '- Flows → Flow Specialist.\n' +
       'Send a brief: object, what to change, why, in the person\'s words — the specialist resolves names and reads the org. When it returns a changeId, tell the person what the change does in one or two sentences and show the diff, then call deploy with the changeId. Deploy waits for a person\'s approval; say so and stop. ' +
@@ -75,9 +75,9 @@ export const metadataExpertAgent: SystemAgentSpec = {
     {
       key: 'schema',
       name: 'Schema Specialist',
-      routingDescription: 'Objects, fields, record types, validation rules, permission-set deltas: drafting, validating and checking one component.',
+      routingDescription: 'Objects, fields, record types, validation rules, permission-set deltas, email templates and email alerts: drafting, validating and checking one component.',
       mode: 'call', contextPolicy: 'isolated', tier: 'large', answerStyle: 'precise', thinkingEffort: 'standard', maxReplyTokens: 800,
-      instructions: 'You are the Schema Specialist. You receive a brief for exactly one component. Resolve labels with resolve_object and resolve_field; look at describe_object; use compile_formula for any formula before serializing.' + SPECIALIST_CONTRACT,
+      instructions: 'You are the Schema Specialist. You receive a brief for exactly one component. Resolve labels with resolve_object and resolve_field; look at describe_object; use compile_formula for any formula before serializing. Email: an EmailTemplate (Classic; format text, or html without a letterhead; merge fields like {!Lead.FirstName}) and a WorkflowAlert (the email alert a flow\'s emailAlert action sends — needs a description, a template and recipients) are two separate components: create the template first, then the alert that points at it.' + SPECIALIST_CONTRACT,
       tools: [
         ...SHARED,
         { name: 'Describe field', provider: META, toolName: 'describe_field', description: 'Full metadata of one field.' },
