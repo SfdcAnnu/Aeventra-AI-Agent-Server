@@ -166,6 +166,15 @@ export async function recordWsTurn(
   userText: string,
   result: ChatTurnResult,
 ): Promise<number> {
+  // Rows can land between turns (an approval decision is audited into the
+  // transcript), so the sequence continues from what is really there,
+  // never from a counter kept since the socket opened.
+  try {
+    const last = await conn.query<{ SequenceNumber__c: number }>(
+      `SELECT SequenceNumber__c FROM ChatMessage__c WHERE ChatSession__c = '${sessionId.replace(/[^A-Za-z0-9]/g, '')}' ORDER BY SequenceNumber__c DESC LIMIT 1`,
+    );
+    seqStart = Math.max(seqStart, (last.records[0]?.SequenceNumber__c ?? 0) + 1);
+  } catch { /* the counter is the fallback */ }
   // A continuation turn (the one after an approved action ran) has no
   // user text — the transcript goes tool result, then the reply.
   const rows: Array<Record<string, unknown>> = userText
