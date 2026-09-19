@@ -65,6 +65,9 @@ export interface SystemAgentSpec {
     maxReplyTokens?: number;
     parallelTools?: boolean;
     maxSteps?: number;
+    /** Token budget for a whole turn, root and specialists together; capped
+     *  by the platform ceiling. Absent = the platform default. */
+    maxTokens?: number;
     tools: SystemToolSpec[];
   };
   subagents: SystemSubagentSpec[];
@@ -115,7 +118,7 @@ export function layoutSystemAgent(spec: SystemAgentSpec, engine: ArchitectEngine
       maxReplyTokens: spec.root.maxReplyTokens,
       parallelTools: spec.root.parallelTools ?? false,
       customerFacing: false,
-      budgets: { maxSteps: spec.root.maxSteps ?? 40, maxMs: 110_000 },
+      budgets: { maxSteps: spec.root.maxSteps ?? 40, maxMs: 110_000, ...(spec.root.maxTokens ? { maxTokens: spec.root.maxTokens } : {}) },
       system: true,
       specVersion: spec.version,
     },
