@@ -110,6 +110,27 @@ dialog.confirm .scope div:last-child{border-bottom:0}
 dialog.confirm .sk{color:var(--ink-faint)}
 dialog.confirm footer{display:flex;gap:8px;justify-content:flex-end;padding:12px 16px;border-top:1px solid var(--rule);background:var(--raised)}
 .empty{padding:22px 13px;color:var(--ink-dim);font-size:12.5px;text-align:center}
+/* ?trace=<id> opens one turn on its own: no filters, no list, the detail
+   full width and every payload at full height. ?step=<n> narrows it to one
+   model or tool call, request and response side by side, each scrolling on
+   its own — the view to open in a second tab while reading the transcript. */
+.rowwrap{display:grid;grid-template-columns:1fr auto;align-items:center;border-bottom:1px solid var(--rule)}
+.rowwrap .row{border-bottom:0}
+.rowlink{font:600 12px/1 "IBM Plex Sans",sans-serif;color:var(--accent);text-decoration:none;padding:10px 12px;border-radius:4px}
+.rowlink:hover{background:var(--raised)}
+.topbtn{font:600 11px/1 "IBM Plex Sans",sans-serif;padding:7px 10px;border-radius:5px;background:var(--raised);color:var(--accent);border:1px solid var(--rule);text-decoration:none;white-space:nowrap}
+.topbtn:hover{border-color:var(--accent)}
+.step .fs{font:600 10px/1 "IBM Plex Sans",sans-serif;letter-spacing:.04em;text-transform:uppercase;color:var(--accent);text-decoration:none;padding:3px 6px;border:1px solid var(--rule);border-radius:3px;background:var(--surface)}
+.step .fs:hover{border-color:var(--accent)}
+body.full .filters,body.full .stats,body.full #list,body.full .sub{display:none}
+body.full .wrap{max-width:none;padding:14px 18px 40px}
+body.full .panes{grid-template-columns:minmax(0,1fr)}
+body.full .payload pre,body.full .parts,body.full .part pre{max-height:none}
+body.step .payloads{grid-template-columns:1fr 1fr;padding:10px 13px 16px}
+body.step .payload pre{height:calc(100vh - 330px);min-height:320px;max-height:none;font-size:12px}
+body.step .parts{height:calc(100vh - 330px);min-height:320px;overflow-y:auto}
+body.step .part pre{max-height:none}
+@media(max-width:900px){body.step .payloads{grid-template-columns:1fr}body.step .payload pre,body.step .parts{height:auto;max-height:60vh}}
 </style></head><body><div class="wrap">
 <div class="masthead"><h1>Agent Flight Recorder</h1><span class="eyebrow" id="scope">Internal · all orgs</span></div>
 <p class="sub">Every model call and tool call, with the exact body sent and the exact body returned.
@@ -129,10 +150,10 @@ Nothing is written while a customer waits. <span id="retention"></span></p>
 <section class="stats" id="stats"></section>
 
 <div class="panes">
-<section class="panel"><header><h2>Turns</h2><span class="note" id="count"></span>
+<section class="panel" id="list"><header><h2>Turns</h2><span class="note" id="count"></span>
 <button type="button" class="danger" id="purge" disabled>Delete matching</button></header>
 <div class="rows" id="rows"><div class="empty">Loading…</div></div></section>
-<section class="panel"><header><h2 id="dtitle">Turn detail</h2><span class="note mono" id="dnote"></span></header>
+<section class="panel"><header><h2 id="dtitle">Turn detail</h2><span class="note mono" id="dnote"></span><a id="dback" class="topbtn" hidden>← All turns</a><a id="dopen" class="topbtn" target="_blank" rel="noopener" hidden>Open in new tab ↗</a></header>
 <div class="meta" id="meta"></div><div id="steps"><div class="empty">Select a turn.</div></div></section>
 </div></div>
 
@@ -144,7 +165,11 @@ Nothing is written while a customer waits. <span id="retention"></span></p>
 <button type="button" class="danger" id="dlg-go">Delete</button></footer></dialog>
 
 <script>
-const KEY = new URLSearchParams(location.search).get('key') || '';
+const Q = new URLSearchParams(location.search);
+const KEY = Q.get('key') || '';
+// Deep links: one turn on its own (?trace=), or one of its steps (&step=).
+const TRACE = Q.get('trace'); const STEP = Q.get('step');
+const href = (id, step) => location.pathname + '?key=' + encodeURIComponent(KEY) + '&trace=' + encodeURIComponent(id) + (step != null ? '&step=' + step : '');
 const KIND = {instructions:['--accent','Agent instructions'],mechanics:['--ink-faint','Runtime mechanics'],
 clock:['--ink-faint','Current date and time'],kb:['--violet','Knowledge base'],record:['--ok','Record context'],
 memory:['--warn','Session memory'],tools:['--crit','Tools bound'],history:['--ink-dim','Conversation history'],
@@ -194,13 +219,14 @@ function renderRows(list){
   $('rows').innerHTML=list.map(t=>{
     const sev=t.status==='error'?'crit':(t.errorMessage?'warn':'ok');
     const when=new Date(t.createdAt).toLocaleString();
-    return '<button class="row" data-id="'+t.id+'" aria-current="'+(t.id===CURRENT)+'">'+
+    return '<div class="rowwrap"><button class="row" data-id="'+t.id+'" aria-current="'+(t.id===CURRENT)+'">'+
       '<span class="stripe" style="background:var(--'+(sev==='ok'?'ok':sev==='warn'?'warn':'crit')+')"></span>'+
       '<span class="who"><span class="line1"><span class="agent">'+esc(t.agentName||t.agentApiName)+'</span>'+
       (t.status==='error'?pill('crit','error'):pill('ok','ok'))+'<span class="pill plain">'+esc(t.channel)+'</span></span>'+
       '<span class="line2 mono">'+when+' · '+esc(t.userId||'—')+'</span></span>'+
       '<span class="right"><span class="lat num mono">'+ms(t.latencyMs)+'</span><br>'+
-      '<span class="tok num mono">'+t.tokensIn.toLocaleString()+' / '+t.tokensOut.toLocaleString()+'</span></span></button>';
+      '<span class="tok num mono">'+t.tokensIn.toLocaleString()+' / '+t.tokensOut.toLocaleString()+'</span></span></button>'+
+      '<a class="rowlink" href="'+href(t.id)+'" target="_blank" rel="noopener" title="Open this turn full screen in a new tab">↗</a></div>';
   }).join('');
   $('rows').querySelectorAll('.row').forEach(b=>b.addEventListener('click',()=>open(b.dataset.id)));
 }
@@ -228,7 +254,9 @@ async function open(id){
   const r=await api('/api/admin/traces/'+id);
   if(!r.ok){$('steps').innerHTML='<div class="empty">Could not load that turn.</div>';return}
   const {trace:t}=await r.json();
-  $('dtitle').textContent=(t.agentName||t.agentApiName)+' · '+new Date(t.createdAt).toLocaleString();
+  $('dopen').href=href(id); $('dopen').hidden=false;
+  if(STEP!=null&&t.steps){const n=+STEP; t.steps=t.steps[n]?[t.steps[n]]:[]; t._stepNo=n+1;}
+  $('dtitle').textContent=(t.agentName||t.agentApiName)+' · '+new Date(t.createdAt).toLocaleString()+(t._stepNo?' · step '+t._stepNo:'');
   $('dnote').textContent=t.id.slice(0,8);
   $('meta').innerHTML=[['Org',t.orgId],['User ID',t.userId||'—'],['Session',t.sessionId||'—'],
     ['Record',t.recordId||'—'],['Channel',t.channel],['Latency',ms(t.latencyMs)],
@@ -249,10 +277,12 @@ async function open(id){
   const max=Math.max(...t.steps.map(s=>s.latencyMs||0),1);
   $('steps').innerHTML=t.steps.map((s,i)=>{
     const hasParts=Array.isArray(s.requestParts)&&s.requestParts.length>0;
+    const stepNo=t._stepNo?t._stepNo-1:i;
     return '<details class="step"'+(i===0?' open':'')+'><summary>'+
-      '<span class="seq mono">'+String(i+1).padStart(2,'0')+'</span><span>'+
+      '<span class="seq mono">'+String(stepNo+1).padStart(2,'0')+'</span><span>'+
       '<span class="title"><span class="mono">'+esc(s.name)+'</span>'+
-      pill('plain',s.kind==='model_call'?'model call':'tool call')+(s.isError?pill('crit','failed'):'')+'</span>'+
+      pill('plain',s.kind==='model_call'?'model call':'tool call')+(s.isError?pill('crit','failed'):'')+
+      (STEP==null?'<a class="fs" href="'+href(id,stepNo)+'" title="Request and response side by side, full height, in a new tab">Full screen ↗</a>':'')+'</span>'+
       '<span class="subtitle">stage: '+esc(s.stage)+(s.tokensIn?' · '+s.tokensIn.toLocaleString()+' / '+s.tokensOut.toLocaleString()+' tokens':'')+
       (s.cacheRead?' · '+s.cacheRead.toLocaleString()+' cached':'')+'</span>'+
       '<span class="bar" style="margin-top:5px"><i style="width:'+Math.round((s.latencyMs||0)/max*100)+'%"></i></span></span>'+
@@ -265,6 +295,8 @@ async function open(id){
       '</div><div class="payload"><h4><span>Response received</span><span>'+(s.isError?'⚠ error':'← provider')+'</span></h4>'+
       '<pre>'+esc(s.error?s.error+'\\n\\n'+j(s.responseJson):j(s.responseJson))+'</pre></div></div></details>';
   }).join('');
+  // The full-screen link sits inside a <summary>: stop the click from also toggling the step.
+  $('steps').querySelectorAll('.fs').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();window.open(a.href,'_blank','noopener')}));
   $('steps').querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{
     const b=e.target.closest('button'); if(!b)return;
     seg.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));
@@ -298,6 +330,11 @@ $('dlg-go').addEventListener('click',async()=>{
 });
 const since=new Date(Date.now()-24*3600*1000); since.setSeconds(0,0);
 $('f-from').value=new Date(since.getTime()-since.getTimezoneOffset()*60000).toISOString().slice(0,16);
-load();
+if(TRACE){
+  // A deep link: the turn alone, full width; with &step= just that call.
+  document.body.classList.add('full'); if(STEP!=null)document.body.classList.add('step');
+  $('dback').href=location.pathname+'?key='+encodeURIComponent(KEY); $('dback').hidden=false;
+  open(TRACE);
+} else load();
 </script></body></html>`;
 }
