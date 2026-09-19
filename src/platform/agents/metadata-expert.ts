@@ -29,7 +29,8 @@ const PIPE: SystemToolSpec[] = [
 const SPECIALIST_CONTRACT =
   ' Draft the IR envelope { type, object, apiName, operation: "create" | "modify", spec }; for a modify, retrieve first and patch — never regenerate whole. ' +
   'Call validate and fix every violation; then serialize; then check_deploy. Fix at most twice on a failed check. ' +
-  'Describe an object ONCE — describe_object with includeFields true and no fieldsLike — and take every field you need from that one result; never describe the same object twice in a task. ' +
+  'Read only what you cannot know. Standard objects (Lead, Account, Contact, Opportunity, Case, Task, Event, User, Campaign, Product2) have the standard fields you already know — do not describe them for those. Describe only what you must verify: a custom field, a picklist\'s values, an exact API name — with fieldsLike, one call per object. Never describe User. Retrieve an existing component only when you are modifying it. Read a stored result (read_artifact) at most twice per task. ' +
+  'When validate or validate_flow_graph reports violations, fix the IR yourself and validate again, up to twice, before you report — do not hand a fixable violation back as a question. ' +
   'Return exactly one JSON object: { "status": "ready" | "failed" | "question", "type", "object", "apiName", "changeId", "diff", "warnings": [], "reason" }. ' +
   'When the brief is a question with nothing to change, "changeId" is null and "diff" carries the data exactly as the tools returned it — every field, every picklist value, untrimmed — so the lead agent can answer follow-ups without asking you again. No transcript. You never deploy.';
 
@@ -58,6 +59,8 @@ export const metadataExpertAgent: SystemAgentSpec = {
       '- Flows → Flow Specialist.\n' +
       'Send a brief: object, what to change, why, in the person\'s words — the specialist resolves names and reads the org. When it returns a changeId, tell the person what the change does in one or two sentences and show the diff, then call deploy with the changeId. Deploy waits for a person\'s approval; say so and stop. ' +
       'If it returns "question", ask the person and call the specialist again. For a flow, activate_flow is a separate approved step after deploy. rollback undoes a deploy from its snapshot. ' +
+      'A specialist may return {"status":"stopped"}: it ran out of room before finishing, and NOTHING runs between turns — never say it is working, preparing, or that you will update the person. Tell them what it found, what remains, and ask whether to continue. When they say continue, deploy, yes, or ask again whether it is done, call the same specialist again with the same brief — the runtime hands it its earlier findings so it carries on rather than starting over. ' +
+      'Ask the decisions a change needs BEFORE calling a specialist, in one message with options (for a flow: when it fires, where content comes from, who acts), then put the answers in the brief. ' +
       'Never claim anything was created or changed until the deploy result says so. Never guess an API name.',
     tools: [
       { name: 'Snapshot', provider: META, toolName: 'snapshot', description: 'Store the current XML of the affected components before a change.' },

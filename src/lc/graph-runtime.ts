@@ -42,6 +42,7 @@ import {
 } from '@langchain/core/messages';
 import { z } from 'zod';
 import { logger } from '../logger';
+import { rememberScratch, recallScratch, clearScratch, withScratch } from './specialist-scratch';
 import { InstallsRepo } from '../db/installs.repo';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
@@ -278,15 +279,24 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           turnFlags.activeCalls += 1;
           try {
             const policy = (subagentNode.config as { contextPolicy?: string })?.contextPolicy;
+            // A specialist stopped earlier in this conversation continues
+            // from what it found, rather than reading the org again.
+            const briefed = withScratch(task, recallScratch(req.sessionId, subagentNode.id));
             const out = await runSubagentTurn(
               req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
-              buildCallContext(policy, task), budget,
+              buildCallContext(policy, briefed), budget,
             );
             if (turnHasWrite(out.messages)) turnFlags.childWrote = true;
             if (out.toolCalls?.length) {
               nestedCalls.push({ callId: (config as { toolCall?: { id?: string } } | undefined)?.toolCall?.id, name: c.name, calls: out.toolCalls });
             }
             const text = lastAssistantText(out.messages) || '(the specialist produced no result)';
+            if (/^\s*\{\s*"status"\s*:\s*"stopped"/.test(text)) {
+              const full = partialWorkReport(out.messages, { reason: budget.tripped ?? 'turn_budget', full: true });
+              if (full) rememberScratch(req.sessionId, subagentNode.id, full);
+            } else {
+              clearScratch(req.sessionId, subagentNode.id);
+            }
             return spillIfLarge(c.name, text);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -334,7 +344,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         const wrapUp = (await routerBase.invoke([
           systemMessage,
           ...state.messages,
-          new HumanMessage("The turn's budget is spent. Reply to the person now from what you already have: what the specialist completed and what is still open. Do not call tools."),
+          new HumanMessage("The specialist was stopped by the turn budget and nothing is running now. Reply to the person plainly: what the specialist found (from its stopped result), what remains, and ask whether to continue. Never say it is still working or that you will update them. Do not call tools."),
         ])) as AIMessage;
         noteUsage(budget, wrapUp, 'router', modelName);
         logger.warn({ orgId: req.context.orgId, brake, steps: budget.steps }, 'lc_turn_budget_wrap_up');
@@ -747,7 +757,7 @@ async function runSubagentTurn(
         // The specialist may have done the real work (a serialized change, a
         // fetched describe) and only lacked the call that writes its report.
         // Hand the root what exists, and let the root answer once more.
-        const partial = partialWorkReport(state.messages.slice(baseMessages.length));
+        const partial = partialWorkReport(state.messages.slice(baseMessages.length), { reason: brake });
         logger.warn({ orgId: req.context.orgId, brake, stage: 'subagent', partial: !!partial }, 'lc_turn_budget_tripped');
         if (partial) {
           budget.graceLeft = 1;
