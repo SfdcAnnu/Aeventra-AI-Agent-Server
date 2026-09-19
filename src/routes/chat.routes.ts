@@ -16,6 +16,7 @@ import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { runChatTurn } from '../chat/chat-engine';
 import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
+import { recordApprovalDecision, userDisplayNames } from '../salesforce/approval-audit';
 import { executeApprovedAction } from '../chat/approval-executor';
 
 export const chatRouter = Router();
@@ -132,7 +133,9 @@ chatRouter.get('/api/chat/approvals', sessionAuth, async (req, res) => {
       status: typeof req.query.status === 'string' ? req.query.status : undefined,
       sessionId: typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined,
     });
-    res.json({ approvals });
+    // The decider by name, for the card and the queue — ids identify, names read.
+    const byId = await userDisplayNames(orgId, approvals.map(a => a.decidedBy));
+    res.json({ approvals: approvals.map(a => ({ ...a, decidedByName: a.decidedBy ? byId[a.decidedBy] ?? null : null })) });
   } catch (err) {
     logger.error({ err, orgId }, 'chat_approvals_list_failed');
     res.status(500).json({ error: 'chat_approvals_list_failed' });
@@ -170,17 +173,20 @@ chatRouter.post('/api/chat/approvals/decide', sessionAuth, async (req, res) => {
     }
     if (decision === 'rejected') {
       logger.info({ orgId, approvalId, tool: row.toolName }, 'chat_approval_rejected');
+      void recordApprovalDecision(row, 'rejected', deciderUserId, { status: 'Rejected' });
       res.json({ status: 'Rejected' });
       return;
     }
     try {
       const resultText = await executeApprovedAction(row);
       await ChatApprovalsRepo.recordExecution(approvalId, true, resultText);
+      void recordApprovalDecision(row, 'approved', deciderUserId, { status: 'Executed', resultText });
       res.json({ status: 'Executed', resultText: resultText.slice(0, 2000) });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ orgId, approvalId, tool: row.toolName, err: msg }, 'chat_approval_execute_failed');
       await ChatApprovalsRepo.recordExecution(approvalId, false, msg);
+      void recordApprovalDecision(row, 'approved', deciderUserId, { status: 'Failed', resultText: msg });
       res.json({ status: 'Failed', error: msg.slice(0, 500) });
     }
   } catch (err) {
