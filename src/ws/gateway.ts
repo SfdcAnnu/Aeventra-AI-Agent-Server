@@ -173,6 +173,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
     try {
       result = await runChatTurn({
       agent,
+      transport: 'ws',
       sessionId: ctx.sessionId,
       history:   parsed.data.history,
       newUserMessage: parsed.data.newUserMessage,

@@ -68,6 +68,9 @@ export interface SystemAgentSpec {
     /** Token budget for a whole turn, root and specialists together; capped
      *  by the platform ceiling. Absent = the platform default. */
     maxTokens?: number;
+    /** Time budget per turn in ms; capped by the ceiling of the path the
+     *  turn arrives on (110 s over Apex, 240 s over the websocket). */
+    maxMs?: number;
     tools: SystemToolSpec[];
   };
   subagents: SystemSubagentSpec[];
@@ -118,7 +121,7 @@ export function layoutSystemAgent(spec: SystemAgentSpec, engine: ArchitectEngine
       maxReplyTokens: spec.root.maxReplyTokens,
       parallelTools: spec.root.parallelTools ?? false,
       customerFacing: false,
-      budgets: { maxSteps: spec.root.maxSteps ?? 40, maxMs: 110_000, ...(spec.root.maxTokens ? { maxTokens: spec.root.maxTokens } : {}) },
+      budgets: { maxSteps: spec.root.maxSteps ?? 40, maxMs: spec.root.maxMs ?? 110_000, ...(spec.root.maxTokens ? { maxTokens: spec.root.maxTokens } : {}) },
       system: true,
       specVersion: spec.version,
     },
