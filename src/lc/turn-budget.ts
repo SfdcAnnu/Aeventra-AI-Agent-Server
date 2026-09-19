@@ -233,21 +233,38 @@ export const REPEATED_CALL_RESULT =
   'the conversation, take a different action, or give your final answer now.';
 
 /**
- * What a specialist had in hand when the brake fell: the tools it ran and
- * its last results, for the root to report instead of the generic reply.
- * Null when nothing ran — then there is nothing worth reporting.
+ * What a specialist had in hand when the brake fell, for the root to act
+ * on rather than the generic reply. Structured, so the root's rules can
+ * recognise it (`status: "stopped"`) instead of reading prose. Null when
+ * nothing ran — then there is nothing worth reporting.
+ *
+ * Two sizes: the short one goes back to the root as the tool result and
+ * stays under the artifact spill limit; the full one is kept for the
+ * session so a re-dispatch of the same specialist continues from it
+ * instead of reading everything again (see lc/specialist-scratch.ts).
  *
  * Live: the Flow Specialist resolved, validated and serialized a flow in
  * 20 tool calls and was stopped on the call that would have written its
  * report; the whole turn ended as "our team will follow up".
  */
-export function partialWorkReport(messages: BaseMessage[]): string | null {
+export function partialWorkReport(
+  messages: BaseMessage[],
+  opts: { reason?: string; full?: boolean } = {},
+): string | null {
   const results = messages.filter((m): m is ToolMessage => m instanceof ToolMessage);
   if (!results.length) return null;
-  const names = [...new Set(results.map(r => r.name ?? 'tool'))];
-  const tail = results.slice(-3).map(r => {
+  const clip = opts.full ? 2_000 : 450;
+  const keep = opts.full ? 12 : 3;
+  const toolsRun = [...new Set(results.map(r => r.name ?? 'tool'))];
+  const findings = results.slice(-keep).map(r => {
     const text = typeof r.content === 'string' ? r.content : JSON.stringify(r.content);
-    return `${r.name ?? 'tool'}: ${text.length > 1500 ? `${text.slice(0, 1500)} …` : text}`;
+    return { tool: r.name ?? 'tool', result: text.length > clip ? `${text.slice(0, clip)} …` : text };
   });
-  return `STOPPED BY THE TURN BUDGET before writing a report. Tools run: ${names.join(', ')}. Last results:\n${tail.join('\n')}`;
+  return JSON.stringify({
+    status: 'stopped',
+    reason: opts.reason ?? 'turn_budget',
+    toolsRun,
+    findings,
+    remaining: 'The specialist was stopped before it wrote its report. Nothing is running now; call it again to continue from these findings.',
+  });
 }

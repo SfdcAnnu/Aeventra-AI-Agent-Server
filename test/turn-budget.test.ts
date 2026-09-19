@@ -19,12 +19,17 @@ describe('partialWorkReport', () => {
       new ToolMessage({ tool_call_id: '3', name: 'validate', content: '{"ok":true}' }),
       new ToolMessage({ tool_call_id: '4', name: 'serialize', content: '{"changeId":"chg_1"}' }),
     ];
-    const r = partialWorkReport(msgs)!;
-    expect(r).toMatch(/^STOPPED BY THE TURN BUDGET/);
-    expect(r).toContain('Tools run: resolve_object, describe_object, validate, serialize');
-    expect(r).toContain('serialize: {"changeId":"chg_1"}');
-    expect(r).not.toContain('resolve_object: {'); // only the last three results
-    expect(r.length).toBeLessThan(3000);
+    const r = JSON.parse(partialWorkReport(msgs, { reason: 'token_budget' })!) as { status: string; reason: string; toolsRun: string[]; findings: Array<{ tool: string; result: string }> };
+    expect(r.status).toBe('stopped');
+    expect(r.reason).toBe('token_budget');
+    expect(r.toolsRun).toEqual(['resolve_object', 'describe_object', 'validate', 'serialize']);
+    expect(r.findings.map(f => f.tool)).toEqual(['describe_object', 'validate', 'serialize']); // the last three
+    expect(r.findings[2].result).toBe('{"changeId":"chg_1"}');
+    expect(r.findings[0].result.length).toBeLessThan(600); // clipped for the root
+    expect(JSON.stringify(r).length).toBeLessThan(2000); // never spilled to an artifact
+    const full = JSON.parse(partialWorkReport(msgs, { full: true })!) as { findings: Array<{ result: string }> };
+    expect(full.findings).toHaveLength(4);
+    expect(full.findings[1].result.length).toBeGreaterThan(1500); // kept for the re-dispatch
   });
   it('a fresh budget has no grace call', () => {
     expect(createTurnBudget({}).graceLeft).toBe(0);
