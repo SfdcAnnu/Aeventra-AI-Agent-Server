@@ -29,4 +29,11 @@ describe('partialWorkReport', () => {
   it('a fresh budget has no grace call', () => {
     expect(createTurnBudget({}).graceLeft).toBe(0);
   });
+  it('a websocket turn may run past the Apex callout limit; an HTTP turn may not', () => {
+    const cfg = { budgets: { maxMs: 240_000 } };
+    const http = createTurnBudget(cfg).deadlineAt - Date.now();
+    const ws = createTurnBudget(cfg, { transport: 'ws' }).deadlineAt - Date.now();
+    expect(http).toBeLessThanOrEqual(110_000);
+    expect(ws).toBeGreaterThan(200_000);
+  });
 });

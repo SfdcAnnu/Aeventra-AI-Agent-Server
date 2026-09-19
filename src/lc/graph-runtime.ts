@@ -162,7 +162,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // Phase-1 safety rails (lc/turn-budget.ts): token/time/step budgets and
   // the identical-call loop detector, shared across the WHOLE turn (router,
   // subagent, corrective passes). Checked BEFORE spending, not after.
-  const budget = createTurnBudget(aiNode.config);
+  const budget = createTurnBudget(aiNode.config, { transport: req.transport });
 
   // Internal flight recorder. Off unless TRACE_CAPTURE=full, and even when
   // on it only pushes to an array during the turn — everything expensive

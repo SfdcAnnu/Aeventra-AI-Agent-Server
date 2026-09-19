@@ -66,6 +66,11 @@ const envInt = (name: string, fallback: number): number => {
 // the time ceiling stays under Apex's 120s callout timeout.
 const CEIL_TOKENS = envInt('TURN_MAX_TOKENS_CEILING', 200_000);
 const CEIL_MS = envInt('TURN_MAX_MS_CEILING', 110_000);
+/** A websocket turn has no Apex caller waiting on it, so it may run past
+ *  the callout limit — long tool chains (a flow drafted, validated and
+ *  checked in one turn) need it. Still a ceiling: the node's own maxMs
+ *  decides within it. */
+const CEIL_MS_WS = envInt('TURN_MAX_MS_CEILING_WS', 240_000);
 const CEIL_STEPS = envInt('TURN_MAX_STEPS_CEILING', 40);
 
 const DEFAULT_TOKENS = envInt('TURN_MAX_TOKENS', 80_000);
@@ -76,14 +81,15 @@ const DEFAULT_STEPS = envInt('TURN_MAX_STEPS', 24);
 export const REPEAT_BLOCK_AT = 2;   // 3rd identical call is blocked
 const REPEAT_TRIP_AT = 5;           // persistent repetition ends the turn
 
-export function createTurnBudget(rootNodeConfig: unknown): TurnBudget {
+export function createTurnBudget(rootNodeConfig: unknown, opts: { transport?: 'http' | 'ws' } = {}): TurnBudget {
+  const ceilMs = opts.transport === 'ws' ? CEIL_MS_WS : CEIL_MS;
   const cfg = ((rootNodeConfig ?? {}) as { budgets?: { maxTokens?: unknown; maxMs?: unknown; maxSteps?: unknown } }).budgets ?? {};
   const pick = (v: unknown, fallback: number, ceiling: number): number => {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? Math.min(n, ceiling) : Math.min(fallback, ceiling);
   };
   return {
-    deadlineAt: Date.now() + pick(cfg.maxMs, DEFAULT_MS, CEIL_MS),
+    deadlineAt: Date.now() + pick(cfg.maxMs, DEFAULT_MS, ceilMs),
     maxTokens: pick(cfg.maxTokens, DEFAULT_TOKENS, CEIL_TOKENS),
     maxSteps: pick(cfg.maxSteps, DEFAULT_STEPS, CEIL_STEPS),
     tokensUsed: 0,

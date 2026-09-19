@@ -62,6 +62,10 @@ export interface ChatTurnRequest {
   /** The turn that follows an approved action: newUserMessage is empty and
    *  the runtime runs on the shared continuation text instead (connector-scope.ts). */
   continuation?: { toolName: string; resultText: string } | null;
+  /** How the turn arrived. The Apex request path cannot wait past its
+   *  callout limit, so its turns keep the short time ceiling; a websocket
+   *  turn has no such caller and may run longer. Absent = HTTP. */
+  transport?: 'http' | 'ws';
   context: {
     orgId: string;
     userId: string;
