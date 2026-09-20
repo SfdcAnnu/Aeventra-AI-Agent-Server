@@ -57,6 +57,19 @@ export interface StageUpdate {
   isError?: boolean;
 }
 
+/** Everything a turn can report while it runs.
+ *
+ *  Text is an accelerant, never the record: the turn result always carries
+ *  the complete reply and the browser renders that over anything streamed.
+ *  That is what lets 'reset' be a complete answer to any mid-stream
+ *  trouble — a tool call that made the pass irrelevant, a reader too slow
+ *  to keep up, a provider that stopped streaming. */
+export type TurnEvent =
+  | ({ kind: 'stage' } & StageUpdate)
+  | { kind: 'text'; delta: string }
+  | { kind: 'reset' };
+
+export type TurnSink = (event: TurnEvent) => void;
 export type StageSink = (update: StageUpdate) => void;
 
 export interface ChatTurnRequest {
@@ -86,7 +99,7 @@ export interface ChatTurnRequest {
   transport?: 'http' | 'ws';
   /** Live narration of this turn, for a caller that can deliver it. Only
    *  the websocket path supplies one, and only when the browser asked. */
-  onStage?: StageSink | null;
+  onEvent?: TurnSink | null;
   context: {
     orgId: string;
     userId: string;

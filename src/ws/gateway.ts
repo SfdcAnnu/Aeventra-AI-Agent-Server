@@ -41,7 +41,7 @@ import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { checkGuardrails } from '../salesforce/guardrails';
 import { resolveWsChatSession, recordWsTurn, recordWsTurnFailure } from '../salesforce/ws-chat-persistence';
 import type { EngineOverrideInput } from '../types';
-import type { StageSink } from '../chat/adapters/types';
+import type { TurnSink } from '../chat/adapters/types';
 
 const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
 
@@ -135,28 +135,64 @@ const turnMessageSchema = z.object({
   continuation: z.object({ toolName: z.string().min(1).max(200), resultText: z.string().max(20_000) }).nullish(),
 });
 
-/** Most stage frames a single turn may send. A pathological turn cannot
+/** Most live frames a single turn may send. A pathological turn cannot
  *  flood a browser; narration stops and the reply is unaffected. */
-const MAX_STAGE_FRAMES = Number(process.env.STAGE_MAX_FRAMES) || 200;
-/** Stop narrating once the socket has this much unsent. A reader on a slow
- *  link gets the reply, not a backlog of labels it will never see. */
-const STAGE_BACKPRESSURE_BYTES = Number(process.env.STAGE_BACKPRESSURE_BYTES) || 64_000;
+const MAX_LIVE_FRAMES = Number(process.env.STAGE_MAX_FRAMES) || 4_000;
+/** Stop sending once the socket has this much unsent. A reader on a slow
+ *  link gets the reply, not a backlog it will never catch up with. */
+const LIVE_BACKPRESSURE_BYTES = Number(process.env.STAGE_BACKPRESSURE_BYTES) || 256_000;
 
-/** Delivers live narration to one browser.
+/** Delivers live narration and reply text to one browser.
  *
- *  Every guard here fails CLOSED on the narration and open on the turn:
- *  a full buffer, a closed socket or a send that throws drops the frame
- *  and returns. Nothing in this function can delay or fail a reply. */
-function makeStageSink(ws: WebSocket): StageSink {
+ *  Two failure rules, because the two kinds of frame are not equally
+ *  disposable:
+ *
+ *  A STAGE frame is advisory. Dropping one costs a label, so a closed
+ *  socket, a full buffer or a throw simply drops it.
+ *
+ *  A TEXT frame is not — dropping one silently loses characters from what
+ *  the reader is reading. So text never drops: the moment it cannot be
+ *  delivered intact, streaming stops for the rest of the turn and the
+ *  reader is told to discard the fragment. That is safe because the turn
+ *  result still carries the complete reply, and the browser renders that
+ *  over whatever it showed.
+ *
+ *  Nothing in here can delay or fail a reply. */
+function makeTurnSink(ws: WebSocket): TurnSink {
   let seq = 0;
-  return update => {
-    if (seq >= MAX_STAGE_FRAMES) return;
-    if (ws.readyState !== WebSocket.OPEN) return;
-    if (ws.bufferedAmount > STAGE_BACKPRESSURE_BYTES) return;
+  let textStopped = false;
+
+  const send = (frame: Record<string, unknown>): boolean => {
+    if (ws.readyState !== WebSocket.OPEN) return false;
     try {
-      ws.send(JSON.stringify({ type: 'stage', seq: seq++, ...update }));
+      ws.send(JSON.stringify({ ...frame, seq: seq++ }));
+      return true;
     } catch {
-      /* advisory only */
+      return false;
+    }
+  };
+
+  return event => {
+    if (seq >= MAX_LIVE_FRAMES) return;
+
+    if (event.kind === 'stage') {
+      if (ws.bufferedAmount > LIVE_BACKPRESSURE_BYTES) return;
+      const { kind: _kind, ...update } = event;
+      send({ type: 'stage', ...update });
+      return;
+    }
+
+    if (event.kind === 'reset') {
+      textStopped = false;
+      send({ type: 'text.reset' });
+      return;
+    }
+
+    if (textStopped) return;
+    if (ws.bufferedAmount > LIVE_BACKPRESSURE_BYTES || !send({ type: 'text.delta', delta: event.delta })) {
+      // Cannot deliver this one intact, so deliver none of the rest.
+      textStopped = true;
+      send({ type: 'text.reset' });
     }
   };
 }
@@ -223,7 +259,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
         : await connectorsForAgent(conn, agent),
       debugMode:      parsed.data.debugMode,
       continuation:   parsed.data.continuation ?? null,
-      onStage:        parsed.data.stream ? makeStageSink(ws) : null,
+      onEvent:        parsed.data.stream ? makeTurnSink(ws) : null,
       // Bound identity — NOT read from the message body (see module doc).
       context: {
         orgId: ctx.orgId,

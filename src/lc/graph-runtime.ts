@@ -75,6 +75,7 @@ import { withSessionResultCache } from './tool-result-cache';
 import { budgetToolReplays, parseToolRow, type ParsedToolRow } from '../chat/tool-replay';
 import { TurnRecorder, traceCaptureEnabled } from '../trace/recorder';
 import { StageReporter } from './stage-events';
+import { callModel } from './stream-call';
 import type { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import { persistTrace } from '../trace/writer';
 import { approvalGate, approvalRequiredNames } from './approval-gate';
@@ -175,7 +176,14 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // Live narration for a browser that asked for it (lc/stage-events.ts).
   // Attached to the root invoke only: LangChain propagates callbacks into
   // child runs, so a specialist's own tools report through this one too.
-  const stage = req.onStage ? new StageReporter(req.onStage) : null;
+  const stage = req.onEvent ? new StageReporter(req.onEvent) : null;
+  // Visible reply text, as it is written. Only the ROOT router's text is
+  // streamed: a specialist's reply comes back as a tool result rather than
+  // the answer, and the router's own passes that carry tool calls are held
+  // back by callModel itself (lc/stream-call.ts).
+  const emitText = req.onEvent
+    ? { onDelta: (delta: string) => req.onEvent?.({ kind: 'text', delta }), onReset: () => req.onEvent?.({ kind: 'reset' }) }
+    : {};
   // Built once. LangChain never awaits either handler, so this array costs
   // the turn nothing beyond the allocation.
   const turnCallbacks: BaseCallbackHandler[] = [];
@@ -369,10 +377,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       }
       budget.steps += 1;
 
-      const response = (await routerModel.invoke([
+      const response = await callModel(routerModel, [
         systemMessage,
         ...state.messages,
-      ])) as AIMessage;
+      ], emitText);
       noteUsage(budget, response, 'router', modelName);
 
       const calls = response.tool_calls ?? [];

@@ -25,7 +25,7 @@
  */
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { Serialized } from '@langchain/core/load/serializable';
-import type { StageSink } from '../chat/adapters/types';
+import type { StageUpdate, TurnSink } from '../chat/adapters/types';
 
 export class StageReporter extends BaseCallbackHandler {
   name = 'archon-stage-reporter';
@@ -44,13 +44,13 @@ export class StageReporter extends BaseCallbackHandler {
   /** Reported runs only: run id to what we need when it ends. */
   private readonly open = new Map<string, { name: string; at: number; via?: 'specialist' }>();
 
-  constructor(private readonly sink: StageSink) {
+  constructor(private readonly sink: TurnSink) {
     super();
   }
 
-  private send(u: Parameters<StageSink>[0]): void {
+  private send(u: StageUpdate): void {
     try {
-      this.sink(u);
+      this.sink({ kind: 'stage', ...u });
     } catch {
       /* advisory only — a sink that throws costs a label, not a turn */
     }
