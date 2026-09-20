@@ -55,6 +55,11 @@ export interface SystemAgentSpec {
   managed?: boolean;
   /** 'Org' (default) or 'PerUser'. */
   accessMode?: 'Org' | 'PerUser';
+  /** Start this agent's chats with live streaming on. Off unless a spec
+   *  asks for it, and only ever a starting point — whoever is chatting can
+   *  switch it either way from the chat window. Worth setting on an agent
+   *  whose turns run tools for a long time and say nothing meanwhile. */
+  streamReplies?: boolean;
   department: string;
   description: string;
   root: {
@@ -182,16 +187,20 @@ export interface SyncResult {
   model: string;
 }
 
-/** Whether this org's AgentDefinition__c has IsSystem__c yet — the field
- *  ships with the package; an org that has not deployed it still gets
- *  its agents. Cached per org for the life of the process. */
-const isSystemFieldByOrg = new Map<string, Promise<boolean>>();
-async function hasIsSystemField(conn: Connection): Promise<boolean> {
-  const key = conn.instanceUrl ?? 'default';
-  let p = isSystemFieldByOrg.get(key);
+/** Whether this org's AgentDefinition__c has a given field yet.
+ *
+ *  Fields ship with the package, but an org can be running an older
+ *  version, and naming a field it does not have fails the whole write with
+ *  INVALID_FIELD. So every optional field is probed before it is sent, and
+ *  an org that has not deployed it still gets its agents — just without
+ *  that one value. Cached per org and field for the life of the process. */
+const fieldByOrg = new Map<string, Promise<boolean>>();
+async function hasField(conn: Connection, field: string): Promise<boolean> {
+  const key = `${conn.instanceUrl ?? 'default'}::${field}`;
+  let p = fieldByOrg.get(key);
   if (!p) {
-    p = conn.sobject('AgentDefinition__c').describe().then(d => d.fields.some(f => f.name === 'IsSystem__c')).catch(() => false);
-    isSystemFieldByOrg.set(key, p);
+    p = conn.sobject('AgentDefinition__c').describe().then(d => d.fields.some(f => f.name === field)).catch(() => false);
+    fieldByOrg.set(key, p);
   }
   return p;
 }
@@ -203,7 +212,8 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
   const engine = await resolveArchitectEngine(conn);
   const { nodes, connections } = layoutSystemAgent(spec, engine);
   const managed = spec.managed !== false;
-  const withSystemFlag = await hasIsSystemField(conn);
+  const withSystemFlag = await hasField(conn, 'IsSystem__c');
+  const withStreamFlag = await hasField(conn, 'StreamReplies__c');
 
   const existing = await conn.query<{ Id: string }>(
     `SELECT Id FROM AgentDefinition__c WHERE ApiName__c = '${spec.apiName.replace(/'/g, "\\'")}' LIMIT 1`,
@@ -220,11 +230,13 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
     Description__c: managed ? `${spec.description}\n\n[built-in · v${spec.version} · managed by the platform]` : spec.description,
     ExecuteType__c: 'Chat',
     AccessMode__c: spec.accessMode ?? 'Org',
+
     // `system` in the canvas JSON is what marks the agent read-only for the
     // builder and the update tool; an org-owned seed carries no marker.
     CanvasJson__c: JSON.stringify(managed ? { connections, system: { apiName: spec.apiName, version: spec.version } } : { connections }),
     Version__c: spec.version,
     ...(withSystemFlag ? { IsSystem__c: managed } : {}),
+    ...(withStreamFlag ? { StreamReplies__c: spec.streamReplies === true } : {}),
   };
   let created = false;
   if (agentId) {
