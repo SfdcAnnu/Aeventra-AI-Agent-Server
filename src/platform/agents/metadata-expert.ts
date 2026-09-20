@@ -41,6 +41,11 @@ export const metadataExpertAgent: SystemAgentSpec = {
   managed: false,
   department: 'Platform',
   accessMode: 'Org',
+  // This agent reads and deploys metadata: its turns run tools for a long
+  // time and say nothing meanwhile, which is exactly what live narration
+  // exists for. Anyone who would rather have the reply in one piece can
+  // switch it off from the chat window.
+  streamReplies: true,
   description: 'Reads, drafts, validates and deploys Salesforce metadata as the signed-in user: objects, fields, validation rules, record types, layouts, list views, permission sets and flows. Every deploy waits for approval and can be rolled back.',
   root: {
     tier: 'medium',
