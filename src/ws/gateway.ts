@@ -41,6 +41,7 @@ import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { checkGuardrails } from '../salesforce/guardrails';
 import { resolveWsChatSession, recordWsTurn, recordWsTurnFailure } from '../salesforce/ws-chat-persistence';
 import type { EngineOverrideInput } from '../types';
+import type { StageSink } from '../chat/adapters/types';
 
 const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
 
@@ -125,9 +126,40 @@ const turnMessageSchema = z.object({
     })).nullish(),
   })).optional(),
   debugMode: z.boolean().optional(),
+  // Opt-in live narration. A browser running an older bundle never sets
+  // this, so it keeps receiving exactly one frame per turn and needs no
+  // knowledge of stage frames. That is what lets the server ship ahead of
+  // the Salesforce bundle, which deploys separately.
+  stream: z.boolean().optional(),
   // The turn after an approved action executed: no user text, the result.
   continuation: z.object({ toolName: z.string().min(1).max(200), resultText: z.string().max(20_000) }).nullish(),
 });
+
+/** Most stage frames a single turn may send. A pathological turn cannot
+ *  flood a browser; narration stops and the reply is unaffected. */
+const MAX_STAGE_FRAMES = Number(process.env.STAGE_MAX_FRAMES) || 200;
+/** Stop narrating once the socket has this much unsent. A reader on a slow
+ *  link gets the reply, not a backlog of labels it will never see. */
+const STAGE_BACKPRESSURE_BYTES = Number(process.env.STAGE_BACKPRESSURE_BYTES) || 64_000;
+
+/** Delivers live narration to one browser.
+ *
+ *  Every guard here fails CLOSED on the narration and open on the turn:
+ *  a full buffer, a closed socket or a send that throws drops the frame
+ *  and returns. Nothing in this function can delay or fail a reply. */
+function makeStageSink(ws: WebSocket): StageSink {
+  let seq = 0;
+  return update => {
+    if (seq >= MAX_STAGE_FRAMES) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > STAGE_BACKPRESSURE_BYTES) return;
+    try {
+      ws.send(JSON.stringify({ type: 'stage', seq: seq++, ...update }));
+    } catch {
+      /* advisory only */
+    }
+  };
+}
 
 async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string): Promise<void> {
   if (isRateLimited(ws)) {
@@ -191,6 +223,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
         : await connectorsForAgent(conn, agent),
       debugMode:      parsed.data.debugMode,
       continuation:   parsed.data.continuation ?? null,
+      onStage:        parsed.data.stream ? makeStageSink(ws) : null,
       // Bound identity — NOT read from the message body (see module doc).
       context: {
         orgId: ctx.orgId,

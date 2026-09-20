@@ -74,6 +74,8 @@ import { buildReadArtifactTool, spillIfLarge } from './artifact-store';
 import { withSessionResultCache } from './tool-result-cache';
 import { budgetToolReplays, parseToolRow, type ParsedToolRow } from '../chat/tool-replay';
 import { TurnRecorder, traceCaptureEnabled } from '../trace/recorder';
+import { StageReporter } from './stage-events';
+import type { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import { persistTrace } from '../trace/writer';
 import { approvalGate, approvalRequiredNames } from './approval-gate';
 import {
@@ -169,6 +171,16 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // on it only pushes to an array during the turn — everything expensive
   // happens after the reply is sent (see trace/writer.ts).
   const recorder = traceCaptureEnabled() ? new TurnRecorder() : null;
+
+  // Live narration for a browser that asked for it (lc/stage-events.ts).
+  // Attached to the root invoke only: LangChain propagates callbacks into
+  // child runs, so a specialist's own tools report through this one too.
+  const stage = req.onStage ? new StageReporter(req.onStage) : null;
+  // Built once. LangChain never awaits either handler, so this array costs
+  // the turn nothing beyond the allocation.
+  const turnCallbacks: BaseCallbackHandler[] = [];
+  if (recorder) turnCallbacks.push(recorder);
+  if (stage) turnCallbacks.push(stage);
 
   logger.info({
     orgId: req.context.orgId,
@@ -423,7 +435,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         // capture is on.
         runName: `chat-turn ${req.agent.apiName}`,
         tags: ['chat-turn', req.agent.apiName],
-        ...(recorder ? { callbacks: [recorder] } : {}),
+        ...(turnCallbacks.length > 0 ? { callbacks: turnCallbacks } : {}),
         metadata: {
           orgId: req.context.orgId,
           sessionId: req.sessionId,
@@ -693,6 +705,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     return result;
   } finally {
+    // A tool still open here never reported its end — a crash, or a turn
+    // that stopped at its budget. Close them so the browser is not left
+    // showing work that is no longer running.
+    stage?.finish();
     await loaded.close();
   }
 }

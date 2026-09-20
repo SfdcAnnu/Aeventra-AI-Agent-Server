@@ -41,6 +41,24 @@ export interface EngineOverrideInput {
   connectionId?: string | null;
 }
 
+/** One thing the agent started or finished, reported while the turn is
+ *  still running (lc/stage-events.ts). Advisory: a client that asked for
+ *  none behaves exactly as before, and a sink that throws or refuses
+ *  costs a label, never a reply. */
+export interface StageUpdate {
+  state: 'start' | 'end';
+  /** The tool the model called, as the model named it. */
+  name: string;
+  /** Present on 'end': how long that call took. */
+  ms?: number;
+  /** Set when the call ran inside a specialist rather than at the root. */
+  via?: 'specialist';
+  /** The call failed, was refused, or is parked awaiting approval. */
+  isError?: boolean;
+}
+
+export type StageSink = (update: StageUpdate) => void;
+
 export interface ChatTurnRequest {
   agent: AgentDefinition;
   sessionId: string;
@@ -66,6 +84,9 @@ export interface ChatTurnRequest {
    *  callout limit, so its turns keep the short time ceiling; a websocket
    *  turn has no such caller and may run longer. Absent = HTTP. */
   transport?: 'http' | 'ws';
+  /** Live narration of this turn, for a caller that can deliver it. Only
+   *  the websocket path supplies one, and only when the browser asked. */
+  onStage?: StageSink | null;
   context: {
     orgId: string;
     userId: string;
