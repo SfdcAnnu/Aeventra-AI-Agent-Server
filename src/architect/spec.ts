@@ -626,18 +626,62 @@ export function validateSpecLogic(spec: AgentSpec, manifest?: CapabilityManifest
     });
   }
 
+  // An action that never says WHAT it acts on cannot be looked up at all,
+  // and the manifest check's own wording for that case — "references crud
+  // '?:query'" — named no object, no fix and no next step. A live build
+  // read it three times, changed nothing each time, and died with the
+  // design stage still showing as pending. So the missing field is
+  // reported as the missing field, ahead of any lookup.
+  const incomplete = new Set<string>();
+  for (const n of spec.nodes) {
+    if (n.type !== 'tool' || !n.action) continue;
+    const a = n.action;
+    if (a.kind === 'crud') {
+      if (!a.sobject) {
+        incomplete.add(n.id);
+        errors.push({
+          path: `/nodes/${n.id}/action`,
+          message:
+            'a crud action must name its object in action.sobject — CRUD is granted per object, so there ' +
+            'is no such permission as "create a record" in general. If you meant ONE node that works ' +
+            'across objects, that is the discovered MCP tool which takes the object as an argument: use ' +
+            'kind "mcp" with its exact toolName instead.',
+        });
+      }
+      if (!a.operation) {
+        incomplete.add(n.id);
+        errors.push({
+          path: `/nodes/${n.id}/action`,
+          message: 'a crud action must state action.operation — one of create, update, upsert, delete, query',
+        });
+      }
+    } else if (a.kind !== 'http' && a.kind !== 'code' && !a.toolName) {
+      incomplete.add(n.id);
+      errors.push({
+        path: `/nodes/${n.id}/action`,
+        message: `a ${a.kind} action must name what it calls in action.toolName, spelled exactly as the Org Surveyor reported it`,
+      });
+    }
+  }
+
   // Tool names must exist in the live capability manifest — orgs change
   // between design and compile.
   if (manifest) {
     for (const n of spec.nodes) {
-      if (n.type !== 'tool' || !n.action) continue;
+      // http and code name no discovered capability, so there is nothing
+      // for the manifest to vouch for. Looking them up anyway produced
+      // "references http 'undefined'", which reads as an invented tool.
+      if (n.type !== 'tool' || !n.action || incomplete.has(n.id)) continue;
+      if (n.action.kind === 'http' || n.action.kind === 'code') continue;
       const a = n.action;
-      const identity =
-        a.kind === 'crud' ? `${a.sobject ?? '?'}:${a.operation ?? '?'}` : (a.toolName ?? '?');
+      const identity = a.kind === 'crud' ? `${a.sobject}:${a.operation}` : (a.toolName as string);
       if (!manifest.has(a.kind, identity)) {
         errors.push({
           path: `/nodes/${n.id}/action`,
-          message: `references ${a.kind} '${identity}' which the Org Surveyor did not discover — a tool that was not found cannot be used`,
+          message:
+            `references ${a.kind} '${identity}' which the Org Surveyor did not discover — a tool that ` +
+            'was not found cannot be used. Names are case-sensitive: copy the one the Surveyor reported ' +
+            'rather than reshaping it into the spelling you expect.',
         });
       }
     }
