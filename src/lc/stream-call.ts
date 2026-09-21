@@ -32,6 +32,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { Runnable, RunnableConfig } from '@langchain/core/runnables';
 import { concat } from '@langchain/core/utils/stream';
 import { logger } from '../logger';
+import { messageText } from './message-text';
 
 /** Characters of text to hold before showing any, while watching for a
  *  tool call. Small enough to feel immediate, large enough that a response
@@ -55,20 +56,7 @@ type ModelRunnable = Runnable<BaseMessage[], AIMessage | AIMessageChunk>;
 
 /** Only real output text. Reasoning and thinking blocks are billed but are
  *  not the reply, and must never reach a reader as though they were. */
-function visibleText(chunk: AIMessageChunk): string {
-  const v = chunk.content;
-  if (typeof v === 'string') return v;
-  if (!Array.isArray(v)) return '';
-  let out = '';
-  for (const block of v) {
-    if (typeof block === 'string') { out += block; continue; }
-    const type = (block as { type?: string }).type;
-    if (type === 'text' || type === 'text_delta' || type === 'output_text') {
-      out += String((block as { text?: string }).text ?? '');
-    }
-  }
-  return out;
-}
+const visibleText = (chunk: AIMessageChunk): string => messageText(chunk.content);
 
 /** See rule 3 in the module doc. */
 function toAIMessage(agg: AIMessageChunk | undefined): AIMessage {
