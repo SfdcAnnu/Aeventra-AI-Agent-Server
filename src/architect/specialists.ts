@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { Connection } from 'jsforce';
 import { logger } from '../logger';
 import { buildChatModel } from '../lc/models';
+import { messageText } from '../lc/message-text';
 import { tierOfModel, ENGINE_DEFAULT_MODELS } from './compiler';
 import type { AgentSpec, SpecNode } from './spec';
 
@@ -307,7 +308,10 @@ export async function callSpecialist<T = unknown>(opts: {
     const meta = (out as { usage_metadata?: { input_tokens?: number; output_tokens?: number } }).usage_metadata;
     tokensIn = meta?.input_tokens ?? 0;
     tokensOut = meta?.output_tokens ?? 0;
-    const text = typeof out.content === 'string' ? out.content : JSON.stringify(out.content);
+    // NOT JSON.stringify(out.content). On the Responses API content is an
+    // array of blocks, and stringifying the array hands the parser the
+    // envelope instead of the answer — see lc/message-text.ts.
+    const text = messageText(out.content);
     result = opts.rawJson ? parseLooseJson(text, node.label) : text;
   }
 
