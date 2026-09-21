@@ -746,6 +746,7 @@ async function runBuild(job: BuildJob): Promise<void> {
             'the Prompt Engineer fills them in.\n\n' +
             'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
             'each tool. A node with no edge is invisible at runtime.\n\n' +
+            'EVERY tool node names the server that publishes it in `action.connector`, using the provider key the Surveyor reported (salesforce_mcp for the standard create/update/query and schema tools, the connector\'s own key for anything else). Leave it blank and the tool is looked for on the wrong server and shows as unconfigured to the client.\n\n' +
             'One tool node per TOOL, not one per record type. When a single discovered tool already accepts ' +
             'the record type as an argument, emit ONE node for it rather than one per type — every node is ' +
             're-sent to the model on every turn, so near-duplicates cost the client on every conversation.\n\n' +
