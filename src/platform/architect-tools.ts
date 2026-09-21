@@ -116,10 +116,19 @@ const continueTools = STAGE_TOOL.slice(1).map(([key, name, title, description, n
   }),
 );
 
-/** How long build_agent waits for a WHOLE build before handing back
- *  "still running". Sized under the copilot's 540s turn ceiling with room
- *  for the model to speak afterwards. */
-const BUILD_WAIT_MS = Number(process.env.ARCHITECT_BUILD_WAIT_MS) || 420_000;
+/** How long build_agent and resume_build wait before handing back "still
+ *  running".
+ *
+ *  THIS IS CAPPED BY MCP, NOT BY US. Platform tools are served over the
+ *  server's own MCP endpoint, and the MCP client times a request out after
+ *  60 seconds with no way to raise it through the adapter. A longer wait
+ *  here does not buy patience, it buys "MCP error -32001: Request timed
+ *  out" and a build the caller thinks failed while it is still running.
+ *
+ *  Waiting less is not a compromise: the build keeps running server-side
+ *  and the build card in the chat polls it every couple of seconds, so the
+ *  person watches it finish whether or not the tool was still waiting. */
+const BUILD_WAIT_MS = Number(process.env.ARCHITECT_BUILD_WAIT_MS) || 40_000;
 
 /**
  * The whole build in ONE call.
