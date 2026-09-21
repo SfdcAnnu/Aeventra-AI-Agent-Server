@@ -701,6 +701,17 @@ async function runBuild(job: BuildJob): Promise<void> {
             'can be a public widget or a staff tool, and the two need opposite handling.',
           ...(feedback ? { previousAttemptErrors: feedback } : {}),
         }, { rawJson: true, maxOutputTokens: 8000 });
+        // A shapeless answer is a retryable mistake, not a crash. The model
+        // can return prose, a wrapper object, or a truncated spec; each of
+        // those used to take the whole build down inside the repair below.
+        // Caught here it costs one more attempt and the model is told what
+        // was wrong.
+        if (!Array.isArray(draft?.nodes) || !Array.isArray(draft?.edges)) {
+          feedback = 'The answer was not an AgentSpec: it must be ONE JSON object with a `nodes` array and an ' +
+            '`edges` array at the top level, not wrapped in another key and not prose.';
+          if (attempt === 3) throw new Error('The design never came back as an AgentSpec after 3 attempts.');
+          continue;
+        }
         // Free, deterministic repair before the paid one. A missing edge is
         // not a judgement call — see attachOrphansToRoot.
         wiringNotes.push(...attachOrphansToRoot(draft));
@@ -740,8 +751,9 @@ async function runBuild(job: BuildJob): Promise<void> {
       throw new Error('No valid design produced.');
     },
     d => ({
+      // A cosmetic one-liner must never be the thing that fails a build.
       detail: overTarget ||
-        `${d.nodes.filter(n => n.type === 'subagent').length} helper(s), ${d.nodes.filter(n => n.type === 'tool').length} tool(s)`,
+        `${(d.nodes ?? []).filter(n => n.type === 'subagent').length} helper(s), ${(d.nodes ?? []).filter(n => n.type === 'tool').length} tool(s)`,
     }),
     d => { cp.spec = d; },
   );
