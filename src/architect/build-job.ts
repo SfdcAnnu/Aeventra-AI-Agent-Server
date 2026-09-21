@@ -152,6 +152,12 @@ const STEPS: Array<[string, string]> = [
 
 /** The objects nearly every requirement actually touches. Custom objects
  *  are always included on top of these. */
+/** How many times a tool server that did not answer is re-read before the
+ *  build gives up, and how long to wait between tries. Sized for a cold
+ *  start of about thirty seconds, not for an outage. */
+const MCP_WAKE_ATTEMPTS = Number(process.env.ARCHITECT_MCP_WAKE_ATTEMPTS) || 3;
+const MCP_WAKE_WAIT_MS = Number(process.env.ARCHITECT_MCP_WAKE_WAIT_MS) || 15_000;
+
 const CORE_OBJECTS = new Set([
   'Account', 'Contact', 'Lead', 'Opportunity', 'OpportunityLineItem', 'Case', 'Task', 'Event',
   'Product2', 'Pricebook2', 'PricebookEntry', 'Quote', 'QuoteLineItem', 'Contract', 'Order',
@@ -572,7 +578,7 @@ async function runBuild(job: BuildJob): Promise<void> {
   );
 
   // 2 — survey (deterministic gather, one compression call)
-  const [objects, invocables, mcp, kbs, manifestBuilt] = await orgGather;
+  const [objects, invocables, mcpFirstRead, kbs, manifestBuilt] = await orgGather;
   const manifest: CapabilityManifest = manifestBuilt.manifest;
   const found = manifestBuilt.counts.invocables + manifestBuilt.counts.mcpTools + (kbs.length || 0);
 
@@ -590,7 +596,30 @@ async function runBuild(job: BuildJob): Promise<void> {
   // What stops the build is a server that should have answered and did not.
   // Every tool the org can actually call. The reviewer needs this to tell a
   // real omission from a capability that is already within reach.
-  const mcpToolNames = [...new Set(mcp.flatMap(m => m.tools.map(t => t.name)))];
+  // A SLEEPING TOOL SERVER IS NOT A MISSING CAPABILITY.
+  //
+  // These servers idle out and take about half a minute to answer their
+  // first request, and the error they return says so itself: "should
+  // answer again in under a minute". Throwing on the first read turned a
+  // predictable half-minute wait into a dead build that had already been
+  // paid for up to this point.
+  //
+  // So providers that did not answer are re-read a few times before giving
+  // up. Bounded deliberately: this waits out a cold start, it does not
+  // paper over a server that is genuinely down. A server still silent
+  // afterwards stops the build with the same message, because designing
+  // around tools we cannot see is worse than stopping.
+  let mcp = mcpFirstRead;
+  for (let attempt = 1; attempt <= MCP_WAKE_ATTEMPTS; attempt++) {
+    const asleep = mcp.filter(m => m.error && m.error !== 'not connected');
+    if (asleep.length === 0) break;
+    logger.warn(
+      { orgId: job.orgId, jobId: job.id, attempt, providers: asleep.map(m => m.provider) },
+      'architect_tool_server_unreachable_waiting',
+    );
+    await new Promise(resolve => setTimeout(resolve, MCP_WAKE_WAIT_MS));
+    mcp = await listMcpToolsLive(job.orgId);
+  }
 
   const unreachable = mcp.filter(m => m.error && m.error !== 'not connected');
   if (unreachable.length > 0) {
@@ -601,6 +630,11 @@ async function runBuild(job: BuildJob): Promise<void> {
         'Check the connector is online, then run this again.',
     );
   }
+  // Every tool the org can actually call, read AFTER any cold start above.
+  // The reviewer needs this to tell a real omission from a capability that
+  // is already within reach.
+  const mcpToolNames = [...new Set(mcp.flatMap(m => m.tools.map(t => t.name)))];
+
   const surveyed = await stage<Record<string, unknown>>(
     job, 'survey', cp.surveyed,
     () => specialist<Record<string, unknown>>(job, engine, 'survey_org', {
