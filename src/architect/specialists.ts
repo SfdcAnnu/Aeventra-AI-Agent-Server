@@ -268,10 +268,24 @@ export async function callSpecialist<T = unknown>(opts: {
   const boundSchema = opts.schemaOverride ?? (opts.rawJson ? null : node.returns);
   if (boundSchema) {
     const bound = (model as unknown as {
-      withStructuredOutput: (schema: Record<string, unknown>, cfg?: { name?: string; includeRaw?: boolean }) => {
+      withStructuredOutput: (schema: Record<string, unknown>, cfg?: { name?: string; includeRaw?: boolean; strict?: boolean }) => {
         invoke: (msgs: Array<[string, string]>) => Promise<{ raw?: { usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown } | unknown>;
       };
-    }).withStructuredOutput({ ...boundSchema, title: node.id }, { name: node.id, includeRaw: true });
+      // STRICT MUST BE SAID OUT LOUD, because the two OpenAI endpoints
+      // disagree about the default. Chat Completions leaves strict schema
+      // adherence OFF; the Responses API turns it ON. LangChain sends the
+      // flag only when it is set, so the same schema silently became strict
+      // the day gpt-5 routing moved to the Responses API — and strict
+      // demands `additionalProperties: false` on every object AND every
+      // property listed in `required`, which these schemas do not do.
+      //
+      // Live failure: "'additionalProperties' is required to be supplied
+      // and to be false", rejected before the model ran, at whichever stage
+      // first used a large-tier (gpt-5) model. Retrying could never help.
+      //
+      // Saying false keeps one behaviour on both endpoints. Optional fields
+      // stay optional, which is what these schemas mean.
+    }).withStructuredOutput({ ...boundSchema, title: node.id }, { name: node.id, includeRaw: true, strict: false });
     const out = (await deadline(bound.invoke([
       ['system', system],
       ['human', user],
