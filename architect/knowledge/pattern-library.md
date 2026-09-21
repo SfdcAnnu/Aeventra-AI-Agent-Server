@@ -1,9 +1,9 @@
-# Pattern library — twelve worked patterns
+# Pattern library — thirteen worked patterns
 
 The Flow Designer reasons FROM these, not from first principles. Each entry:
 when it applies, the shape, and the spec choices that make it work. Add an
-entry every time the Architect designs something badly — twelve good worked
-examples outperform any amount of instruction-writing.
+entry every time the Architect designs something badly — thirteen good
+worked examples outperform any amount of instruction-writing.
 
 ---
 
@@ -121,3 +121,41 @@ context; summarised large results; only tools that are actually used.
 **Spec:** run the estimator BEFORE writing prompts; two optimisation passes
 maximum, then tell the client the target cannot be met and show the numbers.
 Output is roughly half the bill — cap replies before trimming instructions.
+
+## 13 · The scripted intake conversation
+
+**When:** the requirement IS the script. A qualification flow, an intake
+wizard, an onboarding or booking conversation — the client has written
+"ask this, validate it, save it, then ask that". If their requirement has
+numbered steps, example wording, or a table of state transitions, this is
+the pattern. It was missing for a long time and its absence produced
+agents that had the right tools, asked whatever they felt like, and never
+created the record.
+
+**Shape:** ONE agent (pattern 1 still holds — a script is not a reason to
+split). Tools: one to find the existing record, one to create it, one to
+update it, and a SCHEMA-READING tool so the agent can fetch live picklist
+options. No sub-agents unless something genuinely needs its own model.
+
+**Spec:**
+- The ordered procedure goes in the agent's instructions — rule 12's
+  exception. Number the steps in the client's own order.
+- Every step says four things: what to say, what makes the answer valid,
+  what to do when it is not valid, and which field to write.
+- **State transitions are a table in the instructions**, not prose. "Record
+  created → New. Customer replies → In Process. Not interested → Lost. Valid
+  project given → Qualified." Any status the client named must appear.
+- **Options come from the org, at runtime.** Never write picklist values
+  into a prompt — read the field's schema and offer what is actually
+  configured (rules 20 and 21).
+- **An invalid answer re-asks with the real options** and does not advance.
+  Say so explicitly, and say what ends the loop: a valid answer, or the
+  customer saying they are not interested.
+- **Save as you go, never at the end.** Each step writes its own field, so
+  a conversation abandoned halfway still leaves a usable record. An agent
+  that collects five answers and writes once loses everything when someone
+  stops replying, which on a messaging channel is most of them.
+- Reply cap sized to the channel (WhatsApp ≈ 256–512, pattern 12).
+
+**Why it wins:** the script is the product. The customer notices the order,
+the re-asking, and whether the record appeared — not the architecture.
