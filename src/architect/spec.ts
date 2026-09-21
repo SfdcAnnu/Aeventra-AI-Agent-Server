@@ -423,6 +423,15 @@ function schemaValidator() {
  * presented as the one the designer drew.
  */
 export function attachOrphansToRoot(spec: AgentSpec): string[] {
+  // This runs on a RAW model answer, before anything has validated it, and
+  // it used to assume the answer had the shape it asked for. When a design
+  // came back without `nodes` the repair threw
+  // "Cannot read properties of undefined (reading 'filter')", which killed
+  // a build that had already been paid for — and killed it OUTSIDE the
+  // three-attempt retry loop, so the model never got the chance to correct
+  // itself. There is nothing to repair on a shapeless answer; say so and
+  // let validateSpec report it properly.
+  if (!Array.isArray(spec?.nodes) || !Array.isArray(spec?.edges)) return [];
   const roots = spec.nodes.filter(n => n.type === 'agent');
   if (roots.length !== 1) return [];
   const rootId = roots[0].id;
