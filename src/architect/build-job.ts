@@ -294,20 +294,29 @@ function isStale(job: BuildJob): boolean {
 export async function listResumableBuilds(orgId: string, limit = 10): Promise<BuildJob[]> {
   try {
     const rows = await prisma.architectBuild.findMany({
-      // Failed builds are candidates too — but only the ones that got as far
-      // as a design, which is what `resumeBuildJob` will actually accept.
+      // Failed builds are candidates too — the ones with any completed
+      // stage saved, which is what `resumeBuildJob` will actually accept.
       where: { orgId, status: { in: ['paused', 'failed'] } },
       orderBy: { startedAt: 'desc' },
       take: limit * 2,
     });
     return rows
       .map(fromRow)
-      .filter(b => b.status === 'paused' || !!b.checkpoint?.spec)
+      .filter(b => b.status === 'paused' || Object.keys(b.checkpoint ?? {}).length > 0)
       .map(b => ({ ...b, stale: isStale(b) }))
       .slice(0, limit);
   } catch {
     return [];
   }
+}
+
+/** A thrown reason as one readable row on the build card. The design
+  * stage's reason is several lines — the headline and then each thing
+  * that was wrong — and the headline alone ("would not validate after 3
+  * attempts:") says nothing the client can act on. */
+function clipLine(message: string, max = 180): string {
+  const flat = message.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? flat.slice(0, max - 1) + '…' : flat;
 }
 
 function launch(job: BuildJob): BuildJob {
@@ -319,10 +328,26 @@ function launch(job: BuildJob): BuildJob {
   }
   void saveJob(job);
   void runBuild(job).catch(err => {
-    // A step showing `running` never actually ran — the guard fires BEFORE
-    // the call it was going to pay for. Put it back so the screen reads
-    // honestly and the resume starts in the right place.
-    for (const s of job.steps) if (s.state === 'running') s.state = 'pending';
+    // A step showing `running` when a build PAUSES never actually ran —
+    // the guard fires before the call it was going to pay for — so it goes
+    // back to pending and the resume starts in the right place.
+    //
+    // A FAILURE IS THE OPPOSITE, AND USED TO BE TOLD THE SAME WAY. The
+    // design stage that burnt three attempts and threw was reset to
+    // pending too, so the card showed seven stages waiting and nothing
+    // wrong. The client pressed Continue, got "cannot be resumed", and
+    // had no way to learn that the stage had already run and failed. The
+    // stage that threw keeps its failure, and the reason with it.
+    const failing = !(err instanceof StagePause) && !(err instanceof BudgetPause);
+    for (const s of job.steps) {
+      if (s.state !== 'running') continue;
+      if (failing) {
+        s.state = 'failed';
+        s.detail = clipLine(err instanceof Error ? err.message : String(err));
+      } else {
+        s.state = 'pending';
+      }
+    }
     job.finishedAt = Date.now();
     if (err instanceof StagePause) {
       job.status = 'paused';
@@ -373,13 +398,19 @@ export function createBuildJob(orgId: string, requirement: string, opts?: { atta
  * stage already paid for is restored rather than re-run, and inherits the
  * spend so the ceiling still governs the whole chain.
  *
- * A FAILED build is resumable too, as long as its checkpoint holds a
- * design. Failures here are overwhelmingly a late gate rejecting a shape
- * an earlier stage produced — and the repair for that ships in this code,
- * not in the model's next attempt. Making the customer re-buy the survey
- * and the design to pick up a fix they already paid to discover is the
- * same waste the checkpoint exists to end. A build with no spec has
- * nothing to resume FROM, so that one still starts over.
+ * A FAILED build is resumable too, as long as its checkpoint holds
+ * ANYTHING. Failures here are overwhelmingly a late gate rejecting a
+ * shape an earlier stage produced — and the repair for that ships in this
+ * code, not in the model's next attempt. Making the customer re-buy the
+ * survey to pick up a fix they already paid to discover is the same
+ * waste the checkpoint exists to end.
+ *
+ * THIS USED TO REQUIRE A SAVED DESIGN, which is the one thing a failed
+ * design stage does not have. A build spent $1.96 reaching the designer,
+ * failed there, and became unresumable — so the understanding, the survey
+ * and the match, all finished and all paid for, were thrown away to
+ * re-run a stage whose fix had already shipped. The design is not the
+ * only artefact worth keeping; every completed stage is.
  *
  * Returns null when there is nothing resumable under that id.
  */
@@ -392,7 +423,8 @@ export async function resumeBuildJob(
   const prior = await getBuildJob(jobId, orgId);
   if (!prior) return null;
   const resumable =
-    prior.status === 'paused' || (prior.status === 'failed' && !!prior.checkpoint?.spec);
+    prior.status === 'paused' ||
+    (prior.status === 'failed' && Object.keys(prior.checkpoint ?? {}).length > 0);
   if (!resumable) return null;
 
   const spent = prior.priorCostUsd + prior.costUsd;
@@ -654,6 +686,29 @@ async function runBuild(job: BuildJob): Promise<void> {
   // The reviewer needs this to tell a real omission from a capability that
   // is already within reach.
   const mcpToolNames = [...new Set(mcp.flatMap(m => m.tools.map(t => t.name)))];
+  // THE DESIGNER MUST BE ABLE TO READ WHAT THE VALIDATOR WILL CHECK.
+  //
+  // validateSpec compares every action against the capability manifest by
+  // exact string, and the designer used to be handed only the Matcher's
+  // prose. The spellings existed nowhere in its context, so it wrote the
+  // ones it expected: `get_sobject_schema` for a server that publishes
+  // `getObjectSchema`. Three attempts, three rejections, and a build that
+  // had already been paid for. The names go in front of it now, from the
+  // same read the manifest itself is built from.
+  const mcpToolsByServer = mcp
+    .filter(m => m.tools.length > 0)
+    .map(m => ({ connector: m.provider, tools: m.tools.map(t => t.name) }));
+  const crudObjects = objects
+    .filter(o => (o.custom || CORE_OBJECTS.has(o.name)) && (o.createable || o.updateable || o.queryable))
+    .slice(0, 120)
+    .map(o => ({
+      sobject: o.name,
+      operations: [
+        ...(o.createable ? ['create'] : []),
+        ...(o.updateable ? ['update'] : []),
+        ...(o.queryable ? ['query'] : []),
+      ],
+    }));
 
   const surveyed = await stage<Record<string, unknown>>(
     job, 'survey', cp.surveyed,
@@ -739,6 +794,7 @@ async function runBuild(job: BuildJob): Promise<void> {
           matched: match.matched,
           partial: match.partial,
           missing: match.missing,
+          available: { mcp: mcpToolsByServer, crud: crudObjects },
           instruction:
             'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else. Sub-agents need a ' +
             'description (when to use them). Only v1-compilable elements: trigger inbound_message/manual/webhook; ' +
@@ -747,9 +803,19 @@ async function runBuild(job: BuildJob): Promise<void> {
             'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
             'each tool. A node with no edge is invisible at runtime.\n\n' +
             'EVERY tool node names the server that publishes it in `action.connector`, using the provider key the Surveyor reported (salesforce_mcp for the standard create/update/query and schema tools, the connector\'s own key for anything else). Leave it blank and the tool is looked for on the wrong server and shows as unconfigured to the client.\n\n' +
-            'One tool node per TOOL, not one per record type. When a single discovered tool already accepts ' +
-            'the record type as an argument, emit ONE node for it rather than one per type — every node is ' +
-            're-sent to the model on every turn, so near-duplicates cost the client on every conversation.\n\n' +
+            'One tool node per TOOL, not one per record type — every node is re-sent to the model on every ' +
+            'turn, so near-duplicates cost the client on every conversation. BUT THE TWO KINDS SAY THIS ' +
+            'DIFFERENTLY, and picking the wrong one produces a design that cannot validate. A tool that ' +
+            'takes the record type as an ARGUMENT is one node and is an `mcp` action carrying that ' +
+            'tool\'s exact name. A `crud` action is the other thing entirely: a permission granted on ' +
+            'ONE object, so it always carries action.sobject AND action.operation. There is no crud ' +
+            'action without an object — if you find yourself writing a general \"create a record\" node, ' +
+            'you wanted the mcp tool.\n\n' +
+            'EVERY name you write must be COPIED from `available`, character for character. `available.mcp` ' +
+            'lists each connector with the tools it publishes; `available.crud` lists each object with the ' +
+            'operations permitted on it. A name that is not in there was not found, and a tool that was ' +
+            'not found cannot be used — so do not reshape a name into the casing or the underscores you ' +
+            'would expect it to have.\n\n' +
             'When the requirement says an action needs human approval, set approval.required on THAT tool node.\n\n' +
             'Set `audience`: "customer" if the replies are read by someone outside the business, "internal" if ' +
             'they are read by an employee. Decide it from the requirement, never from the channel — a web chat ' +

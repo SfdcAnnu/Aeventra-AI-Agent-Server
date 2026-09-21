@@ -201,7 +201,18 @@ const resumeBuild = define({
   readOnly: false,
   handler: async ({ jobId, maxCostUsd }, p) => {
     const job = await resumeBuildJob(p.orgId, jobId, maxCostUsd);
-    if (!job) return fail(`Build ${jobId} cannot be resumed — it is not paused, and has no saved design to resume from.`);
+    if (!job) {
+      // WHY IT CANNOT BE RESUMED IS THE ONLY USEFUL PART OF THIS MESSAGE.
+      // Without it the caller learns that the build is not paused, which
+      // it did not ask, and not that the build FAILED and what stopped
+      // it — so it offers to start again rather than reporting the fault.
+      const prior = await getBuildJob(jobId, p.orgId).catch(() => null);
+      const why = prior?.error ? ` It ${prior.status === 'failed' ? 'failed' : 'stopped'}: ${prior.error}` : '';
+      return fail(
+        `Build ${jobId} cannot be resumed — it is not paused, and no design was saved to resume from.${why}` +
+        ' Tell the client what stopped it before offering to build again.',
+      );
+    }
     // This resumes to the END, like build_agent, so it needs build_agent's
     // patience. On the stage tools' 48-second wait it always came back
     // "still running" while the build carried on without anyone watching,
