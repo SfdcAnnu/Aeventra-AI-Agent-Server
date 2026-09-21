@@ -193,7 +193,11 @@ const resumeBuild = define({
   handler: async ({ jobId, maxCostUsd }, p) => {
     const job = await resumeBuildJob(p.orgId, jobId, maxCostUsd);
     if (!job) return fail(`Build ${jobId} cannot be resumed — it is not paused, and has no saved design to resume from.`);
-    const done = await waitFor(job.id, p.orgId);
+    // This resumes to the END, like build_agent, so it needs build_agent's
+    // patience. On the stage tools' 48-second wait it always came back
+    // "still running" while the build carried on without anyone watching,
+    // and the caller reported a finished build that had not finished.
+    const done = await waitFor(job.id, p.orgId, BUILD_WAIT_MS);
     return ok(view(done ?? job, 'compile', ''));
   },
 });
