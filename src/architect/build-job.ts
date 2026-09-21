@@ -455,8 +455,28 @@ async function stage<T>(
   guardStop(job, key);
   const s = step(job, key);
 
+  // A SUMMARY LINE MUST NEVER FAIL A BUILD.
+  //
+  // `describe` exists to write one sentence under a stage on the screen.
+  // It reads fields off a model's answer, so it can meet an absent one,
+  // and three separate builds died in it — .filter on missing nodes,
+  // .replace on a missing verdict — after the stage itself had succeeded
+  // and been paid for. The work is done by the time this runs; losing the
+  // caption is not a reason to lose the work.
+  const safely = (value: T): { detail: string; state?: StepState } => {
+    try {
+      return describe(value);
+    } catch (err) {
+      logger.warn(
+        { jobId: job.id, orgId: job.orgId, stage: key, err: err instanceof Error ? err.message : String(err) },
+        'architect_stage_summary_failed',
+      );
+      return { detail: '' };
+    }
+  };
+
   if (cached !== undefined) {
-    const d = describe(cached);
+    const d = safely(cached);
     s.state = d.state ?? 'done';
     s.detail = d.detail;
     s.reused = true;
@@ -470,7 +490,7 @@ async function stage<T>(
   const value = await produce();
   s.ms = Date.now() - startedAt;
   s.costUsd = Number((job.costUsd - spentBefore).toFixed(4));
-  const d = describe(value);
+  const d = safely(value);
   s.state = d.state ?? 'done';
   s.detail = d.detail;
   keep?.(value);
@@ -840,7 +860,18 @@ async function runBuild(job: BuildJob): Promise<void> {
     // this one. Re-judge rather than carry a stale pass forward.
     job, 'review', specStillValid ? cp.review : undefined,
     async () => {
-      const judge = (): Promise<ReviewResult> =>
+      // A REVIEW WITHOUT A VERDICT IS AN UNCLEAR REVIEW, NOT A CRASH.
+      //
+      // The Evaluator's schema is not strict — optional fields really are
+      // optional — so it can answer without `verdict`. Everything after
+      // this read it as a string, and a summary line doing
+      // verdict.replace() killed a build that had already designed and
+      // prompted the agent. Normalised once, here, where it is produced.
+      const judged = async (): Promise<ReviewResult> => {
+        const r = await judgeRaw();
+        return { ...r, verdict: r?.verdict ?? 'unclear' } as ReviewResult;
+      };
+      const judgeRaw = (): Promise<ReviewResult> =>
         specialist<ReviewResult>(job, engine, 'evaluate', {
           requirement,
           design: summariseForReview(spec, mcpToolNames),
@@ -853,7 +884,7 @@ async function runBuild(job: BuildJob): Promise<void> {
             'for is absent — not for style, naming or efficiency.',
         });
 
-      const first = await judge();
+      const first = await judged();
       // What triggers a repair is the UNCOVERED LIST, not the verdict.
       // Gating on `fail` alone shipped an agent with five things the client
       // asked for missing, because the Evaluator named all five and still
@@ -892,7 +923,7 @@ async function runBuild(job: BuildJob): Promise<void> {
       if (validateSpec(reprompted, manifest).length === 0) {
         spec = reprompted;
         cp.spec = reprompted;
-        const second = await judge();
+        const second = await judged();
         return { ...second, repaired: true };
       }
       return { ...first, repaired: false };
@@ -903,7 +934,8 @@ async function runBuild(job: BuildJob): Promise<void> {
         ? 'covers everything asked'
         : r.uncovered?.length
           ? `${r.uncovered.length} not covered`
-          : r.verdict.replace(/_/g, ' '),
+          // Cosmetic. It must never be the thing that fails a build.
+          : (r.verdict ?? 'unclear').replace(/_/g, ' '),
     }),
     r => { cp.review = r; },
   );
@@ -1155,7 +1187,7 @@ function buildConfidence(
     parts.push(
       review.uncovered?.length
         ? `a review found ${review.uncovered.length} thing(s) you asked for that this design does not do — read the notes before going live`
-        : `a review returned '${review.verdict.replace(/_/g, ' ')}'`,
+        : `a review returned '${(review.verdict ?? 'unclear').replace(/_/g, ' ')}'`,
     );
   }
   if (req.openQuestions?.length) parts.push(`I assumed: ${req.openQuestions[0]}`);
