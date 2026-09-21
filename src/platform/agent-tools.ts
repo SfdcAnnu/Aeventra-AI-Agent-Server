@@ -89,4 +89,108 @@ const updateAgent = define({
   },
 });
 
-export const AGENT_TOOLS = [transferToAgent, updateAgent];
+/**
+ * Give an existing agent a tool it did not have.
+ *
+ * update_agent can only change what a node already says. Everything
+ * structural — giving an agent a capability it was built without — meant
+ * rebuilding the whole agent from its requirement, which is a strange
+ * price for "it also needs to be able to look up the account".
+ *
+ * A tool node is a row plus a wire. The row carries which tool on which
+ * server; the wire is a connection in the agent's canvas from the root's
+ * TOOL port, which is the only port the router reads (platform rule 3).
+ * Connections are INDEX-based — position in the node list, ordered by
+ * SortOrder — so the new node is appended and wired at its own index.
+ * Getting that wrong leaves a node that renders on the canvas and is
+ * invisible at runtime, which looks like the tool being ignored.
+ */
+const addAgentTool = define({
+  name: 'add_agent_tool',
+  title: 'Add a tool to an agent',
+  description:
+    'Give an existing agent a tool it does not have yet: an MCP tool from a connected server, or a standard Salesforce create/update/query. ' +
+    'Names the tool, what it is for, and whether using it needs a person\'s approval. Built-in agents are read-only. Waits for a person\'s approval.',
+  inputSchema: {
+    apiName: z.string().min(1).max(120).describe('API name of the agent to give the tool to.'),
+    label: z.string().min(1).max(80).describe('What this tool is called on the canvas, in plain words.'),
+    toolName: z.string().min(1).max(120).describe('The tool exactly as the server publishes it, e.g. soqlQuery or createSobjectRecord.'),
+    provider: z.string().min(1).max(80).default('salesforce_mcp').describe('Which connected server publishes it. Defaults to the Salesforce Platform server.'),
+    description: z.string().min(1).max(600).describe('One or two sentences about WHEN to use it — this is the routing signal the model reads.'),
+    requiresApproval: z.boolean().default(false).describe('True if a person must approve each use before it runs.'),
+    sobject: z.string().max(80).optional().describe('For a create/update/query, the object it acts on.'),
+  },
+  readOnly: false,
+  handler: async (args, p) => {
+    const { apiName, label, toolName, provider, description, requiresApproval, sobject } = args;
+    const conn = await getOrgConnection(p.orgId);
+    const agent = await AgentCache.load(p.orgId, apiName, conn);
+    if (!agent) return fail(`No agent with API name ${apiName}.`);
+    if ((agent.canvasJson as { system?: unknown } | undefined)?.system) {
+      return fail(`${agent.name} is a built-in agent managed by the platform — it can be switched on or off, not edited.`);
+    }
+    if (agent.nodes.some(n => n.nodeType === 'tool' && (n.config as { toolName?: string } | undefined)?.toolName === toolName)) {
+      return fail(`${agent.name} already has a tool for ${toolName}.`);
+    }
+    const root = agent.nodes.find(n => n.nodeType === 'ai');
+    if (!root) return fail(`${agent.name} has no root agent node to attach a tool to.`);
+
+    // Index-based wiring: the canvas orders nodes by SortOrder, so the new
+    // node's index is the current count and the root's is its position now.
+    const ordered = [...agent.nodes].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    const rootIndex = ordered.findIndex(n => n.id === root.id);
+    const newIndex = ordered.length;
+
+    const created = await conn.sobject('AgentNode__c').insert({
+      AgentDefinition__c: agent.id,
+      Name: label.slice(0, 80),
+      NodeType__c: 'tool',
+      NodeSubType__c: 'mcp',
+      ConfigJson__c: JSON.stringify({
+        description,
+        actionType: 'MCP',
+        toolName,
+        // THE RUNTIME ROUTES ON connectorId, NOT on a `provider` key:
+        // providerOfAction reads connectorId and falls back to the
+        // Salesforce Platform server when it is blank. Writing the
+        // provider anywhere else sends every tool to Salesforce however
+        // the caller named the server.
+        connectorId: provider,
+        provider,
+        requiresApproval: requiresApproval === true,
+        ...(sobject ? { sobject } : {}),
+        addedBy: 'add_agent_tool',
+      }),
+      PositionX__c: 320,
+      PositionY__c: 140 + newIndex * 90,
+      SortOrder__c: newIndex,
+      IsEnabled__c: true,
+    });
+    if (!created.success) return fail(`Could not add the tool node: ${JSON.stringify(created)}`);
+
+    const canvas = (agent.canvasJson ?? {}) as { connections?: unknown[] };
+    const connections = Array.isArray(canvas.connections) ? [...canvas.connections] : [];
+    connections.push({
+      id: `e${rootIndex}:tool-${newIndex}:in`,
+      fromIndex: rootIndex,
+      toIndex: newIndex,
+      fromPort: 'tool',
+      toPort: 'in',
+    });
+    await conn.sobject('AgentDefinition__c').update({
+      Id: agent.id,
+      CanvasJson__c: JSON.stringify({ ...canvas, connections }),
+    });
+
+    AgentCache.invalidate(p.orgId, apiName);
+    logger.info({ orgId: p.orgId, apiName, toolName, provider, by: p.userId }, 'agent_tool_added');
+    return ok({
+      apiName,
+      added: { label, toolName, provider, requiresApproval: requiresApproval === true },
+      wiredFrom: root.name,
+      note: 'The agent can use it on its next turn. Its instructions were not changed — say so if the agent also needs telling when to use it.',
+    });
+  },
+});
+
+export const AGENT_TOOLS = [transferToAgent, updateAgent, addAgentTool];

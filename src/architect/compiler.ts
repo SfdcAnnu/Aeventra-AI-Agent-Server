@@ -359,7 +359,17 @@ export async function compileSpec(
           description: n.description ?? '',
           actionType,
           toolName,
-          connectorId: '',
+          // WHICH SERVER PUBLISHES THIS TOOL. The spec has carried
+          // `action.connector` all along and this wrote an empty string
+          // over it, with two consequences: the inspector showed "Select a
+          // connector..." on every tool the Architect built, so a finished
+          // agent looked half-configured; and the runtime's
+          // providerOfAction falls back to the Salesforce Platform server
+          // when this is blank, so a tool from any OTHER connected server
+          // was quietly looked for in the wrong place. A standard
+          // create/update/query genuinely is the Salesforce server, so it
+          // says so rather than relying on the fallback.
+          connectorId: a.connector?.trim() || (a.kind === 'crud' ? 'salesforce_mcp' : ''),
           requiresApproval: n.approval?.required === true,
           approvalCondition: n.approval?.condition,
           parameterMappings: n.inputs,

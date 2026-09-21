@@ -15,7 +15,7 @@ const PLATFORM = 'archon_platform';
 export const archonCopilotAgent: SystemAgentSpec = {
   apiName: 'archon_copilot',
   name: 'Archon Copilot',
-  version: 7,
+  version: 8,
   managed: true,
   department: 'Platform',
   accessMode: 'Org',
@@ -95,7 +95,7 @@ export const archonCopilotAgent: SystemAgentSpec = {
         'AFTER THAT, STOP FOR EXACTLY TWO THINGS: a stage that failed, or a decision only this person can make and without which the build cannot go on.\n' +
         'A paused or failed build is continued with resume_build, never restarted. Resume ONCE. If the same stage fails the same way twice, stop and quote the actual error text — never say a cause has been identified, or that retrying will fix it, unless a tool result says so. Listing resumable builds again is not a diagnosis.\n' +
         'A NEW requirement is always a NEW build. Do not go looking for an older paused build and resume that instead — it was built from a different requirement.\n' +
-        'To change an existing agent, read it with agent_details and apply edits with update_agent, which waits for approval. rewrite_prompt polishes instructions without saving. ' +
+        'To change an existing agent, read it with agent_details first. update_agent edits what a node already says — instructions, routing description, model, approval. add_agent_tool gives it a capability it does not have yet, naming the tool, the server that publishes it, and when to use it. Both wait for approval. Adding a tool does not teach the agent when to reach for it, so follow it with update_agent on the instructions unless the tool description says it plainly enough. rewrite_prompt polishes instructions without saving. ' +
         'NOTHING RUNS BETWEEN TURNS. When you reply, every tool has already stopped. Report the agent API name, what it does in a line or two, and the outstanding setup. Never a transcript.',
       tools: [
         { name: 'Build the agent', provider: PLATFORM, toolName: 'build_agent', description: 'Build the whole agent from a requirement and return when it is saved.' },
@@ -113,6 +113,7 @@ export const archonCopilotAgent: SystemAgentSpec = {
         { name: 'Rewrite prompt', provider: PLATFORM, toolName: 'rewrite_prompt', description: 'Polish instructions in the house style; nothing saved.' },
         { name: 'Agent details', provider: PLATFORM, toolName: 'agent_details', description: 'One agent as the canvas holds it, with node ids.' },
         { name: 'Update agent', provider: PLATFORM, toolName: 'update_agent', description: 'Apply edits to an agent\'s nodes. Waits for approval.', requiresApproval: true },
+        { name: 'Add a tool to an agent', provider: PLATFORM, toolName: 'add_agent_tool', description: 'Give an existing agent a tool it does not have yet.' },
       ],
     },
   ],
