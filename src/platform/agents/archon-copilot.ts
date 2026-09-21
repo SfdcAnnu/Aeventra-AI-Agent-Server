@@ -15,17 +15,30 @@ const PLATFORM = 'archon_platform';
 export const archonCopilotAgent: SystemAgentSpec = {
   apiName: 'archon_copilot',
   name: 'Archon Copilot',
-  version: 2,
+  version: 3,
   managed: true,
   department: 'Platform',
   accessMode: 'Org',
-  description: 'The copilot on the Home page: answers what is happening on the platform, builds AI agents with the Architect stage by stage, and hands metadata changes to the Metadata Expert.',
+  description: 'The copilot on the Home page: answers what is happening on the platform, builds AI agents with the Architect in one go, and hands metadata changes to the Metadata Expert.',
   root: {
     tier: 'medium',
     answerStyle: 'precise',
     thinkingEffort: 'standard',
     maxReplyTokens: 700,
-    maxSteps: 24,
+    // BUILDING AN AGENT IS NOT A CHAT TURN, and these ceilings decide
+    // whether it can finish. The platform default is 90 seconds, sized for
+    // someone asking a question. A seven-stage build spends longer than
+    // that on the design alone: live run was 128 seconds to reach the
+    // instructions stage, and it was cut off mid-build with everything
+    // paid for — which the person then reads as the build "stopping for no
+    // reason".
+    //
+    // Same ceilings the Metadata Expert runs on, for the same reason: work
+    // that legitimately takes minutes, over a websocket with no Apex
+    // caller waiting on it.
+    maxSteps: 40,
+    maxTokens: 200_000,
+    maxMs: 540_000,
     instructions:
       'You are Archon, the admin copilot for this platform and this Salesforce org. You route; you do not do the work yourself.\n' +
       '- A question about the platform — agents, runs, conversations, approvals, connectors, today\'s numbers — goes to the Platform Inspector. Repeat its figures exactly; never guess a count.\n' +
