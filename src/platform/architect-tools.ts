@@ -70,8 +70,8 @@ function view(job: BuildJob, key: string, next: string): Record<string, unknown>
   };
 }
 
-async function waitFor(jobId: string, orgId: string): Promise<BuildJob | undefined> {
-  const until = Date.now() + WAIT_MS;
+async function waitFor(jobId: string, orgId: string, waitMs = WAIT_MS): Promise<BuildJob | undefined> {
+  const until = Date.now() + waitMs;
   let job = await getBuildJob(jobId, orgId);
   while (job && (job.status === 'queued' || job.status === 'running') && Date.now() < until) {
     await new Promise(r => setTimeout(r, POLL_MS));
@@ -115,6 +115,48 @@ const continueTools = STAGE_TOOL.slice(1).map(([key, name, title, description, n
     },
   }),
 );
+
+/** How long build_agent waits for a WHOLE build before handing back
+ *  "still running". Sized under the copilot's 540s turn ceiling with room
+ *  for the model to speak afterwards. */
+const BUILD_WAIT_MS = Number(process.env.ARCHITECT_BUILD_WAIT_MS) || 420_000;
+
+/**
+ * The whole build in ONE call.
+ *
+ * The stage tools exist so an agent CAN stop and talk between stages. Used
+ * for an ordinary "build me an agent" they are the wrong shape: each one
+ * waits 48 seconds and then reports "still running", and design and prompt
+ * writing both routinely take longer than that. The caller then either
+ * asks the person a pointless question or calls the next stage tool
+ * against a job that is still working — which is what made a build take
+ * seven round trips and still not finish.
+ *
+ * Someone who described the agent they want has already asked for all of
+ * it. So this runs every stage with no stopAfter and returns when the
+ * agent is saved. If the build outlives the wait, it says so and names the
+ * job, and get_build_status carries on from there without troubling
+ * anyone.
+ */
+const buildAgent = define({
+  name: 'build_agent',
+  title: 'Build the agent',
+  description:
+    'Build a complete agent from a requirement and return when it is saved as a Draft: understand, survey the org, ' +
+    'match capabilities, design, write instructions, review, list setup and compile. This is the normal way to build ' +
+    'an agent. Use the individual stage tools only when the person has asked to go one stage at a time.',
+  inputSchema: {
+    requirement: z.string().min(20).max(12_000).describe('What the agent should do, in their own words — two or three full sentences at least.'),
+    attachmentText: z.string().max(60_000).optional().describe('Text of a document the person provided, if any.'),
+  },
+  readOnly: false,
+  handler: async ({ requirement, attachmentText }, p) => {
+    const job = createBuildJob(p.orgId, requirement, { attachmentText });
+    const done = await waitFor(job.id, p.orgId, BUILD_WAIT_MS);
+    const last = [...(done ?? job).steps].reverse().find(s => s.state === 'done' || s.state === 'warn')?.key ?? 'understand';
+    return ok(view(done ?? job, last, ''));
+  },
+});
 
 const getBuildStatus = define({
   name: 'get_build_status',
@@ -187,4 +229,4 @@ const rewrite = define({
   },
 });
 
-export const ARCHITECT_TOOLS = [analyzeRequirement, ...continueTools, getBuildStatus, listResumable, resumeBuild, discardBuild, rewrite];
+export const ARCHITECT_TOOLS = [buildAgent, analyzeRequirement, ...continueTools, getBuildStatus, listResumable, resumeBuild, discardBuild, rewrite];

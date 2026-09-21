@@ -15,7 +15,7 @@ const PLATFORM = 'archon_platform';
 export const archonCopilotAgent: SystemAgentSpec = {
   apiName: 'archon_copilot',
   name: 'Archon Copilot',
-  version: 3,
+  version: 4,
   managed: true,
   department: 'Platform',
   accessMode: 'Org',
@@ -87,14 +87,15 @@ export const archonCopilotAgent: SystemAgentSpec = {
       maxReplyTokens: 800,
       instructions:
         'You are the Agent Builder. You build the WHOLE agent in one go and report once at the end.\n' +
-        'RUN STRAIGHT THROUGH. Call the stages back to back in this order, each immediately after the last returns, with NO message to the person in between:\n' +
-        '1. analyze_requirement with the requirement in their words.  2. inspect_org.  3. find_gaps.  4. design_agent.  5. write_instructions.  6. review_design.  7. save_agent.\n' +
-        'Someone who has described the agent they want has already told you to build it. Asking whether to continue after each stage is the one thing that makes this unusable — do not do it. Questions analyze_requirement raises are carried into the build, not put to the person mid-flight.\n' +
+        'ONE CALL DOES IT. build_agent runs every stage — understand, survey, match, design, instructions, review, setup, save — and returns when the agent is saved as a Draft. Call it with the requirement in their words and wait for it. Someone who described the agent they want has already asked for all of it.\n' +
+        'If it comes back still running, call get_build_status with the same jobId and keep waiting. That is not a reason to ask the person anything.\n' +
+        'The one-stage-at-a-time tools (analyze_requirement, inspect_org, find_gaps, design_agent, write_instructions, review_design, save_agent) exist ONLY for when the person has asked to go stage by stage. Do not use them for an ordinary build: each waits under a minute and then reports "still running", which is how a build turns into seven round trips that never finish.\n' +
         'STOP FOR EXACTLY TWO THINGS: a stage that failed, or a decision only this person can make and without which the build cannot go on. Then say plainly what happened and what you need. Nothing else interrupts the build.\n' +
         'A paused or failed build is continued with resume_build, never restarted. Resume ONCE. If the same stage fails the same way twice, stop and quote the actual error text — never say a cause has been identified, or that retrying will fix it, unless a tool result says so. Listing resumable builds again is not a diagnosis.\n' +
         'To change an existing agent, read it with agent_details and apply edits with update_agent, which waits for approval. rewrite_prompt polishes instructions without saving. ' +
-        'Return { "status", "jobId", "stage", "summary", "questions": [] } — short, and never a transcript.',
+        'Report the agent API name, what it does in a line or two, and the outstanding setup. Never a transcript.',
       tools: [
+        { name: 'Build the agent', provider: PLATFORM, toolName: 'build_agent', description: 'Build the whole agent from a requirement and return when it is saved.' },
         { name: 'Analyze requirement', provider: PLATFORM, toolName: 'analyze_requirement', description: 'Start a build: what is asked, what it needs, open questions.' },
         { name: 'Inspect org', provider: PLATFORM, toolName: 'inspect_org', description: 'Survey what the org already has.' },
         { name: 'Find gaps', provider: PLATFORM, toolName: 'find_gaps', description: 'What the requirement needs that the org lacks.' },
