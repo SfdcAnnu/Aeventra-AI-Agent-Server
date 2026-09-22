@@ -159,12 +159,64 @@ export function modelForTier(engine: ArchitectEngine, tier: 'small' | 'medium' |
   return engine.models[0];
 }
 
-// Rough $ accounting per tier (same placeholder rates as the estimator).
+// Rough $ accounting per tier. The FALLBACK, for a model id nothing here
+// recognises — see priceFor below.
 const TIER_USD_PER_MTOK = {
   large: { in: 15, out: 75 },
   medium: { in: 3, out: 15 },
   small: { in: 0.8, out: 4 },
 } as const;
+
+/**
+ * THE CEILING IS IN DOLLARS, SO THE ARITHMETIC HAS TO BE TOO.
+ *
+ * Cost was read from the TIER, not from the model that ran, which made a
+ * $4.00 stop mean different things in different orgs. An org on Haiku was
+ * billed at the large-tier rate and stopped at roughly a quarter of the
+ * spend it had authorised; an org on a reasoning model overshot before the
+ * counter noticed. Live: a build capped at $0.95 stopped at $1.35.
+ *
+ * Prefixes, not exact ids: providers version model names constantly
+ * (-20250219, -latest, -v2) and an exact-match table is stale the week
+ * after it is written. Longest prefix wins, so a specific entry beats a
+ * family one. USD per million tokens.
+ */
+const MODEL_USD_PER_MTOK: Array<{ prefix: string; in: number; out: number }> = [
+  { prefix: 'claude-opus-4',    in: 15,   out: 75 },
+  { prefix: 'claude-opus',      in: 15,   out: 75 },
+  { prefix: 'claude-sonnet',    in: 3,    out: 15 },
+  { prefix: 'claude-3-7-sonnet', in: 3,   out: 15 },
+  { prefix: 'claude-3-5-sonnet', in: 3,   out: 15 },
+  { prefix: 'claude-haiku',     in: 0.8,  out: 4 },
+  { prefix: 'claude-3-5-haiku', in: 0.8,  out: 4 },
+  { prefix: 'gpt-5-mini',       in: 0.25, out: 2 },
+  { prefix: 'gpt-5-nano',       in: 0.05, out: 0.4 },
+  { prefix: 'gpt-5',            in: 1.25, out: 10 },
+  { prefix: 'gpt-4.1-mini',     in: 0.4,  out: 1.6 },
+  { prefix: 'gpt-4.1-nano',     in: 0.1,  out: 0.4 },
+  { prefix: 'gpt-4.1',          in: 2,    out: 8 },
+  { prefix: 'gpt-4o-mini',      in: 0.15, out: 0.6 },
+  { prefix: 'gpt-4o',           in: 2.5,  out: 10 },
+  { prefix: 'o4-mini',          in: 1.1,  out: 4.4 },
+  { prefix: 'o3-mini',          in: 1.1,  out: 4.4 },
+  { prefix: 'o3',               in: 2,    out: 8 },
+  { prefix: 'gemini-2.5-pro',   in: 1.25, out: 10 },
+  { prefix: 'gemini-2.5-flash', in: 0.3,  out: 2.5 },
+  { prefix: 'gemini-2.0-flash', in: 0.1,  out: 0.4 },
+  { prefix: 'gemini',           in: 0.3,  out: 2.5 },
+];
+
+/** What this call actually costs per million tokens. */
+export function priceFor(modelId: string | undefined, tier: keyof typeof TIER_USD_PER_MTOK): { in: number; out: number } {
+  const id = (modelId ?? '').toLowerCase();
+  let best: { prefix: string; in: number; out: number } | undefined;
+  for (const row of MODEL_USD_PER_MTOK) {
+    if (id.startsWith(row.prefix) && (!best || row.prefix.length > best.prefix.length)) best = row;
+  }
+  // An unknown id falls back to the tier rather than to zero: a model we
+  // cannot price must never look free, or the ceiling stops governing.
+  return best ? { in: best.in, out: best.out } : TIER_USD_PER_MTOK[tier];
+}
 
 export interface SpecialistUsage {
   tokensIn: number;
@@ -315,7 +367,7 @@ export async function callSpecialist<T = unknown>(opts: {
     result = opts.rawJson ? parseLooseJson(text, node.label) : text;
   }
 
-  const rate = TIER_USD_PER_MTOK[tier];
+  const rate = priceFor(modelId, tier);
   const costUsd = (tokensIn * rate.in + tokensOut * rate.out) / 1e6;
   logger.info(
     { specialist: node.id, model: modelId, tier, tokensIn, tokensOut, costUsd: Number(costUsd.toFixed(4)), ms: Date.now() - t0 },

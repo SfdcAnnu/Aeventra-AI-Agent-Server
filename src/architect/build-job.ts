@@ -593,7 +593,45 @@ interface MatchResult {
 }
 
 // ── The build ────────────────────────────────────────────────────────
+/**
+ * Take ownership of this build in Postgres before spending anything on it.
+ *
+ * `jobs` is an in-memory Map and saveJob swallows its own failures, so the
+ * running build lives in a process and the table is a best-effort copy.
+ * On one instance that costs a build on restart. On two it costs money:
+ * both can resume the same chain and buy the same survey twice, and a
+ * status poll landing on the other instance reads a stale row.
+ *
+ * A conditional UPDATE is the whole fix. Exactly one caller can move a row
+ * out of queued/paused/failed, and whoever loses stops before the first
+ * model call rather than racing.
+ */
+async function claimBuild(job: BuildJob): Promise<boolean> {
+  try {
+    const { count } = await prisma.architectBuild.updateMany({
+      where: { id: job.id, orgId: job.orgId, status: { in: ['queued', 'paused', 'failed'] } },
+      data: { status: 'running' },
+    });
+    return count === 1;
+  } catch (err) {
+    // The row may not exist yet: launch() persists in the background, and
+    // a brand-new build is queued in memory before its first write lands.
+    // Refusing here would fail every build whose insert is a millisecond
+    // behind, so an unreadable table is not treated as someone else's
+    // claim.
+    logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : err }, 'architect_build_claim_failed');
+    return true;
+  }
+}
+
 async function runBuild(job: BuildJob): Promise<void> {
+  if (!(await claimBuild(job))) {
+    logger.info({ jobId: job.id, orgId: job.orgId }, 'architect_build_already_claimed');
+    throw new Error(
+      'This build is already running somewhere else. Watch that one rather than starting it again — ' +
+      'nothing has been charged twice.',
+    );
+  }
   job.status = 'running';
   const attachmentText = job.attachmentText;
   const conn = await getOrgConnection(job.orgId);
