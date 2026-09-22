@@ -5,6 +5,7 @@
  */
 import { prisma } from './client';
 import type { Connector } from '@prisma/client';
+import { seal, open } from '../lib/secret-box';
 
 export interface ConnectorInput {
   orgId: string;
@@ -14,38 +15,68 @@ export interface ConnectorInput {
   configuredBy?: string | null;
 }
 
+/**
+ * Connector credentials are sealed in the column and opened for the
+ * caller, so nothing outside this file changes. See lib/secret-box.ts.
+ *
+ * Three fields, all of them a key to something that is not ours:
+ * accessToken and refreshToken for the connected account, and apiKey for
+ * providers that authenticate that way — a customer's own AI provider
+ * key among them.
+ */
+function openConnector<T extends Connector | null>(row: T): T {
+  if (!row) return row;
+  return {
+    ...row,
+    accessToken: open(row.accessToken),
+    refreshToken: open(row.refreshToken),
+    apiKey: open(row.apiKey),
+  } as T;
+}
+
+const openAll = (rows: Connector[]): Connector[] => rows.map(r => openConnector(r));
+
+/** Seal whichever of the three secret fields a patch actually carries. */
+function sealPatch<T extends Record<string, unknown>>(patch: T): T {
+  const out: Record<string, unknown> = { ...patch };
+  for (const f of ['accessToken', 'refreshToken', 'apiKey']) {
+    if (f in out && typeof out[f] === 'string') out[f] = seal(out[f] as string);
+  }
+  return out as T;
+}
+
 export const ConnectorsRepo = {
   async listForOrg(orgId: string): Promise<Connector[]> {
-    return prisma.connector.findMany({
+    return openAll(await prisma.connector.findMany({
       where: { orgId },
       orderBy: [{ providerKey: 'asc' }, { createdAt: 'desc' }],
-    });
+    }));
   },
 
   async getById(orgId: string, id: string): Promise<Connector | null> {
-    return prisma.connector.findFirst({ where: { id, orgId } });
+    return openConnector(await prisma.connector.findFirst({ where: { id, orgId } }));
   },
 
   async getByOrgAndProvider(orgId: string, providerKey: string): Promise<Connector | null> {
-    return prisma.connector.findFirst({
+    return openConnector(await prisma.connector.findFirst({
       where: { orgId, providerKey },
-    });
+    }));
   },
 
   /** The chatting user's own connection for a provider (Connected only). */
   async getByOrgProviderAndUser(orgId: string, providerKey: string, userId: string): Promise<Connector | null> {
-    return prisma.connector.findFirst({
+    return openConnector(await prisma.connector.findFirst({
       where: { orgId, providerKey, configuredBy: userId, status: 'Connected' },
-    });
+    }));
   },
 
   /** Every per-user row for a provider in this org — admin roster view
    *  (Salesforce access page). Excludes org-level rows (configuredBy null). */
   async listUsersForOrgProvider(orgId: string, providerKey: string): Promise<Connector[]> {
-    return prisma.connector.findMany({
+    return openAll(await prisma.connector.findMany({
       where: { orgId, providerKey, configuredBy: { not: null } },
       orderBy: [{ status: 'asc' }, { lastConnectedAt: 'desc' }],
-    });
+    }));
   },
 
   /** Upsert a Pending row before the OAuth round-trip starts.
@@ -59,10 +90,10 @@ export const ConnectorsRepo = {
       },
     });
     if (existing) {
-      return prisma.connector.update({
+      return openConnector(await prisma.connector.update({
         where: { id: existing.id },
         data: { displayName: input.displayName, status: 'Pending' },
-      });
+      }));
     }
     return prisma.connector.create({
       data: {
@@ -85,22 +116,22 @@ export const ConnectorsRepo = {
     accountEmail?: string | null;
     externalAccountId?: string | null;
   }): Promise<Connector> {
-    return prisma.connector.update({
+    return openConnector(await prisma.connector.update({
       where: { id },
       data: {
         status: 'Connected',
         lastConnectedAt: new Date(),
         lastErrorMessage: null,
-        ...patch,
+        ...sealPatch(patch),
       },
-    });
+    }));
   },
 
   async markError(id: string, message: string): Promise<Connector> {
-    return prisma.connector.update({
+    return openConnector(await prisma.connector.update({
       where: { id },
       data: { status: 'Error', lastErrorMessage: message.slice(0, 4000) },
-    });
+    }));
   },
 
   async disconnect(orgId: string, id: string): Promise<Connector> {
@@ -127,9 +158,9 @@ export const ConnectorsRepo = {
     return prisma.connector.update({
       where: { id },
       data: {
-        accessToken: patch.accessToken,
+        accessToken: seal(patch.accessToken) as string,
         tokenExpiresAt: patch.tokenExpiresAt ?? null,
-        refreshToken: patch.refreshToken ?? undefined,
+        refreshToken: patch.refreshToken === undefined ? undefined : seal(patch.refreshToken),
         instanceUrl: patch.instanceUrl ?? undefined,
         status: 'Connected',
         lastErrorMessage: null,
