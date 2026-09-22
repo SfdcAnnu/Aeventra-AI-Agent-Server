@@ -4,16 +4,25 @@ import { runHeadlessAiStep, parseScoreTail } from '../chat/headless';
 import { logger } from '../logger';
 
 /**
- * AI orchestrator nodes for FLOW (trigger-mode) runs — claude / gpt4.
+ * AI orchestrator nodes for FLOW (trigger-mode) runs.
  *
- * Replaces the old ai.ts two-tier/flat dispatch loop entirely: this calls
- * the SAME headless-chat path chat mode uses, so Managed MCP tools, custom
- * Apex/Flow tools, and per-user engine credentials behave identically in
- * chat and in flows. (Registered AFTER nodes/ai.ts in engine.ts's
- * side-effect imports, so these overwrite ai.ts's claude/gpt4 placeholders
- * — gemini/einstein/sentiment/embed there are untouched.)
+ * These call the same runtime chat calls, so the approval gate, the tool
+ * allow-list, the turn budget and the loop detector apply to a triggered
+ * run exactly as they do to a person typing.
+ *
+ * GEMINI IS REGISTERED HERE NOW. It used to live in nodes/ai.ts, which
+ * refused outright the moment a tool catalog was attached: "Gemini
+ * orchestrator with tool catalogs is not wired yet." That was never a
+ * Gemini limitation — it was a consequence of the old adapters, which
+ * delegated the tool loop to each provider's own Managed MCP, and Google
+ * has none. The runtime binds ordinary tool definitions to any provider,
+ * so an engine that works in chat now works from a trigger.
+ *
+ * (Registered AFTER nodes/ai.ts in engine.ts's side-effect imports, so
+ * these overwrite ai.ts's placeholders — einstein/sentiment/embed there
+ * are untouched.)
  */
-const aiStepExec = (subType: 'claude' | 'gpt4'): NodeExecutor => async (node, ctx) => {
+const aiStepExec = (subType: string): NodeExecutor => async (node, ctx) => {
   try {
     const result = await runHeadlessAiStep(ctx, node);
     const { score, priority, cleanText } = parseScoreTail(result.assistantText);
@@ -67,3 +76,4 @@ const aiStepExec = (subType: 'claude' | 'gpt4'): NodeExecutor => async (node, ct
 
 register('claude', aiStepExec('claude'));
 register('gpt4', aiStepExec('gpt4'));
+register('gemini', aiStepExec('gemini'));

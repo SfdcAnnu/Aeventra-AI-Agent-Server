@@ -124,8 +124,16 @@ ${parts.volatile}` : parts.stable);
 }
 
 export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult> {
-  const aiNode = req.agent.nodes.find(n => n.nodeType === 'ai') ?? null;
-  if (!aiNode) throw new Error('Agent has no AI orchestrator node — cannot run chat mode.');
+  // A flow names the node it walked to; chat names nothing and gets the
+  // first, as it always has.
+  const aiNode = (req.aiNodeId
+    ? req.agent.nodes.find(n => n.id === req.aiNodeId && n.nodeType === 'ai')
+    : req.agent.nodes.find(n => n.nodeType === 'ai')) ?? null;
+  if (!aiNode) {
+    throw new Error(req.aiNodeId
+      ? `AI node ${req.aiNodeId} is not on this agent — cannot run the step.`
+      : 'Agent has no AI orchestrator node — cannot run chat mode.');
+  }
 
   const install = await InstallsRepo.findByOrgId(req.context.orgId);
   if (!install?.sfAccessToken) {

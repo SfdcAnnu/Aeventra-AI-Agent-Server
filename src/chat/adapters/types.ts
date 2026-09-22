@@ -74,6 +74,14 @@ export type StageSink = (update: StageUpdate) => void;
 
 export interface ChatTurnRequest {
   agent: AgentDefinition;
+  /** WHICH ai node is running this turn.
+   *
+   *  Chat has one orchestrator and leaves this unset, so the runtime
+   *  takes the first ai node — the behaviour it has always had. A FLOW
+   *  canvas can hold several, and the walker arrives at a particular
+   *  one: running the first instead would silently use another node's
+   *  model, instructions and guardrails. */
+  aiNodeId?: string;
   sessionId: string;
   history: ChatHistoryMessage[];
   newUserMessage: string;

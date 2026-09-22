@@ -1,17 +1,32 @@
 /**
- * Headless AI step — runs a flow's AI node through the SAME adapters chat
- * uses (runClaudeAdapter / runOpenAiAdapter), so Managed MCP tools, custom
- * Apex/Flow tools, and per-user engine credentials all behave identically
- * whether the agent is chatting or executing autonomously.
+ * Headless AI step — a flow's AI node runs on THE SAME RUNTIME AS CHAT.
  *
- * "Headless" = no chat history, no session — one synthetic user turn built
- * from the trigger record + upstream node outputs, same shape ai.ts used
- * to hand-assemble before this replaced it.
+ * "Headless" = no chat history, no session: one synthetic user turn built
+ * from the trigger record + upstream node outputs.
+ *
+ * IT DID NOT USED TO BE THE SAME RUNTIME, AND THAT WAS THE BUG. This file
+ * called runClaudeAdapter / runOpenAiAdapter, which hand the tool loop to
+ * the model provider: `mcp_servers` on Anthropic, and on OpenAI
+ * `require_approval: 'never'`, in those words. The provider received the
+ * MCP URL and the org's Salesforce token and ran the tools itself. So an
+ * agent whose delete tool was ticked REQUIRES APPROVAL showed an approval
+ * card in chat and deleted the record with no prompt when a Flow ran it —
+ * same agent, same AgentNode__c, same requiresApproval flag, read by code
+ * only the chat path executed.
+ *
+ * Everything that makes a write safe lives in the runtime, not in the
+ * agent record: the approval gate, the tool allow-list, the turn budget,
+ * the loop detector, and tool arguments in THIS server's logs rather than
+ * inside the provider. Routing here is what applies them to automation.
+ *
+ * chat-engine.ts always said this was the intent — "every caller
+ * (ws/gateway.ts, chat/headless.ts) is untouched: same runChatTurn
+ * signature" — and the ChatTurnRequest below was already the right shape.
+ * Only the call at the bottom was wrong.
  */
 import type { AgentNode } from '../types';
 import type { ExecutionContext } from '../orchestrator/context';
-import { runClaudeAdapter } from './adapters/claude';
-import { runOpenAiAdapter } from './adapters/openai';
+import { runChatTurn } from './chat-engine';
 import { buildConnectorInputsFromAgent } from './adapters/connectors-from-agent';
 import type { ChatTurnRequest, ChatTurnResult } from './adapters/types';
 
@@ -36,6 +51,9 @@ export async function runHeadlessAiStep(
 
   const req: ChatTurnRequest = {
     agent: ctx.agent,
+    // The node the walker arrived at, not whichever ai node happens to be
+    // first on the canvas.
+    aiNodeId: aiNode.id,
     sessionId: `run-${ctx.correlationId}`,
     history: [],
     newUserMessage,
@@ -49,16 +67,12 @@ export async function runHeadlessAiStep(
     },
   };
 
-  switch (aiNode.nodeSubType) {
-    case 'claude':
-      return runClaudeAdapter(req, aiNode);
-    case 'gpt4':
-      return runOpenAiAdapter(req, aiNode);
-    default:
-      throw new Error(
-        `Flow AI step does not support node sub-type "${aiNode.nodeSubType}" yet — use a Claude or GPT node.`,
-      );
-  }
+  // No switch on nodeSubType any more. The old adapters had one because
+  // each provider's Managed MCP was its own integration, which is also why
+  // Gemini threw here while working perfectly well in chat. The runtime
+  // binds the same tools to any provider, so the node's own model config
+  // decides and every engine the builder offers works from a trigger.
+  return runChatTurn(req);
 }
 
 /** Best-effort extraction of the {score, priority} tail the model was asked to append. */

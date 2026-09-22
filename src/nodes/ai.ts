@@ -1,5 +1,4 @@
 import { register } from './registry';
-import { callGemini } from '../mcp/servers/gemini-models';
 import { resolveEngine } from '../chat/engine-resolver';
 import {
   getCatalogTools,
@@ -64,53 +63,6 @@ function discoverCatalogs(node: AgentNode, ctx: ExecutionContext): DiscoveredCat
   return result;
 }
 
-// ── Gemini orchestrator ──────────────────────────────────────────────
-// Works WITHOUT tool catalogs (plain scoring call). WITH catalogs: clear
-// "not wired" error — Gemini has no headless-adapter equivalent yet.
-
-const geminiExec: NodeExecutor = async (node, ctx) => {
-  const config = (node.config as OrchestratorConfig) || {};
-  const catalogs = discoverCatalogs(node, ctx);
-
-  if (catalogs.length > 0) {
-    return {
-      nodeId: node.id,
-      nodeSubType: 'gemini',
-      success: false,
-      error:
-        'Gemini orchestrator with tool catalogs is not wired yet. Use a Claude or GPT node for tool orchestration, or remove the downstream catalogs.',
-    };
-  }
-
-  try {
-    const creds = resolveEngine('gemini', ctx.engineOverride);
-    const result = await callGemini({
-      apiKey: creds.apiKey,
-      model: config.model || 'gemini-2.5-flash',
-      systemPrompt: config.systemPrompt || '',
-      knowledgeBase: config.useKnowledgeBase !== false ? ctx.agent.knowledgeBase : undefined,
-      userMessage: ctx.interpolate(config.instruction || '') || 'Score the trigger payload.',
-      temperature: config.temperature,
-      maxTokens: config.maxTokens,
-    });
-
-    return {
-      nodeId: node.id,
-      nodeSubType: 'gemini',
-      success: true,
-      output: { finalText: result.text, score: result.score, priority: result.priority, reason: result.reason },
-      score: result.score,
-      priority: result.priority,
-      reason: config.captureReasoning !== false ? result.text : result.reason,
-      toolsUsed: result.toolsUsed,
-    };
-  } catch (err) {
-    logger.error({ err, nodeId: node.id }, 'gemini_node_failed');
-    return { nodeId: node.id, nodeSubType: 'gemini', success: false, error: (err as Error).message };
-  }
-};
-
-register('gemini', geminiExec);
 
 // ── Placeholders for less-used AI sub-types ─────────────────────────
 
