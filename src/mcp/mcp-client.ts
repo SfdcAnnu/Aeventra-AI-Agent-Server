@@ -24,11 +24,13 @@ async function rpc<T>(
   token: string,
   sessionId: string | undefined,
   body: Record<string, unknown>,
+  extraHeaders: Record<string, string> = {},
 ): Promise<{ result: T | undefined; sessionId: string | undefined }> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream',
+    ...extraHeaders,
   };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
@@ -55,17 +57,29 @@ async function rpc<T>(
   return { result: json?.result, sessionId: newSessionId };
 }
 
-async function initSession(baseUrl: string, token: string): Promise<string> {
+/**
+ * A SERVER THAT RETURNS NO SESSION ID IS NOT BROKEN. It is stateless, and
+ * that is the shape the current MCP spec prefers: every request carries
+ * its own bearer and any instance can serve it. The Metadata server is
+ * built that way; the CRM server is not.
+ *
+ * This used to throw on a missing id, so a deterministic "Call a Tool"
+ * node aimed at the Metadata server failed outright — while the very same
+ * tool worked in chat, because the LangGraph client already tolerates it.
+ * Undefined now flows through, and rpc simply omits the header.
+ */
+async function initSession(baseUrl: string, token: string, extraHeaders: Record<string, string> = {}): Promise<string | undefined> {
   const { sessionId } = await rpc(baseUrl, token, undefined, {
     jsonrpc: '2.0', id: 1, method: 'initialize',
     params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'archon-server', version: '1.0' } },
-  });
-  if (!sessionId) throw new Error(`MCP server ${baseUrl} did not return a session id on initialize`);
+  }, extraHeaders);
+  if (!sessionId) return undefined;
   await fetch(`${baseUrl}/mcp`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`, 'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream', 'mcp-session-id': sessionId,
+      ...extraHeaders,
     },
     body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
   }).catch(() => null);
@@ -73,11 +87,18 @@ async function initSession(baseUrl: string, token: string): Promise<string> {
 }
 
 /** One-shot tool call. Returns the tool's text content, parsed as JSON when possible. */
-export async function callMcpTool(baseUrl: string, token: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
-  const sessionId = await initSession(baseUrl, token);
+export async function callMcpTool(
+  baseUrl: string,
+  token: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  extraHeaders: Record<string, string> = {},
+): Promise<unknown> {
+  const sessionId = await initSession(baseUrl, token, extraHeaders);
   const { result } = await rpc<{ content?: Array<{ type: string; text?: string }>; isError?: boolean }>(
     baseUrl, token, sessionId,
     { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: toolName, arguments: args } },
+    extraHeaders,
   );
   const text = result?.content?.find(c => c.type === 'text')?.text;
   if (result?.isError) {
