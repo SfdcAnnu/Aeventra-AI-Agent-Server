@@ -102,7 +102,7 @@ export interface ResolvedMcpServer {
 // zero-overlap list would hide EVERY tool from the model. We validate the
 // selection against the server's public /tools catalog (cached 10 min):
 //   • partial overlap → keep only the valid names
-//   • zero overlap    → treat as legacy garbage: expose ALL tools + warn
+//   • zero overlap    → the saved names have rotted: DROP THE SERVER + warn
 //   • catalog fetch fails → pass through unchanged (can't judge)
 
 const toolCatalogCache = new Map<string, { names: Set<string> | null; fetchedAt: number }>();
@@ -162,15 +162,33 @@ export async function ensureMcpServerAwake(base: string): Promise<void> {
   logger.warn({ base }, 'mcp_server_still_cold_after_wake_wait');
 }
 
-async function sanitizeAllowedTools(baseUrl: string, allowedTools: string[]): Promise<string[]> {
+/**
+ * AN EMPTY LIST IS NOT "NOTHING ALLOWED". IT IS "NO RESTRICTION".
+ *
+ * This used to return [] when every saved name was stale, and the log
+ * event said so out loud: allowed_tools_all_stale_exposing_all. Downstream
+ * an empty array means the opposite of what it looks like — openai.ts only
+ * sets `allowed_tools` when the array is non-empty, and claude.ts skips its
+ * violation check entirely — so an agent restricted to two read tools was
+ * handed the whole catalogue, deleteSobjectRecord and sendEmail included.
+ *
+ * Renaming a tool on an MCP server is an ordinary thing to do. The cost of
+ * it must be "this agent loses a tool", never "this agent gains all of
+ * them". So a list that matches nothing now drops the SERVER: null tells
+ * the caller to skip it, the same way a missing token already does.
+ *
+ * A list that was SAVED empty still means the whole catalogue — that is a
+ * deliberate choice someone made, not a name that rotted.
+ */
+export async function sanitizeAllowedTools(baseUrl: string, allowedTools: string[]): Promise<string[] | null> {
   if (!allowedTools || allowedTools.length === 0) return [];
   const names = await fetchToolNames(baseUrl);
   if (!names || names.size === 0) return allowedTools;   // can't validate
   const valid = allowedTools.filter(t => names.has(t));
   if (valid.length === 0) {
-    logger.warn({ baseUrl, staleTools: allowedTools },
-      'allowed_tools_all_stale_exposing_all — re-save the agent to pick fresh tool names');
-    return [];
+    logger.warn({ baseUrl, staleTools: allowedTools, known: [...names].slice(0, 20) },
+      'allowed_tools_all_stale_server_dropped — re-save the agent to pick fresh tool names');
+    return null;
   }
   if (valid.length < allowedTools.length) {
     logger.warn({ baseUrl, dropped: allowedTools.filter(t => !names.has(t)) },
@@ -288,7 +306,9 @@ export async function resolveMcpServers(
         continue;
       }
       await ensureMcpServerAwake(base);
-      let allowedTools = await sanitizeAllowedTools(base, c.allowedTools ?? []);
+      const checked = await sanitizeAllowedTools(base, c.allowedTools ?? []);
+      if (checked === null) continue;   // every saved name is stale — fail closed
+      let allowedTools = checked;
 
       // Org-specific custom tools (Apex actions / Flows) — the MCP server
       // registers them dynamically from the ?custom= query param and names
@@ -317,12 +337,17 @@ export async function resolveMcpServers(
     const base = config.salesforce.remoteMcpUrl.replace(/\/+$/, '');
     const { allowedTools } = discoverAllowedTools(req.agent, aiNode);
     await ensureMcpServerAwake(base);
-    out.push({
-      name:  'salesforce',
-      url:   `${base}/mcp`,
-      token: sfAccessToken,
-      allowedTools: await sanitizeAllowedTools(base, allowedTools),
-    });
+    const checked = await sanitizeAllowedTools(base, allowedTools);
+    // Same rule as the connector path above: a list that matches nothing
+    // drops the server rather than opening it.
+    if (checked !== null) {
+      out.push({
+        name:  'salesforce',
+        url:   `${base}/mcp`,
+        token: sfAccessToken,
+        allowedTools: checked,
+      });
+    }
   }
   return out;
 }
