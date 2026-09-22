@@ -102,7 +102,8 @@
       "position": {
         "x": 40,
         "y": 200
-      }
+      },
+      "description": "Use first, on the raw requirement. Turns what the client wrote into capabilities, a trigger, an audience and open questions. Hand over before anything is designed, and never after."
     },
     {
       "id": "survey_org",
@@ -176,7 +177,8 @@
       "position": {
         "x": 240,
         "y": 200
-      }
+      },
+      "description": "Use once the requirement is understood. Reports what the org can actually do — objects, invocable Apex, Flows, MCP tools, knowledge bases — for the integration user, not what merely exists."
     },
     {
       "id": "match_capabilities",
@@ -221,7 +223,8 @@
       "position": {
         "x": 440,
         "y": 200
-      }
+      },
+      "description": "Use once the survey is in. Decides action by action which org capability performs it and whether the agent can supply its inputs at the moment it runs. Produces the matched, partial and missing lists everything downstream depends on."
     },
     {
       "id": "design_flow",
@@ -241,7 +244,8 @@
       "position": {
         "x": 640,
         "y": 200
-      }
+      },
+      "description": "Use once capabilities are matched. Builds the node graph from matched capabilities only, wires every node, and marks blocked ones against their prerequisite."
     },
     {
       "id": "write_prompts",
@@ -260,7 +264,8 @@
       "position": {
         "x": 840,
         "y": 200
-      }
+      },
+      "description": "Use on a design that validates. Writes each agent node instructions in the house shape and each tool node a description. Never changes the graph."
     },
     {
       "id": "report_gaps",
@@ -291,7 +296,8 @@
       "position": {
         "x": 240,
         "y": 380
-      }
+      },
+      "description": "Use when the match found anything partial or missing. Writes each gap as a prerequisite an admin can act on, with owner, steps and blocking status."
     },
     {
       "id": "plan_change",
@@ -342,7 +348,8 @@
       "position": {
         "x": 40,
         "y": 380
-      }
+      },
+      "description": "Use when the client wants an EXISTING agent changed rather than a new one built. Reads the saved agent and plans the edit; it does not build from scratch."
     },
     {
       "id": "evaluate",
@@ -393,7 +400,8 @@
       "position": {
         "x": 640,
         "y": 690
-      }
+      },
+      "description": "Use on a finished design, before it is saved. Judges the design against the REQUIREMENT rather than against its own reasoning, and lists anything the client asked for that it does not deliver."
     },
     {
       "id": "verify_prereqs",
@@ -441,9 +449,9 @@
       "label": "Save the agent",
       "description": "Use once the spec validates. Writes Archon package records only, meaning the agent, its edges, its tools and its prerequisites. Never touches client org metadata.",
       "action": {
-        "kind": "crud",
-        "sobject": "Archon_Agent__c",
-        "operation": "upsert",
+        "kind": "mcp",
+        "connector": "archon_platform",
+        "toolName": "save_agent",
         "discovered": true,
         "sideEffect": true
       },

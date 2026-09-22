@@ -35,11 +35,14 @@ console.log(
   `2. estimator — ${est.modelCallsPerRun} calls/run, cold $${est.coldUsd.toFixed(4)}, warm $${est.warmUsd.toFixed(4)}, ` +
     `${est.cacheSavingPct}% cache saving, ${est.latencySeconds}s, withinBudget=${est.withinBudget}`,
 );
-if (est.modelCallsPerRun !== 18) {
-  console.error(`   EXPECTED 18 model calls (design package's number) — got ${est.modelCallsPerRun}`);
+// 15, not the design package's 18: design_tests, run_tests and
+// build_report described a test-and-report loop the pipeline has never
+// run, and were removed rather than left promising it.
+if (est.modelCallsPerRun !== 15) {
+  console.error(`   EXPECTED 15 model calls ${'—'} got ${est.modelCallsPerRun}`);
   process.exit(1);
 }
-console.log('   matches the design package: 18 model calls per run');
+console.log('   15 model calls per run');
 
 // 3 — a bad spec is rejected precisely.
 const bad = JSON.parse(JSON.stringify(architect)) as AgentSpec;
