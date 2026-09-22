@@ -12,7 +12,8 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
-    "test": "vitest run"
+    "test": "vitest run",
+    "secrets:backfill": "tsx scripts/backfill-secrets.ts"
   },
   "engines": {
     "node": ">=20"

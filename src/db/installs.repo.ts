@@ -14,16 +14,39 @@
  */
 import { prisma } from './client';
 import type { OrgInstall, PendingSetup } from '@prisma/client';
+import { seal, open } from '../lib/secret-box';
+
+/**
+ * Salesforce tokens are sealed on the way in and opened on the way out, so
+ * nothing above this file changes and nothing below it holds a usable
+ * credential. See lib/secret-box.ts.
+ *
+ * sessionKey IS DELIBERATELY NOT SEALED. It is a lookup column —
+ * findBySessionKey resolves the bearer Apex sends — and sealing uses a
+ * fresh IV per write, so the same key would encrypt differently every time
+ * and could never be found again. The right shape for a value that is only
+ * ever VERIFIED is a hash column with the index on it, which is a schema
+ * migration and a dual-read window rather than a wrapper: worth doing, and
+ * not this change.
+ */
+function openInstall(row: OrgInstall | null): OrgInstall | null {
+  if (!row) return null;
+  return {
+    ...row,
+    sfAccessToken: open(row.sfAccessToken) as OrgInstall['sfAccessToken'],
+    sfRefreshToken: open(row.sfRefreshToken) as OrgInstall['sfRefreshToken'],
+  };
+}
 
 export const InstallsRepo = {
   // ── OrgInstall ────────────────────────────────────────────────
 
   async findByOrgId(orgId: string): Promise<OrgInstall | null> {
-    return prisma.orgInstall.findUnique({ where: { orgId } });
+    return openInstall(await prisma.orgInstall.findUnique({ where: { orgId } }));
   },
 
   async findBySessionKey(sessionKey: string): Promise<OrgInstall | null> {
-    return prisma.orgInstall.findUnique({ where: { sessionKey } });
+    return openInstall(await prisma.orgInstall.findUnique({ where: { sessionKey } }));
   },
 
   async upsert(input: {
@@ -37,20 +60,25 @@ export const InstallsRepo = {
     tokenExpiresAt: Date | null;
     scopes: string | null;
   }): Promise<OrgInstall> {
-    return prisma.orgInstall.upsert({
+    const sealed = {
+      ...input,
+      sfAccessToken: seal(input.sfAccessToken) as string,
+      sfRefreshToken: seal(input.sfRefreshToken),
+    };
+    return openInstall(await prisma.orgInstall.upsert({
       where: { orgId: input.orgId },
-      create: { ...input },
+      create: { ...sealed },
       update: {
-        sessionKey: input.sessionKey,
-        sfAccessToken: input.sfAccessToken,
-        sfRefreshToken: input.sfRefreshToken,
+        sessionKey: sealed.sessionKey,
+        sfAccessToken: sealed.sfAccessToken,
+        sfRefreshToken: sealed.sfRefreshToken,
         sfInstanceUrl: input.sfInstanceUrl,
         sfUserId: input.sfUserId,
         sfUserEmail: input.sfUserEmail,
         tokenExpiresAt: input.tokenExpiresAt,
         scopes: input.scopes,
       },
-    });
+    })) as OrgInstall;
   },
 
   async deleteByOrgId(orgId: string): Promise<void> {

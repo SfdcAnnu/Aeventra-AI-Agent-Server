@@ -22,6 +22,7 @@ import { startTraceRetention } from './trace/retention';
 import { traceCaptureEnabled } from './trace/recorder';
 import { attach as attachWsGateway } from './ws/gateway';
 import { startRunPoller } from './scheduler/run-poller';
+import { warnIfUnencrypted } from './lib/secret-box';
 
 function buildApp(): express.Express {
   const app = express();
@@ -78,5 +79,8 @@ const server = http.createServer(app);
 attachWsGateway(server);
 server.listen(config.port, () => {
   logger.info({ port: config.port, nodeEnv: config.nodeEnv }, 'archon_ai_server_started');
+  // Storing credentials in clear text should be a decision somebody made,
+  // not something nobody noticed.
+  warnIfUnencrypted();
   startRunPoller();
 });
