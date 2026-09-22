@@ -15,6 +15,19 @@ function optional(name: string, fallback = ''): string {
   return process.env[name] ?? fallback;
 }
 
+/** Required, and required to be the kind of URL Prisma can actually open. */
+function postgresUrl(name: string): string {
+  const v = required(name);
+  if (!/^postgres(ql)?:\/\//i.test(v.trim())) {
+    throw new Error(
+      `${name} must be a PostgreSQL connection string (postgres:// or postgresql://). ` +
+      `Prisma's schema declares provider = "postgresql", so anything else — a SQLite file path in ` +
+      'particular — cannot be opened and only fails later, further from the cause.',
+    );
+  }
+  return v;
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -71,6 +84,9 @@ export const config = {
   // Example: https://synapse.example.com  (or ngrok URL for dev)
   serverPublicUrl: optional('SERVER_PUBLIC_URL', 'http://localhost:3000'),
 
-  // SQLite for dev; swap to postgres in prod by changing DATABASE_URL.
-  databaseUrl: optional('DATABASE_URL', 'file:./synapse.db'),
+  // POSTGRES OR NOTHING. schema.prisma says provider = "postgresql", so the
+  // old `file:./synapse.db` default could never work — it let the server
+  // boot without a database and fail later, somewhere with no clue in it.
+  // A config that cannot be honoured is refused at startup instead.
+  databaseUrl: postgresUrl('DATABASE_URL'),
 } as const;
