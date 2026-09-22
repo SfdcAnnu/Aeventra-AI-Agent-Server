@@ -22,6 +22,7 @@ import { buildRecordContextBlock } from '../record-context';
 import type { AgentDefinition, AgentNode } from '../../types';
 import type { ChatTurnRequest, EngineOverrideInput } from './types';
 import type { Connector } from '@prisma/client';
+import { InstallsRepo } from '../../db/installs.repo';
 
 /**
  * Return a FRESH access token for a connector row, refreshing when the
@@ -251,6 +252,13 @@ export async function resolveMcpServers(
 ): Promise<ResolvedMcpServer[]> {
   const out: ResolvedMcpServer[] = [];
 
+  // Looked up only when a metadata connector is actually in play, so a
+  // turn that never touches that server pays nothing for this.
+  const needsInstanceUrl = (req.connectors ?? []).some(c => c.provider === 'salesforce_metadata');
+  const sfInstanceUrl = needsInstanceUrl
+    ? (await InstallsRepo.findByOrgId(req.context.orgId).catch(() => null))?.sfInstanceUrl ?? null
+    : null;
+
   if (req.connectors && req.connectors.length > 0) {
     // An agent may legitimately carry several catalog nodes on the SAME
     // provider (one per owning subagent) — Apex sends each as its own
@@ -327,7 +335,20 @@ export async function resolveMcpServers(
         logger.info({ provider: c.provider, customCount: custom.length }, 'mcp_custom_tools_attached');
       }
 
-      out.push({ name, url, token, allowedTools, headers: c.headers ?? undefined });
+      // THE METADATA SERVER ALWAYS NEEDS THE INSTANCE URL.
+      //
+      // It reads X-Salesforce-Instance-Url whenever the bearer has no
+      // openid scope, which a Setup-issued token often does not. The
+      // header was attached only to connectors Archon invents
+      // (tool-node-connectors.ts), so a connector Apex supplied arrived
+      // without it and the same metadata tool that worked in one agent
+      // failed in another. Every connector for that provider gets it, and
+      // one Apex actually supplied still wins.
+      const headers = { ...(c.headers ?? {}) };
+      if (c.provider === 'salesforce_metadata' && sfInstanceUrl && !headers['X-Salesforce-Instance-Url']) {
+        headers['X-Salesforce-Instance-Url'] = sfInstanceUrl;
+      }
+      out.push({ name, url, token, allowedTools, headers: Object.keys(headers).length ? headers : undefined });
     }
     return out;
   }
