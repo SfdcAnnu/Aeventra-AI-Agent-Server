@@ -66,6 +66,11 @@ export const config = {
     loginUrl: optional('SF_LOGIN_URL', 'https://login.salesforce.com'),
     clientId: optional('SF_CLIENT_ID'),
     clientSecret: optional('SF_CLIENT_SECRET'),
+    // Unused since async results are upserted onto AgentExecution__c
+    // directly — Platform Events are not a Professional Edition feature,
+    // and the write needs no event bus. Kept only so an existing
+    // deployment setting it does not look like a typo; see
+    // salesforce/callback.ts.
     callbackEvent: optional('SF_CALLBACK_PLATFORM_EVENT', 'AgentExecutionResult__e'),
 
     // OAuth secrets for the Salesforce MCP connector (External Client App).
