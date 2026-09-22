@@ -159,7 +159,26 @@ async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTo
           [s.name]: {
             transport: 'http',
             url: s.url,
-            headers: { Authorization: `Bearer ${s.token}`, ...(s.headers ?? {}) },
+            headers: {
+              Authorization: `Bearer ${s.token}`,
+              // THIS SERVER HAS RUN ITS APPROVAL POLICY ON THIS CALL.
+              //
+              // Both MCP servers currently take a raw Salesforce token as
+              // proof that the caller gated the write. The Metadata
+              // server says so outright: its approval page is skipped
+              // when APPROVAL_MODE=oauth-clients and the token is a
+              // Salesforce one, which is exactly what Archon sends. That
+              // assumption was false for anything reaching them from the
+              // old provider-hosted path, where no gate existed at all.
+              //
+              // A header is an assertion, not a proof — but it is one a
+              // bare stolen token cannot make, and it lets the servers
+              // refuse writes from callers that have no gate. They ignore
+              // it until REQUIRE_ARCHON_APPROVAL is turned on there, so
+              // this can ship first and either order is safe.
+              'X-Archon-Approval': 'granted',
+              ...(s.headers ?? {}),
+            },
           },
         },
         // Tool names must stay EXACTLY as the server publishes them —
