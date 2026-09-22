@@ -345,75 +345,6 @@
       }
     },
     {
-      "id": "design_tests",
-      "type": "subagent",
-      "label": "Test Designer",
-      "model": {
-        "tier": "medium",
-        "style": "precise"
-      },
-      "instructions": "Write a test plan against the Requirement. You will not be given the design and must not ask for it, because you test what the client asked for, so a build that satisfies its own spec but misses the intent still fails. Cover all eleven categories with at least the minimum counts. Every case is Given, When, Then with a concrete input and a checkable expectation.",
-      "returns": {
-        "type": "object",
-        "required": [
-          "cases"
-        ],
-        "properties": {
-          "cases": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          },
-          "categoryCounts": {
-            "type": "object"
-          }
-        }
-      },
-      "position": {
-        "x": 840,
-        "y": 380
-      }
-    },
-    {
-      "id": "run_tests",
-      "type": "subagent",
-      "label": "Test Runner",
-      "model": {
-        "tier": "small",
-        "style": "precise"
-      },
-      "instructions": "Execute each case against the agent in the sandbox. Skip any case that depends on a node still blocked by a prerequisite and record it as blocked rather than failed, because a blocked case is unfinished setup and not a defect. Capture the full trace, cost, duration, and which nodes, edges and tools were exercised.",
-      "returns": {
-        "type": "object",
-        "required": [
-          "results",
-          "coverage"
-        ],
-        "properties": {
-          "results": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          },
-          "blocked": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          },
-          "coverage": {
-            "type": "object"
-          }
-        }
-      },
-      "position": {
-        "x": 840,
-        "y": 540
-      }
-    },
-    {
       "id": "evaluate",
       "type": "subagent",
       "label": "Evaluator",
@@ -462,35 +393,6 @@
       "position": {
         "x": 640,
         "y": 690
-      }
-    },
-    {
-      "id": "build_report",
-      "type": "subagent",
-      "label": "Reporter",
-      "model": {
-        "tier": "small",
-        "style": "precise"
-      },
-      "instructions": "Assemble the workbook with sheets for Summary, Test cases, Results, Coverage, Issues, Prerequisites and Specification. The Prerequisites sheet lists every outstanding item with its owner, steps and blocking status, because that is the sheet the client's admin will work from. Then write a short plain summary.",
-      "returns": {
-        "type": "object",
-        "required": [
-          "workbookUrl",
-          "summary"
-        ],
-        "properties": {
-          "workbookUrl": {
-            "type": "string"
-          },
-          "summary": {
-            "type": "string"
-          }
-        }
-      },
-      "position": {
-        "x": 440,
-        "y": 540
       }
     },
     {
@@ -655,27 +557,6 @@
     },
     {
       "from": "architect",
-      "to": "design_tests",
-      "mode": "call",
-      "contextPolicy": "isolated",
-      "carryFields": [
-        "requirement"
-      ],
-      "parallel": true
-    },
-    {
-      "from": "architect",
-      "to": "run_tests",
-      "mode": "call",
-      "contextPolicy": "isolated",
-      "carryFields": [
-        "testPlan",
-        "agentId",
-        "blockedNodes"
-      ]
-    },
-    {
-      "from": "architect",
       "to": "evaluate",
       "mode": "call",
       "contextPolicy": "isolated",
@@ -683,19 +564,6 @@
         "requirement",
         "testResults",
         "coverage"
-      ]
-    },
-    {
-      "from": "architect",
-      "to": "build_report",
-      "mode": "call",
-      "contextPolicy": "isolated",
-      "carryFields": [
-        "requirement",
-        "finalSpec",
-        "testResults",
-        "evaluation",
-        "prerequisites"
       ]
     }
   ],
@@ -723,7 +591,7 @@
         "evidence": "14 tools across the whole system, under the 25 threshold"
       }
     ],
-    "subAgentCount": 11,
+    "subAgentCount": 8,
     "maxNesting": 2,
     "estimate": {
       "modelCallsPerRun": 18,
