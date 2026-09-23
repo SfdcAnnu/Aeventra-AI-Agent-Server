@@ -78,6 +78,12 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
   }
 
   try {
+    // The turn's own clock starts inside runChatTurn. Everything here
+    // runs before it -- the org connection and the agent definition --
+    // and was invisible: a turn that reported 1.8s had a wall clock of
+    // 3.4s, and only ~850ms of the gap was network and Apex. preTurn is
+    // this route's share; wall clock minus `route` is the transport.
+    const routeT0 = Date.now();
     // Use the per-org tokens captured during Synapse Setup, NOT the bootstrap
     // Client Credentials connection (which subscribers may not have enabled).
     const conn = await getOrgConnection(orgId);
@@ -93,6 +99,7 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
       return;
     }
 
+    const preTurnMs = Date.now() - routeT0;
     const result = await runChatTurn({
       agent,
       sessionId: parsed.data.sessionId,
@@ -110,7 +117,10 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
         recordContextType: parsed.data.context.recordContextType ?? null,
       },
     });
-    res.json(result);
+    res.json({
+      ...result,
+      phaseMs: { preTurn: preTurnMs, ...(result.phaseMs ?? {}), route: Date.now() - routeT0 },
+    });
   } catch (err) {
     logger.error({ err, orgId, agentApiName: parsed.data.agentApiName }, 'chat_turn_failed');
     // Belt-and-braces — also write to stderr so it can't be missed in the terminal

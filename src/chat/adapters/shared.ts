@@ -249,8 +249,18 @@ export async function resolveMcpServers(
   req: ChatTurnRequest,
   aiNode: AgentNode,
   sfAccessToken: string,
+  /** Filled with the slowest connector's ms per stage -- token, awake,
+   *  catalog. This stage measured 467ms on a warm turn with every cache
+   *  hit, and nothing readable in it accounts for that; the marks say
+   *  which part rather than leaving it to be guessed at. */
+  timing?: Record<string, number>,
 ): Promise<ResolvedMcpServer[]> {
   const out: ResolvedMcpServer[] = [];
+  // Connectors resolve in parallel, so per stage the slowest one is the
+  // turn's cost, not the sum.
+  const mark = (k: string, t0: number) => {
+    if (timing) timing[k] = Math.max(timing[k] ?? 0, Date.now() - t0);
+  };
 
   // Looked up only when a metadata connector is actually in play, so a
   // turn that never touches that server pays nothing for this.
@@ -316,6 +326,7 @@ export async function resolveMcpServers(
     // hard-fail must reach the caller, and Promise.all rejects on the
     // first one exactly as the loop's rethrow did.
     const resolved = await Promise.all(planned.map(async ({ c, name, base }) => {
+      const tTok = Date.now();
       const token = await resolveProviderToken({
         orgId: req.context.orgId, userId: req.context.userId,
         provider: c.provider, connectorId: c.connectorId, accessMode: c.accessMode, sfAccessToken,
@@ -326,8 +337,13 @@ export async function resolveMcpServers(
           'mcp_connector_skipped_no_token');
         return null;
       }
+      mark('token', tTok);
+      const tAwake = Date.now();
       await ensureMcpServerAwake(base);
+      mark('awake', tAwake);
+      const tCat = Date.now();
       const checked = await sanitizeAllowedTools(base, c.allowedTools ?? []);
+      mark('catalog', tCat);
       if (checked === null) return null;   // every saved name is stale — fail closed
       let allowedTools = checked;
 
