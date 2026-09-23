@@ -15,6 +15,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { logger } from '../logger';
 import { spillIfLarge } from './artifact-store';
 import type { ResolvedMcpServer } from '../chat/adapters/shared';
+import { ensureMcpServerAwake } from '../chat/adapters/shared';
 
 export interface LoadedMcpTools {
   tools: StructuredToolInterface[];
@@ -47,7 +48,10 @@ function cacheKey(servers: ResolvedMcpServer[]): string {
     .join('||');
 }
 
-export async function loadMcpTools(servers: ResolvedMcpServer[]): Promise<LoadedMcpTools> {
+export async function loadMcpTools(
+  servers: ResolvedMcpServer[],
+  opts: { deadlineAt?: number } = {},
+): Promise<LoadedMcpTools> {
   const key = cacheKey(servers);
   const hit = toolCache.get(key);
   if (hit && Date.now() - hit.createdAt < CACHE_TTL_MS) {
@@ -58,7 +62,7 @@ export async function loadMcpTools(servers: ResolvedMcpServer[]): Promise<Loaded
     void hit.realClose().catch(() => { /* stale client cleanup only */ });
   }
 
-  const fresh = await connectAndLoad(servers);
+  const fresh = await connectAndLoad(servers, opts.deadlineAt);
   // Only cache loads that actually produced tools — caching a rate-limited
   // empty result would blind every turn for the TTL window.
   if (fresh.tools.length > 0) {
@@ -143,11 +147,51 @@ function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterf
  *  idle period pays even this. */
 const LIST_RETRY_WAITS_MS = [1_500, 4_000];
 
-async function connectAndLoad(servers: ResolvedMcpServer[]): Promise<LoadedMcpTools> {
+/** Longest we will hold a turn waiting for sleeping hosts, and the clock
+ *  we always leave the model to answer in. A Render free-tier wake is
+ *  ~30s; 45 gives that room plus slack without ever being the reason a
+ *  turn runs out of time. */
+const WAKE_CEILING_MS = 45_000;
+const MODEL_FLOOR_MS = 20_000;
+
+async function connectAndLoad(servers: ResolvedMcpServer[], deadlineAt?: number): Promise<LoadedMcpTools> {
   const tools: StructuredToolInterface[] = [];
   const serverByTool = new Map<string, string>();
   const clients: MultiServerMCPClient[] = [];
   const unavailable: string[] = [];
+
+  // WAKE THE HOSTS FIRST, ALL OF THEM AT ONCE.
+  //
+  // The retry below rides out a blip. It does not ride out a cold start:
+  // a Render free-tier host takes ~30s to wake and those waits total 5.5s,
+  // so the FIRST turn after any idle period lost every tool and the agent
+  // read the connector notice out loud -- "I can't reach that right now,
+  // try again shortly." Live-confirmed against the CRM server, which woke
+  // in 31.6s while the turn gave up at 9.5s.
+  //
+  // ensureMcpServerAwake was written for the provider-hosted adapter path
+  // and never wired into the graph runtime that replaced it. Concurrent,
+  // so N servers cost one wake and not N, and it keeps its own 5-minute
+  // warmth memo keyed by origin -- the same key the adapter path uses --
+  // so only the first turn after idle pays anything at all.
+  // Bounded by what the turn can actually spare. The wake spends the same
+  // clock the budget is counting down, so an unbounded one could hand the
+  // person the budget brake ("our team will follow up") instead of the
+  // honest "try again shortly" -- a strictly worse answer. Leave the model
+  // room to reply; if there isn't any, skip the wake and degrade exactly
+  // as before.
+  const spare = deadlineAt
+    ? Math.min(WAKE_CEILING_MS, deadlineAt - Date.now() - MODEL_FLOOR_MS)
+    : WAKE_CEILING_MS;
+  if (spare > 0) {
+    const origins = [...new Set(servers.flatMap(s => {
+      try { return [new URL(s.url).origin]; } catch { return []; }
+    }))];
+    await Promise.race([
+      Promise.all(origins.map(o => ensureMcpServerAwake(o))),
+      new Promise<void>(r => setTimeout(r, spare)),
+    ]);
+  }
 
   // One client per server (not one multi-client) so each server's
   // allowedTools filter applies to ITS tools only, and one cold/broken

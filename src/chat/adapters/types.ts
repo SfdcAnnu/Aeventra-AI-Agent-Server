@@ -169,8 +169,18 @@ export interface ChatTurnResult {
   tokensOut: number;
   /** Per-model split of tokensIn/tokensOut above. Sums back to them. */
   usage?: ModelUsage[];
-  /** Wall-clock time for the whole turn, server-side. */
+  /** The MODEL LOOP only -- it starts after setup, MCP tool loading and
+   *  prompt building have already run. It said "whole turn" here for a
+   *  long time and it is not: a turn that reported 888ms had really taken
+   *  9.5s, and the missing 8.6s was a sleeping MCP host. Use `turnMs` for
+   *  the whole thing and `phaseMs` for where it went. */
   latencyMs?: number;
+  /** Wall-clock for the whole turn, server-side: setup through reply. */
+  turnMs?: number;
+  /** Per-phase split of turnMs -- setup, resolveServers, loadTools,
+   *  buildPrompt, modelLoop. Sums to slightly under turnMs (the remainder
+   *  is bookkeeping between phases). */
+  phaseMs?: Record<string, number>;
   // Only ever populated for adapters that can't hard-block tool calls
   // (Claude's Managed MCP today — see claude.ts). Empty/undefined means
   // either no restriction was configured, or the provider enforces it
