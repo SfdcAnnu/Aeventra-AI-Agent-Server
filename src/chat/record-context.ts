@@ -93,6 +93,83 @@ export async function sobjectTypeFromId(orgId: string, recordId: string): Promis
   return entry.map.get(recordId.slice(0, 3)) ?? null;
 }
 
+// ── the object's picklist options, on every turn ───────────────────
+// A live agent read the Lead schema, received Commercial's two projects
+// correctly, and eight messages later offered the customer "Commercial
+// Project C" -- which does not exist -- and accepted it. A tool result far
+// back in the history is weak; a fact in the system prompt on the current
+// turn is strong. So the record block carries the object's picklist
+// options and their dependencies, decoded from the same validFor bitmaps
+// the CRM MCP server decodes, from a describe cached per object.
+//
+// Bounded on purpose: custom picklists plus a short list of standard ones
+// an intake conversation actually chooses from; a field with more values
+// than a person would be offered is named but not listed.
+const DESCRIBE_TTL_MS = 5 * 60_000;
+const STANDARD_PICKLISTS = new Set(['Status', 'LeadSource', 'Rating', 'Type', 'StageName', 'Priority', 'Origin', 'Reason']);
+const MAX_VALUES_PER_FIELD = 40;
+const MAX_OPTIONS_CHARS = 2_000;
+
+interface PicklistEntry { value: string; active?: boolean; validFor?: string | null }
+interface DescribedField { name: string; type?: string; controllerName?: string | null; picklistValues?: PicklistEntry[] }
+
+const describeCache = new Map<string, { fields: DescribedField[]; at: number }>();
+
+/** The parent values that switch a dependent value on. Buffer.from never
+ *  throws on bad base64 -- it returns plausible bytes -- so the shape is
+ *  checked first; wrong is worse than absent here. */
+function decodeValidFor(validFor: string | null | undefined, parents: string[]): string[] {
+  if (!validFor || parents.length === 0) return [];
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(validFor) || validFor.length % 4 !== 0) return [];
+  const bytes = Buffer.from(validFor, 'base64');
+  const on: string[] = [];
+  for (let i = 0; i < parents.length; i++) {
+    const byte = bytes[i >> 3];
+    if (byte === undefined) break;
+    if (byte & (0x80 >> (i % 8))) on.push(parents[i]);
+  }
+  return on;
+}
+
+async function describedFields(conn: { sobject: (t: string) => { describe: () => Promise<unknown> } }, orgId: string, recordType: string): Promise<DescribedField[]> {
+  const key = `${orgId}|${recordType}`;
+  const hit = describeCache.get(key);
+  if (hit && Date.now() - hit.at < DESCRIBE_TTL_MS) return hit.fields;
+  const d = (await conn.sobject(recordType).describe()) as { fields?: DescribedField[] };
+  const fields = d.fields ?? [];
+  describeCache.set(key, { fields, at: Date.now() });
+  return fields;
+}
+
+function renderPicklistOptions(recordType: string, fields: DescribedField[]): string | null {
+  const byName = new Map(fields.map(f => [f.name, f]));
+  const lines: string[] = [];
+  for (const f of fields) {
+    if (f.type !== 'picklist' && f.type !== 'combobox') continue;
+    if (!f.name.endsWith('__c') && !STANDARD_PICKLISTS.has(f.name)) continue;
+    const active = (f.picklistValues ?? []).filter(v => v.active !== false);
+    if (active.length === 0) continue;
+    if (active.length > MAX_VALUES_PER_FIELD) { lines.push(`- ${f.name}: ${active.length} values; read the schema if needed`); continue; }
+    const controller = f.controllerName ? byName.get(f.controllerName) : undefined;
+    const parents = controller?.type === 'boolean' ? ['false', 'true'] : (controller?.picklistValues ?? []).map(v => v.value);
+    if (f.controllerName && parents.length > 0) {
+      const map = new Map<string, string[]>(parents.map(p => [p, []]));
+      let any = false;
+      for (const v of active) for (const parent of decodeValidFor(v.validFor, parents)) { map.get(parent)!.push(v.value); any = true; }
+      if (any) {
+        const parts = parents.filter(p => (map.get(p) ?? []).length > 0).map(p => `${p}: ${map.get(p)!.join(' | ')}`);
+        lines.push(`- ${f.name} (depends on ${f.controllerName}): ${parts.join('; ')}`);
+        continue;
+      }
+    }
+    lines.push(`- ${f.name}: ${active.map(v => v.value).join(' | ')}`);
+  }
+  if (lines.length === 0) return null;
+  let body = lines.join('\n');
+  if (body.length > MAX_OPTIONS_CHARS) body = body.slice(0, MAX_OPTIONS_CHARS) + '\n…(truncated)';
+  return `PICKLIST OPTIONS FOR ${recordType.toUpperCase()} (exact values; offer and save only these, and for a dependent field only the values listed under the chosen parent):\n${body}`;
+}
+
 export async function buildRecordContextBlock(
   orgId: string,
   recordType: string | null | undefined,
@@ -125,6 +202,15 @@ export async function buildRecordContextBlock(
         `THE ${recordType.toUpperCase()} THIS CONVERSATION IS ABOUT (current values, read just now — ` +
         `treat these as accurate and do NOT look them up again):\n${body}`;
     }
+    if (block) {
+      // Fail-soft: a describe that cannot be read costs the options, never the record.
+      try {
+        const options = renderPicklistOptions(recordType, await describedFields(conn, orgId, recordType));
+        if (options) block = block + '\n\n' + options;
+      } catch (err) {
+        logger.warn({ orgId, recordType, err: err instanceof Error ? err.message : err }, 'record_context_describe_failed');
+      }
+    }
     logger.info({ orgId, recordType, recordId, fields: lines.length }, 'record_context_loaded');
   } catch (err) {
     // Anything at all — no access, bad id, object not readable — means the
@@ -142,4 +228,17 @@ export async function buildRecordContextBlock(
     if (oldest !== undefined) cache.delete(oldest);
   }
   return block;
+}
+
+/** A write to this record: the next turn must see what was written, not
+ *  the values from before. Keys end with the record Id, whatever the org. */
+export function invalidateRecordContext(recordId: string): void {
+  for (const k of cache.keys()) if (k.endsWith(`|${recordId}`)) cache.delete(k);
+}
+
+/** Tests only. */
+export function _clearRecordContextCaches(): void {
+  cache.clear();
+  describeCache.clear();
+  prefixCache.clear();
 }

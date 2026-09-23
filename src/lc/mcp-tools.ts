@@ -16,6 +16,7 @@ import { logger } from '../logger';
 import { spillIfLarge } from './artifact-store';
 import type { ResolvedMcpServer } from '../chat/adapters/shared';
 import { ensureMcpServerAwake } from '../chat/adapters/shared';
+import { invalidateRecordContext } from '../chat/record-context';
 
 export interface LoadedMcpTools {
   tools: StructuredToolInterface[];
@@ -186,6 +187,14 @@ function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterf
         // gets a compact summary + artifact handle instead of the payload.
         const out = spillIfLarge(t.name, raw);
         logger.info({ tool: t.name, ms: Date.now() - t0, args: argsLog, resultChars: raw.length, result: out.slice(0, 600) }, 'mcp_tool_call');
+        // The record block the prompt carries is cached for a minute. After
+        // the model writes to that record, the next turn must see what it
+        // wrote, not the values from before -- live, an agent read stale
+        // values back and re-asked for answers it had just saved.
+        if ((t.name === 'updateSobjectRecord' || t.name === 'deleteSobjectRecord')
+            && args && typeof args === 'object' && typeof (args as { id?: unknown }).id === 'string') {
+          invalidateRecordContext((args as { id: string }).id);
+        }
         return out;
       } catch (err) {
         logger.error({ tool: t.name, ms: Date.now() - t0, args: argsLog, err: err instanceof Error ? err.message : String(err) }, 'mcp_tool_call_failed');
