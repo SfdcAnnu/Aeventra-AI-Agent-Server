@@ -443,15 +443,20 @@ export async function callSpecialist<T = unknown>(opts: {
  */
 export function recoverStructured(parsed: unknown, rawContent: unknown, label: string): unknown {
   if (!isContentBox(parsed)) return parsed;
-  const text = messageText(rawContent ?? Object.values(parsed as Record<string, unknown>));
+  const blocks = Array.isArray(parsed) ? parsed : Object.values(parsed as Record<string, unknown>);
+  const text = messageText(blocks);
   return parseLooseJson(text, label);
 }
 
 function isContentBox(v: unknown): boolean {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
-  const keys = Object.keys(v as object);
-  if (keys.length === 0 || !keys.every(k => /^\d+$/.test(k))) return false;
-  const first = (v as Record<string, unknown>)['0'] as { type?: unknown; text?: unknown } | undefined;
+  // The array itself, or the array spread into an object ({"0": block}).
+  const blocks: unknown[] | null = Array.isArray(v)
+    ? v
+    : v && typeof v === 'object' && Object.keys(v as object).length > 0 && Object.keys(v as object).every(k => /^\d+$/.test(k))
+      ? Object.values(v as Record<string, unknown>)
+      : null;
+  if (!blocks || blocks.length === 0) return false;
+  const first = blocks[0] as { type?: unknown; text?: unknown } | undefined;
   return !!first && typeof first === 'object' && first.type === 'text' && typeof first.text === 'string';
 }
 

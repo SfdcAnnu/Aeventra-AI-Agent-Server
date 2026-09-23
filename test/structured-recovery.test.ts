@@ -20,11 +20,18 @@ describe('recoverStructured', () => {
     const r = recoverStructured(boxed, undefined, 'Evaluator') as { verdict: string };
     expect(r.verdict).toBe('fail');
   });
+  it('unboxes the bare content-block array too -- the shape that actually came back', () => {
+    // {...array, verdict} is how the stored review ended up as {"0": block, "verdict": "unclear"}.
+    const r = recoverStructured(rawContent, rawContent, 'Evaluator') as { verdict: string; failures: unknown[] };
+    expect(r.verdict).toBe('fail');
+    expect(r.failures).toHaveLength(1);
+  });
   it('leaves a real answer alone', () => {
     const real = { verdict: 'pass', failures: [], fixes: [] };
     expect(recoverStructured(real, rawContent, 'Evaluator')).toBe(real);
     expect(recoverStructured(null, rawContent, 'Evaluator')).toBeNull();
     expect(recoverStructured([1, 2], rawContent, 'Evaluator')).toEqual([1, 2]);
+    expect(recoverStructured([{ capability: 'find', tool: 'find' }], rawContent, 'Matcher')).toEqual([{ capability: 'find', tool: 'find' }]);
   });
   it('rejects a box whose text is not JSON, by name', () => {
     const prose = { '0': { type: 'text', text: 'I cannot judge this.' } };
