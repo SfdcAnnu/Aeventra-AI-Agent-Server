@@ -27,11 +27,34 @@ interface TokenSumRow {
   tOut: number | null;
 }
 
+/**
+ * The settings row, briefly cached.
+ *
+ * This runs on EVERY turn, before the model is allowed to start, and for
+ * an org with the cap switched off it is the only thing this function
+ * does — one Salesforce round trip bought to learn "no" over and over.
+ *
+ * ONLY THE SETTINGS ARE CACHED, never a decision and never the totals. An
+ * org with the cap ON still sums its usage fresh on every turn, because a
+ * spend cap that is checked against a minute-old number is not a spend
+ * cap. What this delays is noticing that an admin CHANGED the setting,
+ * which is worth at most a minute.
+ */
+const SETTINGS_TTL_MS = 60_000;
+const settingsCache = new Map<string, { row: GuardrailsRow | undefined; at: number }>();
+
 export async function checkGuardrails(conn: Connection, orgId: string): Promise<GuardrailCheckResult> {
-  const rows = await conn.query<GuardrailsRow>(
-    `SELECT IsEnabled__c, MaxTokensPerDay__c, MaxTokensPerMonth__c FROM AgentGuardrails__c WHERE SetupOwnerId = '${orgId}' LIMIT 1`,
-  );
-  const row = rows.records[0];
+  let row: GuardrailsRow | undefined;
+  const hit = settingsCache.get(orgId);
+  if (hit && Date.now() - hit.at < SETTINGS_TTL_MS) {
+    row = hit.row;
+  } else {
+    const rows = await conn.query<GuardrailsRow>(
+      `SELECT IsEnabled__c, MaxTokensPerDay__c, MaxTokensPerMonth__c FROM AgentGuardrails__c WHERE SetupOwnerId = '${orgId}' LIMIT 1`,
+    );
+    row = rows.records[0];
+    settingsCache.set(orgId, { row, at: Date.now() });
+  }
   if (!row || row.IsEnabled__c !== true) return { blocked: false };
 
   const now = new Date();
