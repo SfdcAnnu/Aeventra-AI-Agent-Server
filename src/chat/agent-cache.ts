@@ -19,11 +19,27 @@ import { loadAgentDefinition } from '../salesforce/client';
 import type { AgentDefinition } from '../types';
 import { logger } from '../logger';
 
-const TTL_MS = 60_000;
+//
+// A FLAT 60s EXPIRY PUT BOTH SOQL CALLS BACK ON ALMOST EVERY REAL TURN.
+//
+// People type slower than that. Two messages a minute apart -- ordinary
+// pacing for a WhatsApp qualification -- missed the cache every time and
+// paid the reload before the turn clock had even started, which is where
+// the biggest unexplained slice of a warm turn turned out to be hiding.
+//
+// So expiry is two-stage, the same shape as the MCP tool cache. Inside
+// FRESH_MS, serve. Past it but inside STALE_MS, serve what we have
+// IMMEDIATELY and reload behind the turn. An admin's edit still shows up
+// on the next turn but one, and the Save flow's invalidate() below still
+// makes it show up on the very next turn, so the staleness promise above
+// is kept where it matters and the reload stops being the person's wait.
+const FRESH_MS = 60_000;
+const STALE_MS = 30 * 60_000;
 
 interface CacheEntry {
-  data:      AgentDefinition;
-  expiresAt: number;
+  data:       AgentDefinition;
+  expiresAt:  number;   // fresh until
+  staleUntil: number;   // servable-while-refreshing until
 }
 
 const cache:   Map<string, CacheEntry>                    = new Map();
@@ -33,26 +49,47 @@ function key(orgId: string, apiName: string): string {
   return `${orgId}::${apiName}`;
 }
 
+function reload(k: string, orgId: string, apiName: string, conn: Connection): Promise<AgentDefinition | null> {
+  const p = loadAgentDefinition(apiName, conn)
+    .then(row => ensureSystemAgent(orgId, apiName, conn, row))
+    .then(row => {
+      if (row) {
+        const now = Date.now();
+        cache.set(k, { data: row, expiresAt: now + FRESH_MS, staleUntil: now + STALE_MS });
+      }
+      return row;
+    })
+    .finally(() => {
+      pending.delete(k);
+    });
+  pending.set(k, p);
+  return p;
+}
+
 export const AgentCache = {
   async load(orgId: string, apiName: string, conn: Connection): Promise<AgentDefinition | null> {
     const k = key(orgId, apiName);
     const hit = cache.get(k);
-    if (hit && hit.expiresAt > Date.now()) return hit.data;
+    const now = Date.now();
+    if (hit && hit.expiresAt > now) return hit.data;
+
+    if (hit && hit.staleUntil > now) {
+      // Off the critical path: answer with the definition we hold while
+      // the reload runs behind the turn. One reload, however many turns
+      // arrive while it is in flight.
+      if (!pending.has(k)) {
+        reload(k, orgId, apiName, conn).catch(err => {
+          // Keep serving what we have -- Salesforce being slow should not
+          // also cost us the definition we already loaded from it.
+          logger.warn({ orgId, apiName, err: (err as Error).message }, 'agent_cache_background_reload_failed');
+        });
+      }
+      return hit.data;
+    }
 
     const inflight = pending.get(k);
     if (inflight) return inflight;
-
-    const p = loadAgentDefinition(apiName, conn)
-      .then(row => ensureSystemAgent(orgId, apiName, conn, row))
-      .then(row => {
-        if (row) cache.set(k, { data: row, expiresAt: Date.now() + TTL_MS });
-        return row;
-      })
-      .finally(() => {
-        pending.delete(k);
-      });
-    pending.set(k, p);
-    return p;
+    return reload(k, orgId, apiName, conn);
   },
 
   /** Called after an admin saves the agent so next chat turn sees fresh data. */

@@ -251,8 +251,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // locally-executed typed tools (lc/prebuilt-tools.ts) instead.
   const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions.filter(a => a.actionType !== 'Prebuilt'));
   mark('setup');
-  const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken);
+  const serverTiming: Record<string, number> = {};
+  const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken, serverTiming);
   mark('resolveServers');
+  for (const [k, v] of Object.entries(serverTiming)) phase[`servers.${k}`] = v;
   const loaded = await loadMcpTools(servers, { deadlineAt: budget.deadlineAt });
   mark('loadTools');
   // Phase 7 — approval-as-suspension: a tool node marked requiresApproval
