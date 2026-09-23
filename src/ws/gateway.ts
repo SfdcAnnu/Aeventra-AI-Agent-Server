@@ -39,7 +39,7 @@ import { runChatTurn } from '../chat/chat-engine';
 import type { ChatTurnResult } from '../chat/chat-engine';
 import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { checkGuardrails } from '../salesforce/guardrails';
-import { resolveWsChatSession, recordWsTurn, recordWsTurnFailure } from '../salesforce/ws-chat-persistence';
+import { resolveWsChatSession, recordWsTurn, recordWsTurnFailure, type WsChatSession } from '../salesforce/ws-chat-persistence';
 import type { EngineOverrideInput } from '../types';
 import type { TurnSink } from '../chat/adapters/types';
 
@@ -78,11 +78,32 @@ const messageTimestamps = new WeakMap<WebSocket, number[]>();
 // Lazily-created Salesforce ChatSession__c for this connection's turns —
 // created on the first successful turn, reused for every turn after (see
 // ws-chat-persistence.ts's module doc for why this exists at all).
-interface WsSessionState {
-  chatSessionId: string;
-  nextSeq: number;
-}
+type WsSessionState = WsChatSession;
 const wsSessionState = new WeakMap<WebSocket, WsSessionState>();
+
+/**
+ * The session row for this socket, resolved once and kept.
+ *
+ * It used to be resolved lazily inside persistTurnUsage, AFTER the turn,
+ * because writing the transcript was all it was for. It also carries the
+ * record the conversation is anchored to, and the turn needs that BEFORE
+ * the model runs — so it is resolved on first use and reused for the life
+ * of the connection. One query per socket, not per message.
+ */
+async function sessionStateFor(
+  ws: WebSocket,
+  conn: Connection,
+  ctx: ConnectionContext,
+  agentId: string,
+  department: string | undefined,
+): Promise<WsSessionState> {
+  let state = wsSessionState.get(ws);
+  if (!state) {
+    state = await resolveWsChatSession(conn, ctx.sessionId, agentId, ctx.userId, department);
+    wsSessionState.set(ws, state);
+  }
+  return state;
+}
 
 function isRateLimited(ws: WebSocket): boolean {
   const now = Date.now();
@@ -237,6 +258,11 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       return;
     }
 
+    // Resolved once per socket and reused. The turn needs the record this
+    // conversation is anchored to before the model runs, and persistence
+    // needs the same row afterwards.
+    const sessionState = await sessionStateFor(ws, conn, ctx, agent.id, agent.department);
+
     let result: ChatTurnResult;
     try {
       result = await runChatTurn({
@@ -261,11 +287,23 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       continuation:   parsed.data.continuation ?? null,
       onEvent:        parsed.data.stream ? makeTurnSink(ws) : null,
       // Bound identity — NOT read from the message body (see module doc).
+      // THE RECORD THE CHAT IS ANCHORED TO, FROM THE SESSION ROW.
+      //
+      // This was hardcoded null, so a chat opened on a Lead could not tell
+      // the model which Lead — the agent had to soqlQuery its way to the
+      // record it was standing on, costing a model call and a tool call on
+      // the first question of every record-anchored conversation.
+      //
+      // It is NOT read from the message body, and that is deliberate:
+      // record-context.ts reads the row with the ORG's connection, so an
+      // id taken off the wire would let any user read any record and skip
+      // their own sharing. Apex wrote these fields when the session was
+      // created, through that user's permissions.
       context: {
         orgId: ctx.orgId,
         userId: ctx.userId,
-        recordContextId: null,
-        recordContextType: null,
+        recordContextId: sessionState.recordContextId,
+        recordContextType: sessionState.recordContextType,
       },
       });
     } catch (err) {
@@ -303,11 +341,7 @@ async function persistTurnUsage(
   userText: string,
   result: ChatTurnResult,
 ): Promise<void> {
-  let state = wsSessionState.get(ws);
-  if (!state) {
-    state = await resolveWsChatSession(conn, ctx.sessionId, agentId, ctx.userId, department);
-    wsSessionState.set(ws, state);
-  }
+  const state = await sessionStateFor(ws, conn, ctx, agentId, department);
   // Advance by however many rows were actually written — a turn with tool
   // calls writes more than the user+assistant pair.
   const written = await recordWsTurn(conn, state.chatSessionId, state.nextSeq, userText, result);
