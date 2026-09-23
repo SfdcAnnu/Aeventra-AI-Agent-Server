@@ -45,8 +45,12 @@ import {
   listKnowledgeBases,
   buildCapabilityManifest,
 } from './surveyor-tools';
-import { validateSpec, normalizePrerequisites, attachOrphansToRoot, type AgentSpec, type SpecPrerequisite, type CapabilityManifest } from './spec';
+import { validateSpec, normalizePrerequisites, attachOrphansToRoot, type AgentSpec, type SpecNode, type SpecError, type SpecPrerequisite, type CapabilityManifest } from './spec';
 import { estimateSpec } from './estimate';
+import { SpecialistError, type SpecialistUsage } from './specialists';
+import { repairNames, type AvailableNames } from './name-repair';
+import { applyPromptMap, applySpecPatch, isSpecPatch } from './spec-merge';
+import { inventoryFromGather } from './survey-inventory';
 import { compileSpec, CompileError } from './compiler';
 
 // ── Job model ────────────────────────────────────────────────────────
@@ -63,6 +67,23 @@ export interface BuildStep {
   ms?: number;
   /** Restored from an earlier run's checkpoint — done, and free. */
   reused?: boolean;
+  /** Every model call this stage made, in order — the empty ones too.
+   *  A stage that showed one cost figure hid that it had paid for two
+   *  calls; this is what says where a build's money and minutes went. */
+  calls?: BuildCall[];
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
+export interface BuildCall {
+  specialist: string;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  ms: number;
+  /** Set when the call produced nothing usable: what it said. */
+  failed?: string;
 }
 
 export interface BuildResult {
@@ -131,6 +152,8 @@ export interface BuildJob {
   /** Pause after this stage with the work saved — a stage tool running the
    *  build one stage at a time. In memory only; each run names its own. */
   stopAfter?: string;
+  /** The stage whose model calls are being made. In memory only. */
+  currentStep?: string;
   startedAt: number;
   finishedAt?: number;
   result?: BuildResult;
@@ -452,7 +475,19 @@ export async function resumeBuildJob(
 
 // ── Helpers ──────────────────────────────────────────────────────────
 function step(job: BuildJob, key: string): BuildStep {
+  job.currentStep = key;
   return job.steps.find(s => s.key === key)!;
+}
+
+function recordCall(job: BuildJob, specialist: string, model: string, usage: SpecialistUsage, failed?: string): void {
+  const s = job.currentStep ? job.steps.find(x => x.key === job.currentStep) : undefined;
+  if (!s) return;
+  (s.calls ??= []).push({
+    specialist, model, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut,
+    costUsd: Number(usage.costUsd.toFixed(4)), ms: usage.ms, ...(failed ? { failed } : {}),
+  });
+  s.tokensIn = (s.tokensIn ?? 0) + usage.tokensIn;
+  s.tokensOut = (s.tokensOut ?? 0) + usage.tokensOut;
 }
 
 /** Entering `key`: if the run was asked to stop after the stage before it,
@@ -539,19 +574,32 @@ async function specialist<T>(
   engine: ArchitectEngine,
   id: string,
   input: Record<string, unknown>,
-  opts?: { rawJson?: boolean; maxOutputTokens?: number },
+  opts?: { rawJson?: boolean; maxOutputTokens?: number; effort?: 'minimal' | 'low' | 'medium' | 'high' },
 ): Promise<T> {
   guardBudget(job, `calling the ${id.replace(/_/g, ' ')} specialist`);
   const call = async (maxOutputTokens?: number): Promise<T> => {
-    const { result, usage } = await callSpecialist<T>({
-      specialistId: id,
-      input,
-      engine,
-      rawJson: opts?.rawJson,
-      maxOutputTokens,
-    });
-    job.costUsd += usage.costUsd;
-    return result;
+    try {
+      const { result, usage, model } = await callSpecialist<T>({
+        specialistId: id,
+        input,
+        engine,
+        rawJson: opts?.rawJson,
+        maxOutputTokens,
+        effortOverride: opts?.effort,
+      });
+      job.costUsd += usage.costUsd;
+      recordCall(job, id, model, usage);
+      return result;
+    } catch (err) {
+      // A call that produced nothing still ran and was still billed. It
+      // used to vanish from the books — the stage showed one call where
+      // two had been paid for, and the ceiling never saw the first.
+      if (err instanceof SpecialistError && err.usage) {
+        job.costUsd += err.usage.costUsd;
+        recordCall(job, id, err.model ?? modelForTierName(engine), err.usage, err.message.slice(0, 160));
+      }
+      throw err;
+    }
   };
 
   try {
@@ -575,6 +623,19 @@ async function specialist<T>(
   }
 }
 
+/** For a failed call whose model was not reported. */
+function modelForTierName(engine: ArchitectEngine): string {
+  return engine.models[0] ?? '?';
+}
+
+/** An agent or sub-agent without instructions, or a tool without a
+ *  description: what the Prompt Engineer still has to write. */
+function needsText(n: SpecNode): boolean {
+  if (n.type === 'agent' || n.type === 'subagent') return (n.instructions ?? '').trim().length === 0;
+  if (n.type === 'tool') return (n.description ?? '').trim().length === 0;
+  return false;
+}
+
 interface Requirement {
   goal: string;
   capabilities: string[];
@@ -591,6 +652,40 @@ interface MatchResult {
   missing: Array<Record<string, unknown>>;
   coverage?: number;
 }
+
+/** What the Flow Designer is told on a full emit. */
+const DESIGN_INSTRUCTION =
+            'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else. Sub-agents need a ' +
+            'description (when to use them). Only v1-compilable elements: trigger inbound_message/manual/webhook; ' +
+            'node types agent/subagent/tool/tool_catalog; crud create/update/query. Leave instructions minimal — ' +
+            'the Prompt Engineer fills them in.\n\n' +
+            'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
+            'each tool. A node with no edge is invisible at runtime.\n\n' +
+            'EVERY tool node names the server that publishes it in `action.connector`, using the provider key the Surveyor reported (salesforce_mcp for the standard create/update/query and schema tools, the connector\'s own key for anything else). Leave it blank and the tool is looked for on the wrong server and shows as unconfigured to the client.\n\n' +
+            'One tool node per TOOL, not one per record type — every node is re-sent to the model on every ' +
+            'turn, so near-duplicates cost the client on every conversation. BUT THE TWO KINDS SAY THIS ' +
+            'DIFFERENTLY, and picking the wrong one produces a design that cannot validate. A tool that ' +
+            'takes the record type as an ARGUMENT is one node and is an `mcp` action carrying that ' +
+            'tool\'s exact name. A `crud` action is the other thing entirely: a permission granted on ' +
+            'ONE object, so it always carries action.sobject AND action.operation. There is no crud ' +
+            'action without an object — if you find yourself writing a general \"create a record\" node, ' +
+            'you wanted the mcp tool.\n\n' +
+            'EVERY name you write must be COPIED from `available`, character for character. `available.mcp` ' +
+            'lists each connector with the tools it publishes; `available.crud` lists each object with the ' +
+            'operations permitted on it. A name that is not in there was not found, and a tool that was ' +
+            'not found cannot be used — so do not reshape a name into the casing or the underscores you ' +
+            'would expect it to have.\n\n' +
+            'When the requirement says an action needs human approval, set approval.required on THAT tool node.\n\n' +
+            'Set `audience`: "customer" if the replies are read by someone outside the business, "internal" if ' +
+            'they are read by an employee. Decide it from the requirement, never from the channel — a web chat ' +
+            'can be a public widget or a staff tool, and the two need opposite handling.';
+
+/** What it is told when patching a design that already exists. */
+const DESIGN_PATCH_INSTRUCTION =
+  'The design in currentDesign failed for exactly the reasons listed. Return ONE JSON object with ONLY what changes: ' +
+  '{"nodes": [full node objects to add, or to replace the node with the same id], "removeNodeIds": [ids to drop], ' +
+  '"edges": [the complete edge list, only if an edge changes]}. Do not return unchanged nodes, do not return prose, ' +
+  'and copy every tool and object name character for character from `available`.';
 
 // ── The build ────────────────────────────────────────────────────────
 /**
@@ -667,7 +762,6 @@ async function runBuild(job: BuildJob): Promise<void> {
     r => { cp.requirement = r; },
   );
 
-  // 2 — survey (deterministic gather, one compression call)
   const [objects, invocables, mcpFirstRead, kbs, manifestBuilt] = await orgGather;
   const manifest: CapabilityManifest = manifestBuilt.manifest;
   const found = manifestBuilt.counts.invocables + manifestBuilt.counts.mcpTools + (kbs.length || 0);
@@ -748,25 +842,19 @@ async function runBuild(job: BuildJob): Promise<void> {
       ],
     }));
 
+  // 2 — survey: the gather itself, shaped in code (survey-inventory.ts).
+  // A model used to be paid to re-type this list.
   const surveyed = await stage<Record<string, unknown>>(
     job, 'survey', cp.surveyed,
-    () => specialist<Record<string, unknown>>(job, engine, 'survey_org', {
-      requirement,
-      // Standard CRM objects plus every custom object, capped — a full
-      // describeGlobal is thousands of entries and most are platform noise
-      // the design will never touch.
-      objects: objects
-        .filter(o => o.custom || CORE_OBJECTS.has(o.name))
-        .slice(0, 120)
-        .map(o => ({ n: o.name, l: o.label, c: o.createable, u: o.updateable, q: o.queryable })),
-      invocableApex: invocables.filter(i => i.kind === 'apex'),
-      flows: invocables.filter(i => i.kind === 'flow'),
-      mcpServers: mcp.map(m => ({ provider: m.provider, error: m.error, tools: m.tools })),
-      knowledgeBases: kbs,
-    }),
+    async () => inventoryFromGather({ objects, invocables, mcp, knowledgeBases: kbs, crud: crudObjects, coreObjects: CORE_OBJECTS }),
     () => ({ detail: `${found} things found` }),
     v => { cp.surveyed = v; },
   );
+  const available: AvailableNames = {
+    mcp: mcpToolsByServer,
+    crud: crudObjects,
+    invocables: invocables.map(i => ({ kind: i.kind, name: i.name })),
+  };
 
   // 3 — match
   const match = await stage<MatchResult>(
@@ -826,40 +914,36 @@ async function runBuild(job: BuildJob): Promise<void> {
   let spec = await stage<AgentSpec>(
     job, 'design', cp.spec,
     async () => {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        const draft = await specialist<AgentSpec>(job, engine, 'design_flow', {
+      // A saved design that no longer validates is patched, not redrawn.
+      let lastDraft: AgentSpec | null = cp.spec && !specStillValid ? cp.spec : null;
+      let lastErrors: SpecError[] = checkpointErrors;
+      // The validator's findings are mechanical: a name, a missing field,
+      // an operation. Re-emitting the whole design to fix them paid the
+      // large tier's reasoning again for a graph that was mostly right,
+      // three times over. Attempt 2 patches attempt 1 at low effort; if
+      // the patch does not help, attempt 3 starts over.
+      const patchedDesign = async (): Promise<AgentSpec | null> => {
+        const answer = await specialist<unknown>(job, engine, 'design_flow', {
           requirement,
-          matched: match.matched,
-          partial: match.partial,
-          missing: match.missing,
-          available: { mcp: mcpToolsByServer, crud: crudObjects },
-          instruction:
-            'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else. Sub-agents need a ' +
-            'description (when to use them). Only v1-compilable elements: trigger inbound_message/manual/webhook; ' +
-            'node types agent/subagent/tool/tool_catalog; crud create/update/query. Leave instructions minimal — ' +
-            'the Prompt Engineer fills them in.\n\n' +
-            'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
-            'each tool. A node with no edge is invisible at runtime.\n\n' +
-            'EVERY tool node names the server that publishes it in `action.connector`, using the provider key the Surveyor reported (salesforce_mcp for the standard create/update/query and schema tools, the connector\'s own key for anything else). Leave it blank and the tool is looked for on the wrong server and shows as unconfigured to the client.\n\n' +
-            'One tool node per TOOL, not one per record type — every node is re-sent to the model on every ' +
-            'turn, so near-duplicates cost the client on every conversation. BUT THE TWO KINDS SAY THIS ' +
-            'DIFFERENTLY, and picking the wrong one produces a design that cannot validate. A tool that ' +
-            'takes the record type as an ARGUMENT is one node and is an `mcp` action carrying that ' +
-            'tool\'s exact name. A `crud` action is the other thing entirely: a permission granted on ' +
-            'ONE object, so it always carries action.sobject AND action.operation. There is no crud ' +
-            'action without an object — if you find yourself writing a general \"create a record\" node, ' +
-            'you wanted the mcp tool.\n\n' +
-            'EVERY name you write must be COPIED from `available`, character for character. `available.mcp` ' +
-            'lists each connector with the tools it publishes; `available.crud` lists each object with the ' +
-            'operations permitted on it. A name that is not in there was not found, and a tool that was ' +
-            'not found cannot be used — so do not reshape a name into the casing or the underscores you ' +
-            'would expect it to have.\n\n' +
-            'When the requirement says an action needs human approval, set approval.required on THAT tool node.\n\n' +
-            'Set `audience`: "customer" if the replies are read by someone outside the business, "internal" if ' +
-            'they are read by an employee. Decide it from the requirement, never from the channel — a web chat ' +
-            'can be a public widget or a staff tool, and the two need opposite handling.',
-          ...(feedback ? { previousAttemptErrors: feedback } : {}),
-        }, { rawJson: true, maxOutputTokens: 8000 });
+          currentDesign: lastDraft,
+          validationErrors: lastErrors.map(e => `${e.path}: ${e.message}`),
+          available,
+          instruction: DESIGN_PATCH_INSTRUCTION,
+        }, { rawJson: true, maxOutputTokens: 4000, effort: 'low' });
+        return isSpecPatch(answer) ? applySpecPatch(lastDraft!, answer).spec : null;
+      };
+      const fullDesign = () => specialist<AgentSpec>(job, engine, 'design_flow', {
+        requirement,
+        matched: match.matched,
+        partial: match.partial,
+        missing: match.missing,
+        available,
+        instruction: DESIGN_INSTRUCTION,
+        ...(feedback ? { previousAttemptErrors: feedback } : {}),
+      }, { rawJson: true, maxOutputTokens: 8000 });
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const patchable = lastDraft !== null && (attempt === 2 || (attempt === 1 && lastDraft === cp.spec));
+        const draft = patchable ? (await patchedDesign()) ?? await fullDesign() : await fullDesign();
         // A shapeless answer is a retryable mistake, not a crash. The model
         // can return prose, a wrapper object, or a truncated spec; each of
         // those used to take the whole build down inside the repair below.
@@ -871,12 +955,16 @@ async function runBuild(job: BuildJob): Promise<void> {
           if (attempt === 3) throw new Error('The design never came back as an AgentSpec after 3 attempts.');
           continue;
         }
-        // Free, deterministic repair before the paid one. A missing edge is
-        // not a judgement call — see attachOrphansToRoot.
+        // Free, deterministic repairs before the paid one. A missing edge
+        // is not a judgement call (attachOrphansToRoot); neither is the
+        // spelling of a name the Surveyor already reported (repairNames).
         wiringNotes.push(...attachOrphansToRoot(draft));
+        wiringNotes.push(...repairNames(draft, available));
         const errors = validateSpec(draft, manifest);
         if (errors.length > 0) {
           feedback = errors.map(e => `${e.path}: ${e.message}`).join('\n');
+          lastDraft = draft;
+          lastErrors = errors;
           if (attempt === 3) throw new Error('The design would not validate after 3 attempts:\n' + feedback);
           continue;
         }
@@ -918,28 +1006,51 @@ async function runBuild(job: BuildJob): Promise<void> {
   );
 
   // 5 — prompts
+  // The Prompt Engineer answers with the texts, keyed by node id, and the
+  // merge happens here (spec-merge.ts). It used to return the whole spec
+  // with the texts inside — up to 12,000 output tokens, minutes of
+  // generation, and edges it could drop on the way.
+  const writePrompts = async (target: AgentSpec, onlyIds: string[] | null, firstFeedback: string): Promise<void> => {
+    let promptFeedback = firstFeedback;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const writeFor = target.nodes
+        .filter(n => (n.type === 'agent' || n.type === 'subagent' || n.type === 'tool') && (!onlyIds || onlyIds.includes(n.id)))
+        .map(n => n.id);
+      const answer = await specialist<unknown>(job, engine, 'write_prompts', {
+        draftSpec: target,
+        requirement,
+        writeFor,
+        instruction:
+          'Return ONE JSON object and nothing else: {"instructions": {"<nodeId>": "<text>"}, "descriptions": {"<nodeId>": "<text>"}}. ' +
+          'instructions has one entry for every agent and sub-agent node in writeFor; descriptions has one entry for every ' +
+          'tool node in writeFor. Node ids exactly as in draftSpec. Do not return the spec itself.',
+        ...(promptFeedback ? { previousAttemptErrors: promptFeedback } : {}),
+      }, { rawJson: true, maxOutputTokens: 8_000 });
+      const merged = applyPromptMap(target, answer);
+      const stillMissing = merged.missing.filter(m => !onlyIds || onlyIds.includes(m.split(' ')[0]));
+      const errors = validateSpec(target, manifest);
+      if (errors.length === 0 && (stillMissing.length === 0 || attempt === 3)) {
+        if (stillMissing.length > 0) logger.warn({ jobId: job.id, stillMissing }, 'architect_prompts_incomplete');
+        return;
+      }
+      promptFeedback = [
+        ...errors.map(e => `${e.path}: ${e.message}`),
+        ...(stillMissing.length ? [`No text was written for: ${stillMissing.join(', ')}`] : []),
+        ...(merged.unknownIds.length ? [`These ids are not in draftSpec: ${merged.unknownIds.join(', ')}`] : []),
+      ].join('\n');
+      if (attempt === 3) throw new Error('The instructions would not validate after 3 attempts:\n' + promptFeedback);
+    }
+  };
   spec = await stage<AgentSpec>(
     job, 'prompts', promptsAlreadyWritten ? cp.spec : undefined,
     async () => {
-      // Hand over what the saved spec got wrong, so the first attempt fixes
-      // it rather than discovering it.
-      let promptFeedback = checkpointErrors.map(e => `${e.path}: ${e.message}`).join('\n');
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        const withPrompts = await specialist<AgentSpec>(job, engine, 'write_prompts', {
-          draftSpec: spec,
-          requirement,
-          instruction: 'Return the SAME AgentSpec JSON with instructions and descriptions filled in — change nothing else.',
-          ...(promptFeedback ? { previousAttemptErrors: promptFeedback } : {}),
-        }, { rawJson: true, maxOutputTokens: 12_000 });
-        // The Prompt Engineer returns the whole spec, so it can drop edges
-        // the designer had — re-check rather than assume they survived.
-        wiringNotes.push(...attachOrphansToRoot(withPrompts));
-        const errors = validateSpec(withPrompts, manifest);
-        if (errors.length === 0) return withPrompts;
-        promptFeedback = errors.map(e => `${e.path}: ${e.message}`).join('\n');
-        if (attempt === 3) throw new Error('The prompted spec would not validate after 3 attempts:\n' + promptFeedback);
-      }
-      throw new Error('No prompted spec produced.');
+      // A patched design keeps the instructions its untouched nodes already
+      // had; only what is empty is written.
+      const empty = spec.nodes.filter(needsText).map(n => n.id);
+      const partial = specHasPrompts(spec) && empty.length > 0;
+      if (specHasPrompts(spec) && empty.length === 0) return spec;
+      await writePrompts(spec, partial ? empty : null, '');
+      return spec;
     },
     () => ({ detail: 'instructions written' }),
     v => { cp.spec = v; },
@@ -1010,31 +1121,40 @@ async function runBuild(job: BuildJob): Promise<void> {
         [...(first.uncovered ?? []).map(u => `MISSING: ${u}`),
          ...(first.fixes ?? []).map(f => JSON.stringify(f))].join('\n');
 
-      const repaired = await specialist<AgentSpec>(job, engine, 'design_flow', {
-        requirement, matched: match.matched, partial: match.partial, missing: match.missing,
+      // The repair is a patch to the design that exists, at the designer's
+      // full effort — this is judgement, not spelling — and then texts for
+      // what the patch touched. The whole graph used to be re-emitted and
+      // re-prompted for a fix the Evaluator had already named.
+      const answer = await specialist<unknown>(job, engine, 'design_flow', {
+        requirement,
+        currentDesign: spec,
+        available,
         previousAttemptErrors: brief,
         instruction:
-          'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else, keeping everything ' +
-          'that already worked. EVERY node must be connected. Set approval.required on any tool the ' +
-          'requirement says needs human approval.',
-      }, { rawJson: true, maxOutputTokens: 8000 });
-      wiringNotes.push(...attachOrphansToRoot(repaired));
-
-      const reprompted = await specialist<AgentSpec>(job, engine, 'write_prompts', {
-        draftSpec: repaired, requirement,
-        instruction: 'Return the SAME AgentSpec JSON with instructions and descriptions filled in — change nothing else.',
-      }, { rawJson: true, maxOutputTokens: 12_000 });
-      wiringNotes.push(...attachOrphansToRoot(reprompted));
+          DESIGN_PATCH_INSTRUCTION +
+          ' Keep everything that already works. Set approval.required on any tool the requirement says needs human approval.',
+      }, { rawJson: true, maxOutputTokens: 6000 });
+      if (!isSpecPatch(answer)) return { ...first, repaired: false };
+      const patched = applySpecPatch(spec, answer);
+      wiringNotes.push(...attachOrphansToRoot(patched.spec));
+      wiringNotes.push(...repairNames(patched.spec, available));
 
       // Only adopt the repair if it is actually valid — a fix that will not
       // compile is worse than the flaw it was meant to correct.
-      if (validateSpec(reprompted, manifest).length === 0) {
-        spec = reprompted;
-        cp.spec = reprompted;
-        const second = await judged();
-        return { ...second, repaired: true };
+      if (validateSpec(patched.spec, manifest).length > 0) return { ...first, repaired: false };
+      const touched = patched.spec.nodes.filter(n => patched.changedIds.includes(n.id) || needsText(n)).map(n => n.id);
+      if (touched.length > 0) {
+        try {
+          await writePrompts(patched.spec, touched, '');
+        } catch (err) {
+          logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, 'architect_repair_prompts_failed');
+          return { ...first, repaired: false };
+        }
       }
-      return { ...first, repaired: false };
+      spec = patched.spec;
+      cp.spec = patched.spec;
+      const second = await judged();
+      return { ...second, repaired: true };
     },
     r => ({
       state: r.verdict === 'pass' ? ('done' as StepState) : ('warn' as StepState),
