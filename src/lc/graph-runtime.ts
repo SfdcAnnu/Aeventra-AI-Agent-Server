@@ -506,7 +506,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       } else {
         activeSubagentName = subagentNode.name;
         try {
-          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages, budget);
+          const sub = await runSubagentTurn(req, aiNode, subagentNode, graph, install.sfAccessToken, assembled, baseMessages, budget, emitText);
           if (req.debugMode) {
             debugRequest.push({ stage: 'subagent', subagent: subagentNode.name, model: sub.modelName, toolsBound: sub.toolNames });
           }
@@ -755,6 +755,11 @@ async function runSubagentTurn(
   assembled: { preamble: string | null },
   baseMessages: BaseMessage[],
   budget: TurnBudget,
+  /** Set ONLY for a handoff, where this specialist's reply is the turn's
+   *  reply and the person reads it directly. Left undefined for a
+   *  call-mode specialist, whose reply goes back to the router — streaming
+   *  that would show text the router immediately replaces. */
+  emitText?: Parameters<typeof callModel>[2],
 ): Promise<{ messages: BaseMessage[]; modelName: string; toolNames: string[]; toolCalls?: ToolCallSummary[] }> {
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
@@ -813,7 +818,14 @@ async function runSubagentTurn(
         return { messages: [new AIMessage(BUDGET_TRIPPED_REPLY)] };
       }
       budget.steps += 1;
-      const response = (await bound.invoke([subSystem, ...state.messages])) as AIMessage;
+      // A HANDOFF SPECIALIST'S REPLY IS WHAT THE PERSON READS.
+      //
+      // This was always .invoke(), so only the router ever streamed. On a
+      // handoff that produced the worst of both: the router's text
+      // streamed, then stopped, then the specialist's whole answer landed
+      // at once. callModel with no sink behaves exactly as .invoke() did,
+      // so a call-mode specialist is unchanged.
+      const response = await callModel(bound, [subSystem, ...state.messages], emitText);
       noteUsage(budget, response, 'subagent', modelName);
       // Loop detector applies to subagent tool calls too.
       for (const c of response.tool_calls ?? []) noteToolCall(budget, c.name, c.args, 'subagent');
