@@ -26,6 +26,7 @@ import type { Connection } from 'jsforce';
 import { logger } from '../logger';
 import type { AgentDefinition } from '../types';
 import type { ConnectorInput } from '../chat/adapters/types';
+import { providerUrls } from '../chat/tool-node-connectors';
 
 interface CatalogConfig {
   provider?: unknown;
@@ -45,18 +46,16 @@ interface CatalogConfig {
 export async function connectorsForAgent(
   conn: Connection,
   agent: AgentDefinition,
+  orgKey: string,
 ): Promise<ConnectorInput[]> {
   try {
     const catalogNodes = agent.nodes.filter(n => n.nodeType === 'catalog' && n.isEnabled);
     if (catalogNodes.length === 0) return [];
 
-    const urlByProvider = new Map<string, string>();
-    const rows = await conn.query<{ DeveloperName: string; McpServerUrl__c?: string | null }>(
-      'SELECT DeveloperName, McpServerUrl__c FROM ConnectorCatalog__mdt WHERE McpServerUrl__c != null',
-    );
-    for (const r of rows.records) {
-      if (r.McpServerUrl__c) urlByProvider.set(r.DeveloperName, r.McpServerUrl__c.replace(/\/+$/, ''));
-    }
+    // The same five-minute cache the HTTP path reads. This used to query
+    // ConnectorCatalog__mdt on every socket message -- one Salesforce
+    // round trip, a few hundred milliseconds, on every Home turn.
+    const urlByProvider = await providerUrls(conn, orgKey);
 
     const out: ConnectorInput[] = [];
     for (const node of catalogNodes) {
