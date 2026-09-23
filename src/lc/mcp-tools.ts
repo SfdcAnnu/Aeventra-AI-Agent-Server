@@ -170,6 +170,21 @@ function argProblem(args: unknown): string | null {
  *  the model as self-correctable errors, and every call is logged
  *  (truncated) so Render shows exactly what each tool was asked and
  *  answered. */
+/** A tool that writes, by the only thing every server and custom action
+ *  has in common: what it calls itself. */
+const WRITE_TOOL_RE = /create|update|delete|upsert|insert|patch|save|write|set[A-Z_]/i;
+/** A Salesforce Id: 15 or 18 alphanumerics. A stray 15-char word matches
+ *  too, harmlessly -- invalidation only bites on a key that ends in it. */
+const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
+
+function salesforceIdsIn(value: unknown, depth = 0, out = new Set<string>()): Set<string> {
+  if (depth > 3 || value === null || value === undefined) return out;
+  if (typeof value === 'string') { if (SF_ID_RE.test(value)) out.add(value); return out; }
+  if (Array.isArray(value)) { for (const v of value) salesforceIdsIn(v, depth + 1, out); return out; }
+  if (typeof value === 'object') { for (const v of Object.values(value as Record<string, unknown>)) salesforceIdsIn(v, depth + 1, out); }
+  return out;
+}
+
 function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterface {
   return tool(
     async (args: unknown) => {
@@ -188,12 +203,14 @@ function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterf
         const out = spillIfLarge(t.name, raw);
         logger.info({ tool: t.name, ms: Date.now() - t0, args: argsLog, resultChars: raw.length, result: out.slice(0, 600) }, 'mcp_tool_call');
         // The record block the prompt carries is cached for a minute. After
-        // the model writes to that record, the next turn must see what it
-        // wrote, not the values from before -- live, an agent read stale
-        // values back and re-asked for answers it had just saved.
-        if ((t.name === 'updateSobjectRecord' || t.name === 'deleteSobjectRecord')
-            && args && typeof args === 'object' && typeof (args as { id?: unknown }).id === 'string') {
-          invalidateRecordContext((args as { id: string }).id);
+        // a tool WRITES to a record, the next turn must see what it wrote,
+        // not the values from before -- live, an agent read stale values
+        // back and re-asked for answers it had just saved. Any tool whose
+        // name says it writes, from any server or a custom Apex action, and
+        // every Salesforce Id its arguments carry: no tool, server, object
+        // or argument name is assumed here.
+        if (WRITE_TOOL_RE.test(t.name)) {
+          for (const id of salesforceIdsIn(args)) invalidateRecordContext(id);
         }
         return out;
       } catch (err) {
