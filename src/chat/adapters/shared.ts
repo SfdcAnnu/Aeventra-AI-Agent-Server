@@ -17,7 +17,7 @@ import { ConnectorsCache } from '../../db/connectors-cache';
 import { refreshGoogleToken } from '../../oauth/google';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
-import { hasReadyKbDocuments, retrieveKb, formatKbContext } from '../../kb/retriever';
+import { hasReadyKbDocumentsCached, retrieveKb, formatKbContext } from '../../kb/retriever';
 import { decodeStoredResult } from '../tool-replay';
 import { buildRecordContextBlock } from '../record-context';
 import type { AgentDefinition, AgentNode } from '../../types';
@@ -468,7 +468,7 @@ async function buildKbBlock(
   if (hit && Date.now() - hit.at < KB_BLOCK_TTL_MS) return hit.block;
 
   try {
-    const has = await hasReadyKbDocuments(orgId, agent.apiName);
+    const has = await hasReadyKbDocumentsCached(orgId, agent.apiName);
     if (!has) {
       kbBlockCache.set(key, { block: null, at: Date.now() });
       return null;
