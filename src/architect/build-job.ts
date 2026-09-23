@@ -1123,6 +1123,11 @@ async function runBuild(job: BuildJob): Promise<void> {
             'approval setting as uncovered.\n' +
             'IF THE REQUIREMENT IS A SCRIPT — numbered steps, example wording, a table of statuses — the right tools are not enough. Read the agent\'s own instructions and check they carry the order, what makes each answer valid, what happens when it is not, which field each step writes, and EVERY status transition the client named. A design with the correct tools and no script does not deliver a scripted requirement: report each missing step as uncovered.\n' +
             'Check too that options the client said come from configured data are READ at runtime rather than written into the prompt, and that a dependent picklist is read as a pair.\n' +
+            'THE PLATFORM ALREADY DOES THESE, so never report them as uncovered: receiving and sending messages on the ' +
+            'channel (WhatsApp, SMS, web chat, email), keeping the conversation and its state across turns, identifying the ' +
+            'sender and loading the record the conversation is anchored to, routing between the agent and its specialists, ' +
+            'the approval gate on writes, and choosing the model. Judge only what the agent itself must decide, ask, ' +
+            'validate or write. Measured: a design was charged with "receive and parse WhatsApp replies" and paid for a repair round to add plumbing it cannot own. ' +
             'Verdict `fail` only when something the client explicitly asked ' +
             'for is absent — not for style, naming or efficiency.',
         });
