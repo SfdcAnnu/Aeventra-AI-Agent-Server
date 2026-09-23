@@ -287,7 +287,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       // still trusted, so the HTTP path is unchanged.
       connectors:     parsed.data.connectors?.length
         ? parsed.data.connectors
-        : await connectorsForAgent(conn, agent),
+        : await connectorsForAgent(conn, agent, ctx.orgId),
       debugMode:      parsed.data.debugMode,
       continuation:   parsed.data.continuation ?? null,
       onEvent:        parsed.data.stream ? makeTurnSink(ws) : null,

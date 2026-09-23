@@ -1096,8 +1096,20 @@ async function runBuild(job: BuildJob): Promise<void> {
       // verdict.replace() killed a build that had already designed and
       // prompted the agent. Normalised once, here, where it is produced.
       const judged = async (): Promise<ReviewResult> => {
-        const r = await judgeRaw();
-        return { ...r, verdict: r?.verdict ?? 'unclear' } as ReviewResult;
+        let r = await judgeRaw();
+        // gpt-5.5 through non-strict structured output leaves `verdict` out
+        // now and then although the schema requires it -- a review that
+        // cost $0.035 and 32 s then said "unclear" and gated nothing. When
+        // the rest of the answer is there, the verdict follows from it:
+        // something named as missing is a fail, nothing named is a pass.
+        // An answer with no shape at all is asked for once more.
+        if (!r?.verdict && !(Array.isArray(r?.failures) && Array.isArray(r?.fixes))) {
+          logger.warn({ jobId: job.id }, 'architect_review_shapeless_retrying');
+          r = await judgeRaw();
+        }
+        const named = (r?.uncovered?.length ?? 0) + (r?.fixes?.length ?? 0) + (r?.failures?.length ?? 0);
+        const derived: ReviewResult['verdict'] = named > 0 ? 'fail' : 'pass';
+        return { ...r, verdict: r?.verdict ?? (Array.isArray(r?.failures) || Array.isArray(r?.fixes) ? derived : 'unclear') } as ReviewResult;
       };
       const judgeRaw = (): Promise<ReviewResult> =>
         specialist<ReviewResult>(job, engine, 'evaluate', {
