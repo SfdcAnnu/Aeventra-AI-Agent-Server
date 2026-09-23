@@ -76,6 +76,11 @@ const TEMPERATURE_FOR_STYLE: Record<string, number | undefined> = {
  *  turning this into a live control cannot silently move anyone's bill. */
 const EFFORT_FOR_THINKING: Record<string, 'minimal' | 'low' | 'medium' | 'high' | undefined> = {
   off: 'minimal',
+  // The seeded specs offer 'light' (system-agents.ts) and it mapped to
+  // nothing here, so a specialist marked light reasoned at the provider's
+  // default: the Platform Inspector spent 5,084 output tokens answering
+  // which agent is used most. Low is the honest reading of light.
+  light: 'low',
   standard: undefined,
   deep: 'high',
 };
