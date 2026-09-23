@@ -191,6 +191,23 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // subagent, corrective passes). Checked BEFORE spending, not after.
   const budget = createTurnBudget(aiNode.config, { transport: req.transport });
 
+  // WHERE THE TURN ACTUALLY SPENDS ITS TIME.
+  //
+  // latencyMs measures the MODEL LOOP only -- it starts after setup, MCP
+  // tool loading and prompt building are already done. So a turn that
+  // reported 888ms had really taken 9.5s, and the missing 8.6s was a
+  // sleeping MCP host that nobody could see from either end. Phase marks
+  // make that gap legible instead of leaving it to be inferred by
+  // subtracting from the caller's wall clock.
+  const turnStart = Date.now();
+  const phase: Record<string, number> = {};
+  let phaseMark = turnStart;
+  const mark = (name: string) => {
+    const now = Date.now();
+    phase[name] = now - phaseMark;
+    phaseMark = now;
+  };
+
   // Internal flight recorder. Off unless TRACE_CAPTURE=full, and even when
   // on it only pushes to an array during the turn — everything expensive
   // happens after the reply is sent (see trace/writer.ts).
@@ -228,8 +245,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // 'Prebuilt' actions never enter the connectors payload — they become
   // locally-executed typed tools (lc/prebuilt-tools.ts) instead.
   const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions.filter(a => a.actionType !== 'Prebuilt'));
+  mark('setup');
   const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken);
+  mark('resolveServers');
   const loaded = await loadMcpTools(servers, { deadlineAt: budget.deadlineAt });
+  mark('loadTools');
   // Phase 7 — approval-as-suspension: a tool node marked requiresApproval
   // never executes inline. The call parks as a durable ChatApproval row
   // (the model tells the user it's awaiting approval) and
@@ -286,6 +306,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       connectorNotice,
     );
     const systemMessage = cacheAwareSystem(aiNode.nodeSubType, promptParts);
+    mark('buildPrompt');
 
     const attachments = (req.attachments && req.attachments.length > 0)
       ? await loadAttachments(req.context.orgId, req.attachments)
@@ -637,6 +658,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     logger.info({
       orgId: req.context.orgId, tokensIn, tokensOut, cacheRead: budget.cacheReadTokens,
       toolCallCount: toolCalls.length, ms: Date.now() - t0,
+      phase: { ...phase, modelLoop: Date.now() - t0 }, turnMs: Date.now() - turnStart,
       subagent: activeSubagentName,
       planVersion: req.agent.planVersion,
       reply: assistantText.slice(0, 400),
@@ -675,6 +697,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       // describe a turn that routed on one model and answered on another.
       usage: usageByModel(budget),
       latencyMs: Date.now() - t0,
+      turnMs: Date.now() - turnStart,
+      phaseMs: { ...phase, modelLoop: Date.now() - t0 },
       ...(activeSubagentName !== null ? { activeTopicName: activeSubagentName } : {}),
       ...(req.debugMode ? { debugRequest, debugResponse } : {}),
     };
