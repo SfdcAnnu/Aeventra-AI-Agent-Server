@@ -102,11 +102,14 @@ export async function sobjectTypeFromId(orgId: string, recordId: string): Promis
 // options and their dependencies, decoded from the same validFor bitmaps
 // the CRM MCP server decodes, from a describe cached per object.
 //
-// Bounded on purpose: custom picklists plus a short list of standard ones
-// an intake conversation actually chooses from; a field with more values
-// than a person would be offered is named but not listed.
+// Bounded by a budget, not by a list of field names: every picklist that
+// fits, custom fields first (they are the org's own vocabulary and the
+// ones an agent is most often asked to fill), then standard ones, until
+// the character cap; a field with more values than a person would be
+// offered is named but not listed; what did not fit is counted. No object
+// or field is named here -- the platform supplies mechanics, the org's
+// schema supplies meaning.
 const DESCRIBE_TTL_MS = 5 * 60_000;
-const STANDARD_PICKLISTS = new Set(['Status', 'LeadSource', 'Rating', 'Type', 'StageName', 'Priority', 'Origin', 'Reason']);
 const MAX_VALUES_PER_FIELD = 40;
 const MAX_OPTIONS_CHARS = 2_000;
 
@@ -143,31 +146,38 @@ async function describedFields(conn: { sobject: (t: string) => { describe: () =>
 
 function renderPicklistOptions(recordType: string, fields: DescribedField[]): string | null {
   const byName = new Map(fields.map(f => [f.name, f]));
+  const candidates = fields
+    .filter(f => (f.type === 'picklist' || f.type === 'combobox') && (f.picklistValues ?? []).some(v => v.active !== false))
+    .sort((a, b) => Number(b.name.endsWith('__c')) - Number(a.name.endsWith('__c')));
   const lines: string[] = [];
-  for (const f of fields) {
-    if (f.type !== 'picklist' && f.type !== 'combobox') continue;
-    if (!f.name.endsWith('__c') && !STANDARD_PICKLISTS.has(f.name)) continue;
+  let used = 0;
+  let omitted = 0;
+  for (const f of candidates) {
     const active = (f.picklistValues ?? []).filter(v => v.active !== false);
-    if (active.length === 0) continue;
-    if (active.length > MAX_VALUES_PER_FIELD) { lines.push(`- ${f.name}: ${active.length} values; read the schema if needed`); continue; }
-    const controller = f.controllerName ? byName.get(f.controllerName) : undefined;
-    const parents = controller?.type === 'boolean' ? ['false', 'true'] : (controller?.picklistValues ?? []).map(v => v.value);
-    if (f.controllerName && parents.length > 0) {
-      const map = new Map<string, string[]>(parents.map(p => [p, []]));
-      let any = false;
-      for (const v of active) for (const parent of decodeValidFor(v.validFor, parents)) { map.get(parent)!.push(v.value); any = true; }
-      if (any) {
-        const parts = parents.filter(p => (map.get(p) ?? []).length > 0).map(p => `${p}: ${map.get(p)!.join(' | ')}`);
-        lines.push(`- ${f.name} (depends on ${f.controllerName}): ${parts.join('; ')}`);
-        continue;
+    let line: string;
+    if (active.length > MAX_VALUES_PER_FIELD) {
+      line = `- ${f.name}: ${active.length} values; read the schema if needed`;
+    } else {
+      line = `- ${f.name}: ${active.map(v => v.value).join(' | ')}`;
+      const controller = f.controllerName ? byName.get(f.controllerName) : undefined;
+      const parents = controller?.type === 'boolean' ? ['false', 'true'] : (controller?.picklistValues ?? []).map(v => v.value);
+      if (f.controllerName && parents.length > 0) {
+        const map = new Map<string, string[]>(parents.map(p => [p, []]));
+        let any = false;
+        for (const v of active) for (const parent of decodeValidFor(v.validFor, parents)) { map.get(parent)!.push(v.value); any = true; }
+        if (any) {
+          const parts = parents.filter(p => (map.get(p) ?? []).length > 0).map(p => `${p}: ${map.get(p)!.join(' | ')}`);
+          line = `- ${f.name} (depends on ${f.controllerName}): ${parts.join('; ')}`;
+        }
       }
     }
-    lines.push(`- ${f.name}: ${active.map(v => v.value).join(' | ')}`);
+    if (used + line.length + 1 > MAX_OPTIONS_CHARS) { omitted++; continue; }
+    lines.push(line);
+    used += line.length + 1;
   }
   if (lines.length === 0) return null;
-  let body = lines.join('\n');
-  if (body.length > MAX_OPTIONS_CHARS) body = body.slice(0, MAX_OPTIONS_CHARS) + '\n…(truncated)';
-  return `PICKLIST OPTIONS FOR ${recordType.toUpperCase()} (exact values; offer and save only these, and for a dependent field only the values listed under the chosen parent):\n${body}`;
+  if (omitted > 0) lines.push(`- (${omitted} more picklist field${omitted === 1 ? '' : 's'} not listed; read the schema if needed)`);
+  return `PICKLIST OPTIONS FOR ${recordType.toUpperCase()} (exact values; offer and save only these, and for a dependent field only the values listed under the chosen parent):\n${lines.join('\n')}`;
 }
 
 export async function buildRecordContextBlock(

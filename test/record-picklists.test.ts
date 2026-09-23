@@ -19,7 +19,7 @@ let retrieves = 0;
 let describes = 0;
 let describeFails = false;
 
-const leadFields = [
+const leadFields: Array<Record<string, unknown>> = [
   { name: 'Id', type: 'id' },
   { name: 'LastName', type: 'string' },
   { name: 'Status', type: 'picklist', picklistValues: [
@@ -74,9 +74,25 @@ describe('picklist options in the record context', () => {
     expect(block).not.toContain('Commercial Project C');
   });
 
-  it('leaves large standard picklists out rather than bloating the prompt', async () => {
+  it('lists standard picklists too, after the custom ones -- no field is named in the code', async () => {
     const block = await buildRecordContextBlock('org', 'Lead', '00Qg5000008few9EAA');
-    expect(block).not.toContain('Industry 3');
+    expect(block).toContain('Industry: Industry 0 | Industry 1');
+    expect(block!.indexOf('Project_Type__c:')).toBeLessThan(block!.indexOf('Industry:'));
+    expect(block!.indexOf('Budget__c:')).toBeLessThan(block!.indexOf('Status:'));
+  });
+
+  it('stops at the character budget and says how many fields did not fit', async () => {
+    // 60 custom picklists of 8 long values each cannot all fit in 2,000 chars.
+    leadFields.push(...Array.from({ length: 60 }, (_, i) => ({
+      name: `Extra_${i}__c`, type: 'picklist',
+      picklistValues: Array.from({ length: 8 }, (_, j) => ({ value: `Extra ${i} option number ${j}`, active: true })),
+    })));
+    _clearRecordContextCaches();
+    const block = await buildRecordContextBlock('org', 'Lead', '00Qg5000008few9EAA');
+    const options = block!.slice(block!.indexOf('PICKLIST OPTIONS'));
+    expect(options.length).toBeLessThan(2_400);
+    expect(options).toMatch(/more picklist fields not listed/);
+    leadFields.splice(leadFields.length - 60, 60);
   });
 
   it('describes the object once per org, not once per record', async () => {
