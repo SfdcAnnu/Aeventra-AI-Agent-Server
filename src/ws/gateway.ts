@@ -69,6 +69,11 @@ interface ConnectionContext {
 
 const connectionContexts = new WeakMap<WebSocket, ConnectionContext>();
 
+/** Well under the ~60s an idle connection typically survives on consumer
+ *  NAT, and far under the two hours the kernel waits before probing. */
+const HEARTBEAT_MS = Number(process.env.WS_HEARTBEAT_MS) > 0
+  ? Number(process.env.WS_HEARTBEAT_MS) : 30_000;
+
 // Per-connection message rate cap — coarse, in-process. Coordinating across
 // multiple Node instances would need a shared counter; not built until a
 // real deployment actually needs it (single Render instance today).
@@ -443,15 +448,50 @@ export function attach(server: Server): void {
     }
     logger.info({ orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_connection_opened');
 
+    // HEARTBEAT — two jobs, neither of which TCP does for us.
+    //
+    // A socket can die without either end being told: a phone suspends its
+    // webview on app-switch, a laptop sleeps, a network hands over from
+    // wifi to cellular. Nothing closes; the connection simply stops
+    // existing. Linux will not probe until tcp_keepalive_time, two hours
+    // by default, so without this the server holds a dead socket for the
+    // rest of the afternoon and a turn's reply is written to a listener
+    // that is not there.
+    //
+    // And the ping keeps the path warm. Every middlebox between here and
+    // the reader — a home router's NAT table, carrier-grade NAT on a
+    // phone, a corporate firewall doing SSL inspection — culls a
+    // connection it has seen no traffic on, and their timeouts are not
+    // ours to raise. A turn is allowed 540 seconds on this transport; a
+    // quiet one would be cut long before that.
+    //
+    // THE TURN IS NOT ABANDONED when the socket dies. It runs to
+    // completion and recordWsTurn writes it to ChatMessage__c, so the
+    // answer is waiting when the person comes back — which is what makes
+    // the client's reconnect cheap: it re-reads, it does not replay.
+    let alive = true;
+    ws.on('pong', () => { alive = true; });
+    const heartbeat = setInterval(() => {
+      if (!alive) {
+        logger.info({ orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_connection_unresponsive_terminated');
+        ws.terminate();   // not close(): the peer is gone, a handshake goes nowhere
+        return;
+      }
+      alive = false;
+      try { ws.ping(); } catch { /* already closing */ }
+    }, HEARTBEAT_MS);
+
     ws.on('message', (data) => {
       void handleMessage(ws, ctx, data.toString());
     });
     ws.on('close', () => {
+      clearInterval(heartbeat);
       logger.info({ orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_connection_closed');
       messageTimestamps.delete(ws);
       wsSessionState.delete(ws);
     });
     ws.on('error', (err) => {
+      clearInterval(heartbeat);
       logger.error({ err, orgId: ctx.orgId }, 'ws_connection_error');
     });
   });
