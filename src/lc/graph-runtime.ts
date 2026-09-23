@@ -229,7 +229,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // locally-executed typed tools (lc/prebuilt-tools.ts) instead.
   const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions.filter(a => a.actionType !== 'Prebuilt'));
   const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken);
-  const loaded = await loadMcpTools(servers);
+  const loaded = await loadMcpTools(servers, { deadlineAt: budget.deadlineAt });
   // Phase 7 — approval-as-suspension: a tool node marked requiresApproval
   // never executes inline. The call parks as a durable ChatApproval row
   // (the model tells the user it's awaiting approval) and
@@ -765,7 +765,7 @@ async function runSubagentTurn(
   const subActions = resolveSubagentActions(graph, subagentNode);
   const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions.filter(a => a.actionType !== 'Prebuilt'));
   const servers = await resolveMcpServers({ ...req, connectors: subConnectors }, synthetic, sfAccessToken);
-  const loaded = await loadMcpTools(servers);
+  const loaded = await loadMcpTools(servers, { deadlineAt: budget.deadlineAt });
   // Phase 7 — the same approval gate as the router, over THIS subagent's
   // resolved actions.
   const subGate = approvalGate({
