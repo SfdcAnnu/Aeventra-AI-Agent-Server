@@ -19,6 +19,7 @@ import { ensureMcpServerAwake } from '../chat/adapters/shared';
 import { invalidateRecordContext } from '../chat/record-context';
 import jwt from 'jsonwebtoken';
 import { verifyPlatformToken } from '../platform/token';
+import { PLATFORM_PROVIDER } from '../chat/connector-scope';
 
 export interface LoadedMcpTools {
   tools: StructuredToolInterface[];
@@ -222,7 +223,25 @@ function salesforceIdsIn(value: unknown, depth = 0, out = new Set<string>()): Se
   return out;
 }
 
-function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterface {
+// THE PLATFORM'S OWN TOOLS DO NOT SPILL AT 2,000 CHARACTERS.
+//
+// The spill exists for unbounded results -- a SOQL over thousands of
+// rows -- so the model reads a summary and a handle instead of the
+// payload. The platform's tools (home_stats, list_runs, ...) return
+// bounded, already-shaped JSON that the model needs whole: a week of
+// home_stats is 2,160 characters pretty-printed, and spilling it cost the
+// copilot a read_artifact round trip -- one more model call, ~1.5 s and
+// ~3k tokens -- on every stats question. Measured: 3 calls where 2 would do.
+const PLATFORM_SPILL_THRESHOLD = 12_000;
+
+function spillThresholdFor(server: ResolvedMcpServer): number | undefined {
+  // By provider name, or by the loopback address the platform tools live
+  // at -- whichever the resolver labelled it with.
+  const isPlatform = server.name === PLATFORM_PROVIDER || /\/platform(\/mcp)?\/?$/.test(server.url);
+  return isPlatform ? PLATFORM_SPILL_THRESHOLD : undefined;
+}
+
+function rejectPlaceholderArgs(t: StructuredToolInterface, spillThreshold?: number): StructuredToolInterface {
   return tool(
     async (args: unknown) => {
       const problem = argProblem(args);
@@ -237,7 +256,7 @@ function rejectPlaceholderArgs(t: StructuredToolInterface): StructuredToolInterf
         const raw = typeof result === 'string' ? result : JSON.stringify(result);
         // Phase 3: oversized results are stored by reference — the model
         // gets a compact summary + artifact handle instead of the payload.
-        const out = spillIfLarge(t.name, raw);
+        const out = spillIfLarge(t.name, raw, spillThreshold);
         logger.info({ tool: t.name, ms: Date.now() - t0, args: argsLog, resultChars: raw.length, result: out.slice(0, 600) }, 'mcp_tool_call');
         // The record block the prompt carries is cached for a minute. After
         // a tool WRITES to a record, the next turn must see what it wrote,
@@ -379,7 +398,7 @@ async function connectAndLoad(servers: ResolvedMcpServer[], deadlineAt?: number)
           continue;
         }
         serverByTool.set(t.name, s.name);
-        tools.push(rejectPlaceholderArgs(t));
+        tools.push(rejectPlaceholderArgs(t, spillThresholdFor(s)));
         kept++;
       }
       logger.info({ server: s.name, total: loaded.length, kept }, 'mcp_tools_loaded');

@@ -74,8 +74,8 @@ function fieldNames(record: unknown): string[] {
 
 /** Store a large result and return the compact reference the model sees.
  *  Small results pass through untouched. */
-export function spillIfLarge(toolName: string, result: string): string {
-  if (result.length <= ARTIFACT_THRESHOLD) return result;
+export function spillIfLarge(toolName: string, result: string, threshold: number = ARTIFACT_THRESHOLD): string {
+  if (result.length <= threshold) return result;
   sweep();
 
   const id = `art_${randomBytes(5).toString('hex')}`;
