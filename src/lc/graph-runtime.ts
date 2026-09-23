@@ -144,6 +144,28 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // both known the moment the message arrived — so the wait was the SUM of
   // three round trips rather than the longest one. Roughly half a second
   // of silence on every message, including ones that call no tool at all.
+  // WHERE THE TURN ACTUALLY SPENDS ITS TIME.
+  //
+  // latencyMs measures the MODEL LOOP only -- it starts after setup, MCP
+  // tool loading and prompt building are already done. So a turn that
+  // reported 888ms had really taken 9.5s, and the missing 8.6s was a
+  // sleeping MCP host that nobody could see from either end. Phase marks
+  // make that gap legible instead of leaving it to be inferred by
+  // subtracting from the caller's wall clock.
+  //
+  // Started HERE, before the setup reads, and not called turnStart: an
+  // inner scope below already has a turnStart that is a message-array
+  // index, and Date.now() minus that produced an epoch timestamp that
+  // was stored as if it were a duration. Same type, wrong number.
+  const turnClockStart = Date.now();
+  const phase: Record<string, number> = {};
+  let phaseMark = turnClockStart;
+  const mark = (name: string) => {
+    const now = Date.now();
+    phase[name] = now - phaseMark;
+    phaseMark = now;
+  };
+
   const [install, orgConn, memory] = await Promise.all([
     InstallsRepo.findByOrgId(req.context.orgId),
     getOrgConnection(req.context.orgId),
@@ -190,23 +212,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // the identical-call loop detector, shared across the WHOLE turn (router,
   // subagent, corrective passes). Checked BEFORE spending, not after.
   const budget = createTurnBudget(aiNode.config, { transport: req.transport });
-
-  // WHERE THE TURN ACTUALLY SPENDS ITS TIME.
-  //
-  // latencyMs measures the MODEL LOOP only -- it starts after setup, MCP
-  // tool loading and prompt building are already done. So a turn that
-  // reported 888ms had really taken 9.5s, and the missing 8.6s was a
-  // sleeping MCP host that nobody could see from either end. Phase marks
-  // make that gap legible instead of leaving it to be inferred by
-  // subtracting from the caller's wall clock.
-  const turnStart = Date.now();
-  const phase: Record<string, number> = {};
-  let phaseMark = turnStart;
-  const mark = (name: string) => {
-    const now = Date.now();
-    phase[name] = now - phaseMark;
-    phaseMark = now;
-  };
 
   // Internal flight recorder. Off unless TRACE_CAPTURE=full, and even when
   // on it only pushes to an array during the turn — everything expensive
@@ -658,7 +663,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     logger.info({
       orgId: req.context.orgId, tokensIn, tokensOut, cacheRead: budget.cacheReadTokens,
       toolCallCount: toolCalls.length, ms: Date.now() - t0,
-      phase: { ...phase, modelLoop: Date.now() - t0 }, turnMs: Date.now() - turnStart,
+      phase: { ...phase, modelLoop: Date.now() - t0 }, turnMs: Date.now() - turnClockStart,
       subagent: activeSubagentName,
       planVersion: req.agent.planVersion,
       reply: assistantText.slice(0, 400),
@@ -697,7 +702,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       // describe a turn that routed on one model and answered on another.
       usage: usageByModel(budget),
       latencyMs: Date.now() - t0,
-      turnMs: Date.now() - turnStart,
+      turnMs: Date.now() - turnClockStart,
       phaseMs: { ...phase, modelLoop: Date.now() - t0 },
       ...(activeSubagentName !== null ? { activeTopicName: activeSubagentName } : {}),
       ...(req.debugMode ? { debugRequest, debugResponse } : {}),
