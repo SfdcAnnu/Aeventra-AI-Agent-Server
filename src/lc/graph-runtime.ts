@@ -135,16 +135,30 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       : 'Agent has no AI orchestrator node — cannot run chat mode.');
   }
 
-  const install = await InstallsRepo.findByOrgId(req.context.orgId);
+  // THREE INDEPENDENT READS, STARTED TOGETHER.
+  //
+  // These were three sequential awaits, and every one of them ran before
+  // the model was allowed to start: Postgres for the install, Salesforce
+  // for the connection, Salesforce again for the session memory. None
+  // depends on another — loadSessionMemory needs only orgId and sessionId,
+  // both known the moment the message arrived — so the wait was the SUM of
+  // three round trips rather than the longest one. Roughly half a second
+  // of silence on every message, including ones that call no tool at all.
+  const [install, orgConn, memory] = await Promise.all([
+    InstallsRepo.findByOrgId(req.context.orgId),
+    getOrgConnection(req.context.orgId),
+    loadSessionMemory(req.context.orgId, req.sessionId),
+  ]);
   if (!install?.sfAccessToken) {
     throw new Error('Org has no Salesforce tokens. Admin must run Synapse Setup first.');
   }
 
   // Connections the tool nodes name without a catalog node, and the turn
-  // that follows an approved action (see chat/connector-scope.ts).
+  // that follows an approved action (see chat/connector-scope.ts). This one
+  // DOES depend on the install, for the instance url.
   req = {
     ...req,
-    connectors: await augmentConnectorsWithToolNodes(req.agent, req.connectors ?? [], await getOrgConnection(req.context.orgId), install.sfInstanceUrl),
+    connectors: await augmentConnectorsWithToolNodes(req.agent, req.connectors ?? [], orgConn, install.sfInstanceUrl),
     newUserMessage: req.continuation && !req.newUserMessage.trim() ? continuationMessage(req.continuation) : req.newUserMessage,
   };
 
@@ -163,7 +177,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     ? Number(process.env.TURN_MAX_PARALLEL_CALLS) : 4;
 
   // Memory read path — identical to the original (see chat/memory.ts).
-  const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
+  // The read itself moved up into the parallel batch above; only the
+  // assembly happens here, and that is local work.
   const assembled = assembleMemory(req.history, memory);
 
   // Universal customer-facing protections (chat/output-guardrails.ts),
