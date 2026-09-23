@@ -389,8 +389,8 @@ export async function callSpecialist<T = unknown>(opts: {
     const out = (await deadline(bound.invoke([
       ['system', system],
       ['human', user],
-    ]))) as { raw?: { usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown };
-    result = out.parsed;
+    ]))) as { raw?: { content?: unknown; usage_metadata?: { input_tokens?: number; output_tokens?: number } }; parsed?: unknown };
+    result = recoverStructured(out.parsed, out.raw?.content, node.label);
     tokensIn = out.raw?.usage_metadata?.input_tokens ?? 0;
     tokensOut = out.raw?.usage_metadata?.output_tokens ?? 0;
     if (result == null) throw failed(`'${node.label}' returned nothing parseable against its schema.`);
@@ -424,6 +424,35 @@ export async function callSpecialist<T = unknown>(opts: {
     'architect_specialist_call',
   );
   return { result: result as T, usage, model: modelId };
+}
+
+/**
+ * THE RESPONSES API HANDS BACK CONTENT BLOCKS, AND THE PARSER KEPT THE BOX.
+ *
+ * On gpt-5.5 (the Responses API path) `withStructuredOutput` returned, as
+ * `parsed`, the message's content-block array coerced into an object:
+ * `{"0": {"type": "text", "text": "{...the real answer...}"}}`. Every
+ * specialist bound to a `returns` schema read that box as its answer. The
+ * Evaluator's verdict became "unclear" while the text inside said `fail`
+ * with fifteen uncovered requirements; the Capability Matcher's matched,
+ * partial and missing lists were all undefined, which counted as "full
+ * coverage". Two measured builds shipped agents their own reviewer had
+ * rejected.
+ *
+ * When the parsed value is that box, the answer is the JSON in its text.
+ */
+export function recoverStructured(parsed: unknown, rawContent: unknown, label: string): unknown {
+  if (!isContentBox(parsed)) return parsed;
+  const text = messageText(rawContent ?? Object.values(parsed as Record<string, unknown>));
+  return parseLooseJson(text, label);
+}
+
+function isContentBox(v: unknown): boolean {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const keys = Object.keys(v as object);
+  if (keys.length === 0 || !keys.every(k => /^\d+$/.test(k))) return false;
+  const first = (v as Record<string, unknown>)['0'] as { type?: unknown; text?: unknown } | undefined;
+  return !!first && typeof first === 'object' && first.type === 'text' && typeof first.text === 'string';
 }
 
 /** Extract the one JSON object from model text — tolerant of code fences
