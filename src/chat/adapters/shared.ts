@@ -417,20 +417,56 @@ export function discoverAllowedTools(
  * doesn't (or a lookup fails) so the caller can fall back to the raw
  * Notes text — never breaks an agent that hasn't uploaded anything.
  */
+/**
+ * THE SAME QUESTION IS ASKED TWICE IN ONE TURN.
+ *
+ * buildSystemPromptParts runs for the router, and again for every
+ * specialist the router hands off to — each time with the SAME
+ * req.newUserMessage. Without this, one turn that reaches a specialist
+ * pays for two embeddings and two vector searches over identical input,
+ * and a turn that fans out to three pays for four.
+ *
+ * Keyed on what the answer depends on: org, agent and the exact question.
+ * Short-lived, because a document indexed mid-conversation should still
+ * be found on the next turn — this is for the seconds inside one turn,
+ * not for caching a knowledge base.
+ *
+ * A failure is NOT cached. A KB that was briefly unreachable must be
+ * retried next call, never remembered as empty for a minute.
+ */
+const KB_BLOCK_TTL_MS = 60_000;
+const kbBlockCache = new Map<string, { block: string | null; at: number }>();
+
 async function buildKbBlock(
   orgId: string,
   agent: AgentDefinition,
   query: string,
   engineOverride?: EngineOverrideInput | null,
 ): Promise<string | null> {
+  const key = `${orgId}|${agent.apiName}|${query}`;
+  const hit = kbBlockCache.get(key);
+  if (hit && Date.now() - hit.at < KB_BLOCK_TTL_MS) return hit.block;
+
   try {
     const has = await hasReadyKbDocuments(orgId, agent.apiName);
-    if (!has) return null;
+    if (!has) {
+      kbBlockCache.set(key, { block: null, at: Date.now() });
+      return null;
+    }
     const chunks = await retrieveKb({ orgId, agentApiName: agent.apiName, query, engineOverride });
-    const block = formatKbContext(chunks);
-    if (!block) return null;
-    return 'KNOWLEDGE BASE (most relevant passages for this question):\n' + block;
+    const formatted = formatKbContext(chunks);
+    const block = formatted
+      ? 'KNOWLEDGE BASE (most relevant passages for this question):\n' + formatted
+      : null;
+    kbBlockCache.set(key, { block, at: Date.now() });
+    // Bounded: one entry per distinct question, swept when it grows.
+    if (kbBlockCache.size > 500) {
+      const cutoff = Date.now() - KB_BLOCK_TTL_MS;
+      for (const [k, v] of kbBlockCache) if (v.at < cutoff) kbBlockCache.delete(k);
+    }
+    return block;
   } catch (err) {
+    // Deliberately NOT cached — see the note above.
     logger.error({ err, orgId, agent: agent.apiName }, 'kb_retrieval_failed_falling_back');
     return null;
   }
