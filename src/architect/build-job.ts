@@ -911,11 +911,16 @@ async function runBuild(job: BuildJob): Promise<void> {
   }
   const specStillValid = !!cp.spec && checkpointErrors.length === 0;
   const promptsAlreadyWritten = specStillValid && specHasPrompts(cp.spec!);
+  // Set by the design stage when it patched a saved design whose prompts
+  // had already been written: only what the patch touched needs text.
+  let checkpointHadPrompts = false;
+  const patchChangedIds: string[] = [];
   let spec = await stage<AgentSpec>(
     job, 'design', cp.spec,
     async () => {
       // A saved design that no longer validates is patched, not redrawn.
       let lastDraft: AgentSpec | null = cp.spec && !specStillValid ? cp.spec : null;
+      checkpointHadPrompts = !!cp.spec && specHasPrompts(cp.spec);
       let lastErrors: SpecError[] = checkpointErrors;
       // The validator's findings are mechanical: a name, a missing field,
       // an operation. Re-emitting the whole design to fix them paid the
@@ -930,7 +935,10 @@ async function runBuild(job: BuildJob): Promise<void> {
           available,
           instruction: DESIGN_PATCH_INSTRUCTION,
         }, { rawJson: true, maxOutputTokens: 4000, effort: 'low' });
-        return isSpecPatch(answer) ? applySpecPatch(lastDraft!, answer).spec : null;
+        if (!isSpecPatch(answer)) return null;
+        const patched = applySpecPatch(lastDraft!, answer);
+        if (lastDraft === cp.spec) patchChangedIds.push(...patched.changedIds);
+        return patched.spec;
       };
       const fullDesign = () => specialist<AgentSpec>(job, engine, 'design_flow', {
         requirement,
@@ -1044,12 +1052,16 @@ async function runBuild(job: BuildJob): Promise<void> {
   spec = await stage<AgentSpec>(
     job, 'prompts', promptsAlreadyWritten ? cp.spec : undefined,
     async () => {
-      // A patched design keeps the instructions its untouched nodes already
-      // had; only what is empty is written.
+      // A fresh design carries the designer's placeholder instructions,
+      // which are not prompts: everything is written. Only a patched
+      // checkpoint whose prompts were already written keeps them, and
+      // then just what the patch touched (plus anything empty) is written.
+      // The first measured build skipped this stage outright because the
+      // placeholders counted as text — the agent shipped without prompts.
       const empty = spec.nodes.filter(needsText).map(n => n.id);
-      const partial = specHasPrompts(spec) && empty.length > 0;
-      if (specHasPrompts(spec) && empty.length === 0) return spec;
-      await writePrompts(spec, partial ? empty : null, '');
+      const only = checkpointHadPrompts && patchChangedIds.length > 0 ? [...new Set([...patchChangedIds, ...empty])] : null;
+      if (only && only.length === 0) return spec;
+      await writePrompts(spec, only, '');
       return spec;
     },
     () => ({ detail: 'instructions written' }),
