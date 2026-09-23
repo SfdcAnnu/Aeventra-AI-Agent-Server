@@ -116,19 +116,21 @@ const continueTools = STAGE_TOOL.slice(1).map(([key, name, title, description, n
   }),
 );
 
-/** How long build_agent and resume_build wait before handing back "still
- *  running".
+/** How long build_agent and resume_build wait before handing back.
  *
- *  THIS IS CAPPED BY MCP, NOT BY US. Platform tools are served over the
- *  server's own MCP endpoint, and the MCP client times a request out after
- *  60 seconds with no way to raise it through the adapter. A longer wait
- *  here does not buy patience, it buys "MCP error -32001: Request timed
- *  out" and a build the caller thinks failed while it is still running.
+ *  THEY DO NOT WAIT FOR THE BUILD. A build is two to five minutes of
+ *  specialist calls; the tool used to sit in it for 40 seconds and then
+ *  report "still running" anyway, and every builder turn in the copilot
+ *  cost that 40 seconds plus a second model call to say so — 47 to 123
+ *  seconds a turn, measured, for an answer that was always "under way".
+ *  The build card in the chat polls the job every couple of seconds and
+ *  fills in stage by stage on its own, so the tool only needs to see the
+ *  build START: long enough to catch a failure at the first step (no AI
+ *  connection, a requirement the Analyst rejects), then hand back the job.
  *
- *  Waiting less is not a compromise: the build keeps running server-side
- *  and the build card in the chat polls it every couple of seconds, so the
- *  person watches it finish whether or not the tool was still waiting. */
-const BUILD_WAIT_MS = Number(process.env.ARCHITECT_BUILD_WAIT_MS) || 40_000;
+ *  ARCHITECT_BUILD_WAIT_MS raises it for an environment that wants the old
+ *  behaviour; MCP times a tool call out at 60 seconds regardless. */
+const BUILD_WAIT_MS = Number(process.env.ARCHITECT_BUILD_WAIT_MS) || 4_000;
 
 /**
  * The whole build in ONE call.
@@ -151,9 +153,11 @@ const buildAgent = define({
   name: 'build_agent',
   title: 'Build the agent',
   description:
-    'Build a complete agent from a requirement and return when it is saved as a Draft: understand, survey the org, ' +
-    'match capabilities, design, write instructions, review, list setup and compile. This is the normal way to build ' +
-    'an agent. Use the individual stage tools only when the person has asked to go one stage at a time.',
+    'Start building a complete agent from a requirement — understand, survey the org, match capabilities, design, ' +
+    'write instructions, review, list setup and save as a Draft — and return as soon as it is under way with the ' +
+    'jobId. The build carries on server-side and the build card in the chat fills in stage by stage; do not poll it. ' +
+    'This is the normal way to build an agent. Use the individual stage tools only when the person has asked to go ' +
+    'one stage at a time.',
   inputSchema: {
     requirement: z.string().min(20).max(12_000).describe('What the agent should do, in their own words — two or three full sentences at least.'),
     attachmentText: z.string().max(60_000).optional().describe('Text of a document the person provided, if any.'),
@@ -196,7 +200,7 @@ const listResumable = define({
 const resumeBuild = define({
   name: 'resume_build',
   title: 'Resume a build',
-  description: 'Continue a paused or failed build from its checkpoint to the end. Finished stages are not paid for again.',
+  description: 'Continue a paused or failed build from its checkpoint to the end, returning as soon as it is under way. Finished stages are not paid for again; the build card shows the rest.',
   inputSchema: { jobId: z.string().min(1), maxCostUsd: z.number().min(0.1).max(50).optional().describe('New ceiling for the whole chain; default is what was spent plus $2.') },
   readOnly: false,
   handler: async ({ jobId, maxCostUsd }, p) => {
@@ -213,10 +217,7 @@ const resumeBuild = define({
         ' Tell the client what stopped it before offering to build again.',
       );
     }
-    // This resumes to the END, like build_agent, so it needs build_agent's
-    // patience. On the stage tools' 48-second wait it always came back
-    // "still running" while the build carried on without anyone watching,
-    // and the caller reported a finished build that had not finished.
+    // Like build_agent: see the build start, then hand it back.
     const done = await waitFor(job.id, p.orgId, BUILD_WAIT_MS);
     return ok(view(done ?? job, 'compile', ''));
   },

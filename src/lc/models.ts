@@ -56,6 +56,11 @@ export interface ModelOptions {
   /** How much a reasoning-era model may think before answering. Ignored
    *  by models that do not reason. */
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  /** Tokens of thinking room on top of maxTokens, replacing the effort's
+   *  default. The Architect sets its own: its specialists answer with one
+   *  large JSON object after reading a 15k-token inventory, and the
+   *  default room for 'low' (4,000) was gone before the answer started. */
+  reasoningHeadroom?: number;
   /** Sampling temperature. Omit for the provider default.
    *  NOT sent to reasoning-era OpenAI models — they accept only the
    *  default and reject any explicit value. */
@@ -186,7 +191,7 @@ export function buildChatModel(
           useResponsesApi: true,
           // Reasoning shares this budget with the visible answer, same as
           // the chat-completions reasoning path — give thinking headroom.
-          maxTokens: maxTokens + reasoningHeadroom(options.reasoningEffort),
+          maxTokens: maxTokens + (options.reasoningHeadroom ?? reasoningHeadroom(options.reasoningEffort)),
           ...(Object.keys(responsesKwargs).length > 0 ? { modelKwargs: responsesKwargs } : {}),
           configuration: creds.endpoint ? { baseURL: creds.endpoint.replace(/\/+$/, '') + '/v1' } : undefined,
         });
@@ -202,7 +207,7 @@ export function buildChatModel(
         // thinking its own headroom on top of the caller's cap.
         // No reasoning_effort here: a reasoning-era node with an explicit
         // effort took the Responses path above.
-        kwargs.max_completion_tokens = maxTokens + reasoningHeadroom(options.reasoningEffort);
+        kwargs.max_completion_tokens = maxTokens + (options.reasoningHeadroom ?? reasoningHeadroom(options.reasoningEffort));
       }
       if (options.jsonMode) kwargs.response_format = { type: 'json_object' };
       model = new ChatOpenAI({

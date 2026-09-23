@@ -222,9 +222,38 @@ export interface SpecialistUsage {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
+  /** Wall time of the model call. */
+  ms: number;
 }
 
-export class SpecialistError extends Error {}
+/** A specialist that answered badly, or not at all. Carries what the
+ *  failed call cost and took, so a build can record a call that produced
+ *  nothing instead of losing it: the empty first answer of a reasoning
+ *  model was never accounted for, and a stage that paid twice showed one
+ *  call. */
+export class SpecialistError extends Error {
+  usage?: SpecialistUsage;
+  model?: string;
+}
+
+/**
+ * How much room a reasoning model gets to think, on top of the answer, on
+ * the Architect's own calls.
+ *
+ * The runtime default for 'low' is 4,000 tokens. The Capability Matcher
+ * reads a 15k-token inventory and reasons through it action by action
+ * before writing; on gpt-5.5 that thinking alone passed 4,000, the answer
+ * never started, and every build paid for the empty call AND the wider
+ * retry — the recorded cost of that stage ($0.26) is only explained by
+ * the retry's full allowance. One build's matcher ran past 150 s that way.
+ * Room proportionate to the task means one call.
+ */
+const ARCHITECT_HEADROOM: Record<'minimal' | 'low' | 'medium' | 'high', number> = {
+  minimal: 2_000,
+  low: 12_000,
+  medium: 16_000,
+  high: 24_000,
+};
 
 /**
  * Run ONE specialist from the architect spec. `input` is everything the
@@ -251,6 +280,11 @@ export async function callSpecialist<T = unknown>(opts: {
   instructionsOverride?: string;
   /** Run this call on a cheaper tier than the node declares. */
   tierOverride?: 'small' | 'medium' | 'large';
+  /** Think less (or more) than the node declares, for THIS call: a patch
+   *  to a design that already exists is mechanical work, and paying the
+   *  designer's full reasoning to re-emit a JSON object is where a failed
+   *  build's money went. */
+  effortOverride?: 'minimal' | 'low' | 'medium' | 'high';
   /** Bind THIS schema instead of the node's own `returns`. Asking for a
    *  shape in prose is advice; binding a schema is a contract — the
    *  copilot kept omitting its operations array until this existed. */
@@ -277,6 +311,7 @@ export async function callSpecialist<T = unknown>(opts: {
     standard: 'low',
     deep: 'medium',
   };
+  const effort = opts.effortOverride ?? EFFORT[node.model?.effort ?? 'standard'] ?? 'low';
   const { model } = buildChatModel(
     opts.engine.nodeSubType,
     modelId,
@@ -290,7 +325,8 @@ export async function callSpecialist<T = unknown>(opts: {
     maxTokens,
     {
       jsonMode: opts.rawJson === true,
-      reasoningEffort: EFFORT[node.model?.effort ?? 'standard'] ?? 'low',
+      reasoningEffort: effort,
+      reasoningHeadroom: ARCHITECT_HEADROOM[effort],
     },
   );
 
@@ -317,6 +353,17 @@ export async function callSpecialist<T = unknown>(opts: {
   let tokensIn = 0;
   let tokensOut = 0;
   let result: unknown;
+
+  const rate = priceFor(modelId, tier);
+  const usageNow = (): SpecialistUsage => ({
+    tokensIn, tokensOut, costUsd: (tokensIn * rate.in + tokensOut * rate.out) / 1e6, ms: Date.now() - t0,
+  });
+  const failed = (message: string): SpecialistError => {
+    const e = new SpecialistError(message);
+    e.usage = usageNow();
+    e.model = modelId;
+    return e;
+  };
 
   const boundSchema = opts.schemaOverride ?? (opts.rawJson ? null : node.returns);
   if (boundSchema) {
@@ -346,7 +393,7 @@ export async function callSpecialist<T = unknown>(opts: {
     result = out.parsed;
     tokensIn = out.raw?.usage_metadata?.input_tokens ?? 0;
     tokensOut = out.raw?.usage_metadata?.output_tokens ?? 0;
-    if (result == null) throw new SpecialistError(`'${node.label}' returned nothing parseable against its schema.`);
+    if (result == null) throw failed(`'${node.label}' returned nothing parseable against its schema.`);
   } else {
     const sys = opts.rawJson
       ? system + '\n\nRespond with ONE JSON object and nothing else — no prose, no code fences.'
@@ -364,16 +411,19 @@ export async function callSpecialist<T = unknown>(opts: {
     // array of blocks, and stringifying the array hands the parser the
     // envelope instead of the answer — see lc/message-text.ts.
     const text = messageText(out.content);
-    result = opts.rawJson ? parseLooseJson(text, node.label) : text;
+    try {
+      result = opts.rawJson ? parseLooseJson(text, node.label) : text;
+    } catch (err) {
+      throw err instanceof SpecialistError ? failed(err.message) : err;
+    }
   }
 
-  const rate = priceFor(modelId, tier);
-  const costUsd = (tokensIn * rate.in + tokensOut * rate.out) / 1e6;
+  const usage = usageNow();
   logger.info(
-    { specialist: node.id, model: modelId, tier, tokensIn, tokensOut, costUsd: Number(costUsd.toFixed(4)), ms: Date.now() - t0 },
+    { specialist: node.id, model: modelId, tier, effort, tokensIn, tokensOut, costUsd: Number(usage.costUsd.toFixed(4)), ms: usage.ms },
     'architect_specialist_call',
   );
-  return { result: result as T, usage: { tokensIn, tokensOut, costUsd }, model: modelId };
+  return { result: result as T, usage, model: modelId };
 }
 
 /** Extract the one JSON object from model text — tolerant of code fences
