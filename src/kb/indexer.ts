@@ -1,4 +1,5 @@
 import { prisma } from '../db/client';
+import { invalidateKbReady } from './retriever';
 import { chunkText } from './chunker';
 import { embedTexts } from './embeddings';
 import { resolveBackend } from './backends';
@@ -49,6 +50,7 @@ export async function indexDocument(args: {
         rawText: isArchon ? text : null,
       },
     });
+    invalidateKbReady(orgId, agentApiName);
   } catch (err) {
     logger.error({ err, orgId, documentId }, 'kb_index_failed');
     await prisma.kbDocument.update({
@@ -68,6 +70,7 @@ export async function reindexDocument(orgId: string, documentId: string, engineO
     );
   }
   await prisma.kbDocument.update({ where: { id: documentId }, data: { status: 'Indexing' } });
+  invalidateKbReady(orgId, doc.agentApiName);
   await indexDocument({
     orgId,
     agentApiName: doc.agentApiName,
@@ -82,4 +85,5 @@ export async function deleteDocument(orgId: string, documentId: string): Promise
   const { backend } = await resolveBackend(orgId);
   await backend.deleteDocument({ orgId, documentId });
   await prisma.kbDocument.delete({ where: { id: documentId } }).catch(() => null);
+  invalidateKbReady(orgId);
 }
