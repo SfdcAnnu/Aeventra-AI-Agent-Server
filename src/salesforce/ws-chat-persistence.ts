@@ -239,6 +239,12 @@ export async function recordWsTurn(
     TokensOut__c: result.tokensOut,
     CachedTokens__c: cachedTokens,
     LatencyMs__c: result.latencyMs ?? null,
+    // The same phase split Apex stores for its turns. Without it the Home
+    // copilot's turns showed a model loop and nothing else -- 61,979ms on
+    // one reply, with no way to see which part was the specialist.
+    PhaseMsJson__c: result.phaseMs
+      ? JSON.stringify({ ...result.phaseMs, ...(result.turnMs !== undefined ? { turnMs: result.turnMs } : {}) }).slice(0, 4096)
+      : null,
     UsageJson__c: result.usage ? JSON.stringify(result.usage).slice(0, 32_768) : null,
     SequenceNumber__c: seq++,
     ApprovalStatus__c: 'NotRequired',

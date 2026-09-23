@@ -17,6 +17,8 @@ import { spillIfLarge } from './artifact-store';
 import type { ResolvedMcpServer } from '../chat/adapters/shared';
 import { ensureMcpServerAwake } from '../chat/adapters/shared';
 import { invalidateRecordContext } from '../chat/record-context';
+import jwt from 'jsonwebtoken';
+import { verifyPlatformToken } from '../platform/token';
 
 export interface LoadedMcpTools {
   tools: StructuredToolInterface[];
@@ -59,7 +61,7 @@ const STALE_MS = 60 * 60 * 1000;
 // tools -- closing it out from under one turns a refresh into a failed
 // tool call. Outliving any single turn is enough.
 const CLOSE_GRACE_MS = 3 * 60 * 1000;
-interface CacheEntry { loaded: LoadedMcpTools; realClose: () => Promise<void>; createdAt: number }
+interface CacheEntry { loaded: LoadedMcpTools; realClose: () => Promise<void>; createdAt: number; tokenExpiresAt: number | null }
 const toolCache = new Map<string, CacheEntry>();
 /** Refreshes in progress, so N concurrent turns trigger one reconnect. */
 const refreshing = new Set<string>();
@@ -70,9 +72,35 @@ function closeAfterGrace(realClose: () => Promise<void>): void {
   if (typeof t === 'object' && t && 'unref' in t) (t as NodeJS.Timeout).unref();
 }
 
+// THE PLATFORM TOKEN CHANGED EVERY TURN, SO ITS TOOLS NEVER CACHED.
+//
+// The server's own tools are reached with a JWT minted per turn -- iat
+// differs every second, sid per session -- and the key below used the
+// token's tail. So every turn of the copilot, and every specialist it
+// called, did a fresh MCP handshake to this very process, and none of the
+// stale-while-revalidate work above ever applied to them. Key on WHO the
+// token is for; whether the token itself is still good is a separate
+// check at lookup, so a cached client never presents a dead one.
+const TOKEN_SKEW_MS = 60_000;
+
+function serverIdentity(s: ResolvedMcpServer): string {
+  const p = verifyPlatformToken(s.token);
+  return p ? `platform:${p.orgId}|${p.userId}|${p.agentApiName ?? ''}|${p.sessionId ?? ''}` : s.token.slice(-12);
+}
+
+/** When the earliest of these servers' tokens expires, or null if none say. */
+function tokenExpiry(servers: ResolvedMcpServer[]): number | null {
+  let min: number | null = null;
+  for (const s of servers) {
+    const d = jwt.decode(s.token) as { exp?: number } | null;
+    if (d && typeof d.exp === 'number') { const at = d.exp * 1000; if (min === null || at < min) min = at; }
+  }
+  return min;
+}
+
 function cacheKey(servers: ResolvedMcpServer[]): string {
   return servers
-    .map(s => `${s.name}|${s.url}|${s.token.slice(-12)}|${[...s.allowedTools].sort().join(',')}|${JSON.stringify(s.headers ?? {})}`)
+    .map(s => `${s.name}|${s.url}|${serverIdentity(s)}|${[...s.allowedTools].sort().join(',')}|${JSON.stringify(s.headers ?? {})}`)
     .sort()
     .join('||');
 }
@@ -82,7 +110,15 @@ export async function loadMcpTools(
   opts: { deadlineAt?: number } = {},
 ): Promise<LoadedMcpTools> {
   const key = cacheKey(servers);
-  const hit = toolCache.get(key);
+  let hit = toolCache.get(key);
+  // A cached client presents the token it was built with. About to expire
+  // means the next call would be refused: reconnect now with the fresh one
+  // rather than serve a client that is about to fail.
+  if (hit && hit.tokenExpiresAt !== null && hit.tokenExpiresAt - Date.now() < TOKEN_SKEW_MS) {
+    toolCache.delete(key);
+    closeAfterGrace(hit.realClose);
+    hit = undefined;
+  }
   const age = hit ? Date.now() - hit.createdAt : Infinity;
 
   if (hit && age < FRESH_MS) return hit.loaded;
@@ -101,6 +137,7 @@ export async function loadMcpTools(
               loaded: { ...next, close: async () => { /* cached — lifecycle owned by the cache */ } },
               realClose: next.close,
               createdAt: Date.now(),
+              tokenExpiresAt: tokenExpiry(servers),
             });
             if (prev) closeAfterGrace(prev.realClose);
           } else {
@@ -127,7 +164,7 @@ export async function loadMcpTools(
   // Only cache loads that actually produced tools — caching a rate-limited
   // empty result would blind every turn for the TTL window.
   if (fresh.tools.length > 0) {
-    const entry: CacheEntry = { loaded: { ...fresh, close: async () => { /* cached — lifecycle owned by the cache */ } }, realClose: fresh.close, createdAt: Date.now() };
+    const entry: CacheEntry = { loaded: { ...fresh, close: async () => { /* cached — lifecycle owned by the cache */ } }, realClose: fresh.close, createdAt: Date.now(), tokenExpiresAt: tokenExpiry(servers) };
     toolCache.set(key, entry);
     return entry.loaded;
   }
