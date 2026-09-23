@@ -703,6 +703,24 @@ export async function buildSystemPromptParts(
   if (extraContext && extraContext.trim().length > 0) volatileParts.push(extraContext);
   // Session memory (facts + summary of older turns) — see chat/memory.ts.
   if (memoryPreamble && memoryPreamble.trim().length > 0) volatileParts.push(memoryPreamble);
+  // WHERE THE CUSTOMER IS MESSAGING FROM -- stated as a fact either way.
+  //
+  // A live agent, told by its prompt to "identify the sender's phone" on a
+  // channel that had none, guessed one (+91), searched a name in phone
+  // fields, and saved the NAME into Lead.Phone. The model never sees the
+  // tool node's parameterMappings; the only way it learns the number, or
+  // that there is none, is here. Volatile: it is about this conversation.
+  if (ctx.senderPhone) {
+    volatileParts.push(
+      `CHANNEL: ${ctx.channel ?? 'messaging'}. SENDER PHONE: ${ctx.senderPhone}. ` +
+      'Use this number for any phone lookup and for a Phone field; do not ask the customer for it.',
+    );
+  } else {
+    volatileParts.push(
+      `CHANNEL: ${ctx.channel ?? 'chat'}. No sender phone number is available on this channel. ` +
+      'Do not attempt a phone lookup and never guess a number. Leave any Phone field empty unless the customer states their number.',
+    );
+  }
   if (ctx.recordContextId) {
     // Record anchoring — a runtime FACT (which record this session is
     // attached to), phrased modality-neutrally: works for an embedded

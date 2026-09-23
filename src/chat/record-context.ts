@@ -65,11 +65,40 @@ function renderValue(value: unknown): string | null {
  * Never throws: a failure here must degrade to the agent looking things up
  * itself — exactly today's behaviour — not break the turn.
  */
+// ── the object an Id belongs to ────────────────────────────────────
+// A Flow hands the runtime a record Id and no type (headless.ts sends
+// recordContextType: null), and the gate below did nothing with it -- so
+// a trigger run never got the prefetch a chat on the same record gets,
+// and spent a tool call rediscovering fields it could have been handed.
+// The first three characters of an Id name the object; describeGlobal
+// says which, once an hour per org.
+const prefixCache = new Map<string, { map: Map<string, string>; at: number }>();
+const PREFIX_TTL_MS = 60 * 60_000;
+
+export async function sobjectTypeFromId(orgId: string, recordId: string): Promise<string | null> {
+  if (!recordId || recordId.length < 15) return null;
+  let entry = prefixCache.get(orgId);
+  if (!entry || Date.now() - entry.at > PREFIX_TTL_MS) {
+    try {
+      const conn = await getOrgConnection(orgId);
+      const g = await conn.describeGlobal();
+      const map = new Map<string, string>();
+      for (const so of g.sobjects) if (so.keyPrefix) map.set(so.keyPrefix, so.name);
+      entry = { map, at: Date.now() };
+      prefixCache.set(orgId, entry);
+    } catch {
+      return null;
+    }
+  }
+  return entry.map.get(recordId.slice(0, 3)) ?? null;
+}
+
 export async function buildRecordContextBlock(
   orgId: string,
   recordType: string | null | undefined,
   recordId: string | null | undefined,
 ): Promise<string | null> {
+  if (!recordType && orgId && recordId) recordType = await sobjectTypeFromId(orgId, recordId);
   if (!orgId || !recordType || !recordId) return null;
 
   const key = `${orgId}|${recordType}|${recordId}`;

@@ -65,6 +65,8 @@ export interface WsChatSession {
    *  row rather than taken from the client. Null for an unanchored chat. */
   recordContextId: string | null;
   recordContextType: string | null;
+  senderPhone: string | null;
+  channel: string | null;
 }
 
 /** Resolves the ChatSession__c a WS connection's turns should write to —
@@ -87,8 +89,8 @@ export async function resolveWsChatSession(
     // so an id taken off the wire would let any user read any record and
     // skip their own sharing rules. Apex wrote these two fields when the
     // session was created, through that user's permissions.
-    const existing = await conn.query<{ Id: string; RecordContextId__c: string | null; RecordContextType__c: string | null }>(
-      `SELECT Id, RecordContextId__c, RecordContextType__c FROM ChatSession__c ` +
+    const existing = await conn.query<{ Id: string; RecordContextId__c: string | null; RecordContextType__c: string | null; SenderPhone__c: string | null; Channel__c: string | null }>(
+      `SELECT Id, RecordContextId__c, RecordContextType__c, SenderPhone__c, Channel__c FROM ChatSession__c ` +
       `WHERE Id = '${candidateSessionId}' AND AgentDefinition__c = '${agentId}' LIMIT 1`,
     );
     const row = existing.records[0];
@@ -102,12 +104,14 @@ export async function resolveWsChatSession(
         nextSeq,
         recordContextId: row.RecordContextId__c ?? null,
         recordContextType: row.RecordContextType__c ?? null,
+        senderPhone: row.SenderPhone__c ?? null,
+        channel: row.Channel__c ?? null,
       };
     }
   }
   const chatSessionId = await createWsChatSession(conn, agentId, userId, department);
   // A session this server just created is anchored to nothing.
-  return { chatSessionId, nextSeq: 1, recordContextId: null, recordContextType: null };
+  return { chatSessionId, nextSeq: 1, recordContextId: null, recordContextType: null, senderPhone: null, channel: null };
 }
 
 /** First-message title, matching AgentChatController's own fallback

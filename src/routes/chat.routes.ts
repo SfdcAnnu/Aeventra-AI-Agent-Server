@@ -64,6 +64,8 @@ const turnSchema = z.object({
     userId: z.string().min(1),
     recordContextId: z.string().nullish(),
     recordContextType: z.string().nullish(),
+    senderPhone: z.string().max(40).nullish(),
+    channel: z.string().max(40).nullish(),
   }),
   debugMode: z.boolean().optional(),
   continuation: z.object({ toolName: z.string().min(1).max(200), resultText: z.string().max(20_000) }).nullish(),
@@ -115,6 +117,8 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
         userId: parsed.data.context.userId,
         recordContextId:   parsed.data.context.recordContextId ?? null,
         recordContextType: parsed.data.context.recordContextType ?? null,
+        senderPhone: parsed.data.context.senderPhone ?? null,
+        channel: parsed.data.context.channel ?? null,
       },
     });
     res.json({

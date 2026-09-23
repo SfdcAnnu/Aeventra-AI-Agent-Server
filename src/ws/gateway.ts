@@ -309,6 +309,8 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
         userId: ctx.userId,
         recordContextId: sessionState.recordContextId,
         recordContextType: sessionState.recordContextType,
+        senderPhone: sessionState.senderPhone,
+        channel: sessionState.channel,
       },
       });
     } catch (err) {
