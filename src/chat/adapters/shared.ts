@@ -291,31 +291,44 @@ export async function resolveMcpServers(
       if (prevCustom.length + extraCustom.length > 0) prev.customTools = [...prevCustom, ...extraCustom];
     }
 
+    // ONE CONNECTOR AT A TIME WAS COSTING THE LONGEST WAIT IN THE TURN.
+    //
+    // Each iteration did a token resolution, a wake ping and a /tools
+    // fetch, and the next connector did not start until the previous one
+    // finished. Three connectors meant three round trips end to end, on
+    // every message, before the model was allowed to begin.
+    //
+    // Nothing here depends on another connector. The one thing that did
+    // — the deduplicated name, which reads a Set the previous iteration
+    // wrote — is computed first, synchronously, so the names stay exactly
+    // what they were. The network work then runs together and the results
+    // are placed back IN ORDER, so a caller sees the same list it always
+    // did.
     const seen = new Set<string>();
-    for (const c of mergedByKey.values()) {
-      const base = c.mcpServerUrl.replace(/\/+$/, '');
+    const planned = [...mergedByKey.values()].map(c => {
       let name = c.provider.replace(/[^a-zA-Z0-9_-]/g, '_');
       while (seen.has(name)) name = `${name}_2`;
       seen.add(name);
+      return { c, name, base: c.mcpServerUrl.replace(/\/+$/, '') };
+    });
 
-      let token: string | null;
-      try {
-        token = await resolveProviderToken({
-          orgId: req.context.orgId, userId: req.context.userId,
-          provider: c.provider, connectorId: c.connectorId, accessMode: c.accessMode, sfAccessToken,
-          sessionId: req.sessionId, agentApiName: req.agent.apiName,
-        });
-      } catch (err) {
-        throw err; // PerUser hard-fail must still surface to the caller
-      }
+    // A rejection still propagates: resolveProviderToken's PerUser
+    // hard-fail must reach the caller, and Promise.all rejects on the
+    // first one exactly as the loop's rethrow did.
+    const resolved = await Promise.all(planned.map(async ({ c, name, base }) => {
+      const token = await resolveProviderToken({
+        orgId: req.context.orgId, userId: req.context.userId,
+        provider: c.provider, connectorId: c.connectorId, accessMode: c.accessMode, sfAccessToken,
+        sessionId: req.sessionId, agentApiName: req.agent.apiName,
+      });
       if (!token) {
         logger.warn({ provider: c.provider, orgId: req.context.orgId },
           'mcp_connector_skipped_no_token');
-        continue;
+        return null;
       }
       await ensureMcpServerAwake(base);
       const checked = await sanitizeAllowedTools(base, c.allowedTools ?? []);
-      if (checked === null) continue;   // every saved name is stale — fail closed
+      if (checked === null) return null;   // every saved name is stale — fail closed
       let allowedTools = checked;
 
       // Org-specific custom tools (Apex actions / Flows) — the MCP server
@@ -348,8 +361,10 @@ export async function resolveMcpServers(
       if (c.provider === 'salesforce_metadata' && sfInstanceUrl && !headers['X-Salesforce-Instance-Url']) {
         headers['X-Salesforce-Instance-Url'] = sfInstanceUrl;
       }
-      out.push({ name, url, token, allowedTools, headers: Object.keys(headers).length ? headers : undefined });
-    }
+      return { name, url, token, allowedTools, headers: Object.keys(headers).length ? headers : undefined };
+    }));
+
+    for (const r of resolved) if (r) out.push(r);
     return out;
   }
 
