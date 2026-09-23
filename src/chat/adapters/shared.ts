@@ -13,6 +13,7 @@ import { PLATFORM_PROVIDER, SALESFORCE_TOKEN_PROVIDERS } from '../connector-scop
 import { mintPlatformToken } from '../../platform/token';
 import { logger } from '../../logger';
 import { ConnectorsRepo } from '../../db/connectors.repo';
+import { ConnectorsCache } from '../../db/connectors-cache';
 import { refreshGoogleToken } from '../../oauth/google';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
@@ -50,6 +51,7 @@ export async function freshConnectorToken(row: Connector): Promise<string | null
         accessToken:    tok.access_token,
         tokenExpiresAt: tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
       });
+      ConnectorsCache.put(updated);
       logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');
       return updated.accessToken;
     }
@@ -60,6 +62,7 @@ export async function freshConnectorToken(row: Connector): Promise<string | null
         tokenExpiresAt: tok.expires_in ? new Date(Date.now() + Number(tok.expires_in) * 1000) : null,
         instanceUrl:    tok.instance_url ?? undefined,
       });
+      ConnectorsCache.put(updated);
       logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');
       return updated.accessToken;
     }
@@ -71,6 +74,7 @@ export async function freshConnectorToken(row: Connector): Promise<string | null
         refreshToken:   tok.refresh_token ?? undefined,
         tokenExpiresAt: tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
       });
+      ConnectorsCache.put(updated);
       logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');
       return updated.accessToken;
     }
@@ -222,7 +226,7 @@ export async function resolveProviderToken(args: {
   // The Salesforce Metadata server takes the same Salesforce token as the
   // Platform server: the person's own connection when they have one.
   if (SALESFORCE_TOKEN_PROVIDERS.has(provider)) {
-    const personal = await ConnectorsRepo
+    const personal = await ConnectorsCache
       .getByOrgProviderAndUser(orgId, 'salesforce_mcp', userId)
       .catch(() => null);
     if (personal) {
@@ -597,6 +601,39 @@ export function renderFewShotExamples(raw: unknown): string | null {
   );
 }
 
+export interface PrefetchedPromptBlocks {
+  kbBlock?: Promise<string | null>;
+  recordBlock?: Promise<string | null>;
+}
+
+/**
+ * START THE PROMPT'S TWO FETCHES BEFORE THE TURN NEEDS THEM.
+ *
+ * The KB block and the record-context block each hit a 60s cache, and on
+ * any human-paced turn both miss -- buildPrompt measured 818ms on one, and
+ * 1ms on a turn sent within the minute. They need only what is known the
+ * moment the request arrives, yet they ran after setup, server resolution
+ * and tool loading, in series. Started here they overlap all of that.
+ *
+ * Nothing about the values changes: same functions, same caches, same
+ * fallbacks. The catch is load-bearing -- a promise that rejects before it
+ * is awaited is an unhandled rejection, and both fetches already degrade
+ * to null on failure, so this keeps that contract in the early-start case.
+ */
+export function prefetchPromptBlocks(
+  agent: AgentDefinition,
+  ctx: ChatTurnRequest['context'],
+  query: string,
+  engineOverride?: EngineOverrideInput | null,
+): PrefetchedPromptBlocks {
+  return {
+    kbBlock: buildKbBlock(ctx.orgId, agent, query, engineOverride).catch(() => null),
+    recordBlock: ctx.recordContextId
+      ? buildRecordContextBlock(ctx.orgId, ctx.recordContextType, ctx.recordContextId).catch(() => null)
+      : undefined,
+  };
+}
+
 export async function buildSystemPromptParts(
   agent: AgentDefinition,
   aiNode: AgentNode,
@@ -605,6 +642,9 @@ export async function buildSystemPromptParts(
   engineOverride?: EngineOverrideInput | null,
   memoryPreamble?: string | null,
   extraContext?: string | null,
+  /** Started at turn entry by prefetchPromptBlocks so these two fetches
+   *  overlap setup and server resolution instead of following them. */
+  prefetched?: PrefetchedPromptBlocks,
 ): Promise<SystemPromptParts> {
   const config = (aiNode.config as { systemPrompt?: string; fewShotExamples?: unknown }) ?? {};
 
@@ -656,7 +696,7 @@ export async function buildSystemPromptParts(
   // date (live-confirmed: an Event scheduled for 2023). Lives BELOW the
   // cache breakpoint precisely because it changes every second.
   volatileParts.push(`Current date and time (UTC): ${new Date().toISOString()}`);
-  const kbBlock = await buildKbBlock(ctx.orgId, agent, query, engineOverride);
+  const kbBlock = prefetched?.kbBlock ? await prefetched.kbBlock : await buildKbBlock(ctx.orgId, agent, query, engineOverride);
   if (kbBlock) volatileParts.push(kbBlock);
   // System-computed facts — deterministic values the model must use
   // verbatim instead of computing its own.
@@ -674,7 +714,7 @@ export async function buildSystemPromptParts(
     // ...and its actual values, so the agent does not spend a tool call —
     // and therefore another whole model call — rediscovering them on every
     // single turn (see chat/record-context.ts).
-    const recordBlock = await buildRecordContextBlock(
+    const recordBlock = prefetched?.recordBlock ? await prefetched.recordBlock : await buildRecordContextBlock(
       ctx.orgId, ctx.recordContextType, ctx.recordContextId,
     );
     if (recordBlock) volatileParts.push(recordBlock);

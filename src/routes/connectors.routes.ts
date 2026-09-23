@@ -16,6 +16,7 @@ import { config } from '../config';
 import { sessionAuth } from '../auth/session';
 import { InstallsRepo } from '../db/installs.repo';
 import { ConnectorsRepo, PendingOAuthRepo } from '../db/connectors.repo';
+import { ConnectorsCache } from '../db/connectors-cache';
 import { mcpListTools } from '../mcp/clients/streamable-http-client';
 import { listToolsCached, McpRateLimited } from '../mcp/tool-list-cache';
 import { refreshAccessToken, buildAuthorizeUrl, exchangeCode, fetchUserInfo, parseUserIdFromIdUrl, brokerRedirectUri as sfBrokerRedirectUri } from '../oauth/salesforce';
@@ -153,6 +154,7 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
     const connector = await ConnectorsRepo.upsertPending({
       orgId, providerKey, displayName, authType: 'OAuth2', configuredBy: userId,
     });
+    ConnectorsCache.invalidateOrg(orgId);
     const state = crypto.randomUUID();
     await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id });
     const install = await InstallsRepo.findByOrgId(orgId);
@@ -530,6 +532,7 @@ connectorsRouter.delete('/api/connectors/:id', sessionAuth, async (req, res) => 
   }
   try {
     const row = await ConnectorsRepo.disconnect(orgId, req.params.id);
+    ConnectorsCache.invalidateOrg(orgId);
     res.json({ id: row.id, status: row.status });
   } catch (err) {
     res.status(404).json({ error: 'not_found', message: (err as Error).message });
