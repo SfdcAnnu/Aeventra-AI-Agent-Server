@@ -43,7 +43,7 @@ import {
 import { z } from 'zod';
 import { logger } from '../logger';
 import { rememberScratch, recallScratch, clearScratch, withScratch } from './specialist-scratch';
-import { InstallsRepo } from '../db/installs.repo';
+import { InstallsCache } from '../db/installs-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
 import { augmentConnectorsWithToolNodes } from '../chat/tool-node-connectors';
@@ -55,7 +55,7 @@ import {
   toSyntheticAiNode,
   type HandoffToolDef,
 } from '../chat/subagent-router';
-import { buildSystemPromptParts, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry, type SystemPromptParts } from '../chat/adapters/shared';
+import { buildSystemPromptParts, isDeferralText, resolveMcpServers, summarizeToolHistoryEntry, type SystemPromptParts, prefetchPromptBlocks } from '../chat/adapters/shared';
 import {
   readGuardrailsConfig,
   findGuardrailViolations,
@@ -166,8 +166,14 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     phaseMark = now;
   };
 
+  // The KB and record-context blocks need only what the request carries.
+  // Started here they overlap everything below; awaited in buildPrompt.
+  const prefetched = prefetchPromptBlocks(req.agent, req.context, req.newUserMessage, req.engineOverride);
+
   const [install, orgConn, memory] = await Promise.all([
-    InstallsRepo.findByOrgId(req.context.orgId),
+    // Through the cache: the route read this same row moments ago, and
+    // the uncached read here made it two Postgres round trips per turn.
+    InstallsCache.findByOrgId(req.context.orgId),
     getOrgConnection(req.context.orgId),
     loadSessionMemory(req.context.orgId, req.sessionId),
   ]);
@@ -310,7 +316,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     const promptParts = await buildSystemPromptParts(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
-      connectorNotice,
+      connectorNotice, prefetched,
     );
     const systemMessage = cacheAwareSystem(aiNode.nodeSubType, promptParts);
     mark('buildPrompt');
