@@ -626,6 +626,48 @@ export function validateSpecLogic(spec: AgentSpec, manifest?: CapabilityManifest
     });
   }
 
+  // THE OTHER DIRECTION. The split test above asks whether a sub-agent
+  // earned its place; nothing asked whether the agent LEFT BEHIND can
+  // carry what it was given.
+  //
+  // Told only that splitting needs evidence, a designer avoids the work by
+  // not splitting: every capability lands on one node, and that node's
+  // whole instruction block and every one of its tool schemas are re-sent
+  // on every single turn, including turns that needed none of them. Past a
+  // point the model also stops picking well from a long tool list, which
+  // shows up as an agent that calls the wrong thing rather than as an
+  // error anyone can see.
+  //
+  // So the two rules sit at different scopes and cannot argue: the split
+  // test is asked PER CAPABILITY, this is asked PER AGENT NODE. One
+  // proposes, the other disposes.
+  //
+  // The seeded platform agents are deliberately outside this. They are
+  // not designed here — syncSystemAgent takes a SystemAgentSpec and never
+  // calls validateSpec — so the Metadata Expert's 46 tools are a
+  // hand-made choice, not something a designer talked itself into.
+  const maxTools = Number(process.env.MAX_TOOLS_PER_AGENT_NODE) > 0
+    ? Number(process.env.MAX_TOOLS_PER_AGENT_NODE) : 15;
+  for (const n of spec.nodes) {
+    if (n.type !== 'agent' && n.type !== 'subagent') continue;
+    const attached = (spec.edges ?? []).filter(e => {
+      if (e.from !== n.id) return false;
+      const t = byId.get(e.to)?.type;
+      return t === 'tool' || t === 'tool_catalog';
+    });
+    if (attached.length > maxTools) {
+      const names = attached.slice(0, 6).map(e => byId.get(e.to)?.label ?? e.to);
+      errors.push({
+        path: `/nodes/${n.id}`,
+        message:
+          `'${n.label}' carries ${attached.length} tools; the limit is ${maxTools}. Every one of them is ` +
+          're-sent to the model on every turn, and a model picks badly from a list this long. Move a ' +
+          'related group onto a sub-agent — the parent then carries one line describing it instead of all ' +
+          `its tools. Attached here: ${names.join(', ')}${attached.length > 6 ? ', …' : ''}`,
+      });
+    }
+  }
+
   // An action that never says WHAT it acts on cannot be looked up at all,
   // and the manifest check's own wording for that case — "references crud
   // '?:query'" — named no object, no fix and no next step. A live build
