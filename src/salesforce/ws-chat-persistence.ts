@@ -58,6 +58,15 @@ function looksLikeSalesforceId(value: string): boolean {
   return /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(value);
 }
 
+export interface WsChatSession {
+  chatSessionId: string;
+  nextSeq: number;
+  /** The record this conversation is anchored to, read from the session
+   *  row rather than taken from the client. Null for an unanchored chat. */
+  recordContextId: string | null;
+  recordContextType: string | null;
+}
+
 /** Resolves the ChatSession__c a WS connection's turns should write to —
  *  reuses an existing session when the ticket's sessionId is a real,
  *  accessible ChatSession__c (the full-parity chat panel always mints its
@@ -71,21 +80,34 @@ export async function resolveWsChatSession(
   agentId: string,
   userId: string,
   department: string | undefined,
-): Promise<{ chatSessionId: string; nextSeq: number }> {
+): Promise<WsChatSession> {
   if (looksLikeSalesforceId(candidateSessionId)) {
-    const existing = await conn.query<{ Id: string }>(
-      `SELECT Id FROM ChatSession__c WHERE Id = '${candidateSessionId}' AND AgentDefinition__c = '${agentId}' LIMIT 1`,
+    // The record the chat is anchored to comes from HERE, never from the
+    // browser. record-context.ts reads the row with the ORG's connection,
+    // so an id taken off the wire would let any user read any record and
+    // skip their own sharing rules. Apex wrote these two fields when the
+    // session was created, through that user's permissions.
+    const existing = await conn.query<{ Id: string; RecordContextId__c: string | null; RecordContextType__c: string | null }>(
+      `SELECT Id, RecordContextId__c, RecordContextType__c FROM ChatSession__c ` +
+      `WHERE Id = '${candidateSessionId}' AND AgentDefinition__c = '${agentId}' LIMIT 1`,
     );
-    if (existing.records.length > 0) {
+    const row = existing.records[0];
+    if (row) {
       const lastSeq = await conn.query<{ SequenceNumber__c: number }>(
         `SELECT SequenceNumber__c FROM ChatMessage__c WHERE ChatSession__c = '${candidateSessionId}' ORDER BY SequenceNumber__c DESC LIMIT 1`,
       );
       const nextSeq = (lastSeq.records[0]?.SequenceNumber__c ?? 0) + 1;
-      return { chatSessionId: candidateSessionId, nextSeq };
+      return {
+        chatSessionId: candidateSessionId,
+        nextSeq,
+        recordContextId: row.RecordContextId__c ?? null,
+        recordContextType: row.RecordContextType__c ?? null,
+      };
     }
   }
   const chatSessionId = await createWsChatSession(conn, agentId, userId, department);
-  return { chatSessionId, nextSeq: 1 };
+  // A session this server just created is anchored to nothing.
+  return { chatSessionId, nextSeq: 1, recordContextId: null, recordContextType: null };
 }
 
 /** First-message title, matching AgentChatController's own fallback
