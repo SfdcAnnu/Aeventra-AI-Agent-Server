@@ -63,7 +63,13 @@ export async function runHeadlessAiStep(
       orgId: ctx.orgId,
       userId: ctx.userId,
       recordContextId: ctx.recordId,
+      // The type is derived from the Id prefix downstream (record-context.ts)
+      // so a trigger run gets the same prefetch a chat on the record does.
       recordContextType: null,
+      // A Flow that knows the sender can pass these as inputs; otherwise the
+      // agent is told there is no number, which is the truth.
+      senderPhone: typeof ctx.inputPayload?.senderPhone === 'string' ? ctx.inputPayload.senderPhone : null,
+      channel: typeof ctx.inputPayload?.channel === 'string' ? ctx.inputPayload.channel : 'flow',
     },
   };
 

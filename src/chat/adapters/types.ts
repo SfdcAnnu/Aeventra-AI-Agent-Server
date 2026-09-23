@@ -113,6 +113,12 @@ export interface ChatTurnRequest {
     userId: string;
     recordContextId?: string | null;
     recordContextType?: string | null;
+    /** The phone the customer is messaging from, when the channel knows
+     *  it (WhatsApp does; the Testing tab does not). Stated to the model
+     *  as a fact either way, so it never guesses one. */
+    senderPhone?: string | null;
+    /** 'whatsapp' | 'test' | 'web' | ... -- whatever the caller says. */
+    channel?: string | null;
   };
 }
 
