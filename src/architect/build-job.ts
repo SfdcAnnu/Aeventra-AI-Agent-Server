@@ -43,12 +43,12 @@ import {
   listInvocables,
   listMcpToolsLive,
   listKnowledgeBases,
-  buildCapabilityManifest,
+  manifestFromInventory,
 } from './surveyor-tools';
 import { validateSpec, normalizePrerequisites, attachOrphansToRoot, type AgentSpec, type SpecNode, type SpecError, type SpecPrerequisite, type CapabilityManifest } from './spec';
 import { estimateSpec } from './estimate';
 import { SpecialistError, type SpecialistUsage } from './specialists';
-import { repairNames, type AvailableNames } from './name-repair';
+import { repairNames, suggestNames, type AvailableNames } from './name-repair';
 import { applyPromptMap, applySpecPatch, isSpecPatch } from './spec-merge';
 import { inventoryFromGather } from './survey-inventory';
 import { compileSpec, CompileError } from './compiler';
@@ -623,6 +623,23 @@ async function specialist<T>(
   }
 }
 
+/**
+ * The validator's "not discovered" line, plus what the designer could
+ * have used. Three attempts at a tool that does not exist all failed the
+ * same way because the feedback named the problem and not the answer.
+ */
+function withSuggestions(errors: SpecError[], available: AvailableNames): string[] {
+  const mcpNames = available.mcp.flatMap(m => m.tools);
+  const byConnector = available.mcp.map(m => `${m.connector}: ${m.tools.join(', ')}`).join(' | ');
+  return errors.map(e => {
+    const m = /references mcp '([^']+)'/.exec(e.message);
+    if (!m) return `${e.path}: ${e.message}`;
+    const close = suggestNames(m[1], mcpNames);
+    return `${e.path}: ${e.message} Closest real tools: ${close.join(', ')}. ` +
+      `Every tool that exists, by connector: ${byConnector.slice(0, 1500)}`;
+  });
+}
+
 /** For a failed call whose model was not reported. */
 function modelForTierName(engine: ArchitectEngine): string {
   return engine.models[0] ?? '?';
@@ -744,7 +761,6 @@ async function runBuild(job: BuildJob): Promise<void> {
     listInvocables(job.orgId),
     listMcpToolsLive(job.orgId),
     listKnowledgeBases(job.orgId).catch(() => []),
-    buildCapabilityManifest(job.orgId),
   ]);
   orgGather.catch(() => { /* surfaced when awaited below */ });
 
@@ -782,9 +798,7 @@ async function runBuild(job: BuildJob): Promise<void> {
     gathering.state = 'running';
     gathering.detail = 'Reading your org…';
   }
-  const [objects, invocables, mcpFirstRead, kbs, manifestBuilt] = await orgGather;
-  const manifest: CapabilityManifest = manifestBuilt.manifest;
-  const found = manifestBuilt.counts.invocables + manifestBuilt.counts.mcpTools + (kbs.length || 0);
+  const [objects, invocables, mcpFirstRead, kbs] = await orgGather;
 
   // A SURVEY THAT PARTLY FAILED CANNOT BE DESIGNED AGAINST.
   //
@@ -836,6 +850,14 @@ async function runBuild(job: BuildJob): Promise<void> {
         'Check the connector is online, then run this again.',
     );
   }
+  // ONE READ, ONE MANIFEST. The validator's manifest used to come from a
+  // second read made in parallel with the survey's; only the survey's
+  // waited out a cold tool server. A design was rejected three times for
+  // naming getObjectSchema, soqlQuery and createSobjectRecord -- all real,
+  // all in the survey, none in the manifest.
+  const manifestBuilt = manifestFromInventory(objects, invocables, mcp);
+  const manifest: CapabilityManifest = manifestBuilt.manifest;
+  const found = manifestBuilt.counts.invocables + manifestBuilt.counts.mcpTools + (kbs.length || 0);
   // Every tool the org can actually call, read AFTER any cold start above.
   // The reviewer needs this to tell a real omission from a capability that
   // is already within reach.
@@ -953,7 +975,7 @@ async function runBuild(job: BuildJob): Promise<void> {
         const answer = await specialist<unknown>(job, engine, 'design_flow', {
           requirement,
           currentDesign: lastDraft,
-          validationErrors: lastErrors.map(e => `${e.path}: ${e.message}`),
+          validationErrors: withSuggestions(lastErrors, available),
           available,
           instruction: DESIGN_PATCH_INSTRUCTION,
         }, { rawJson: true, maxOutputTokens: 4000, effort: 'low' });
@@ -992,7 +1014,7 @@ async function runBuild(job: BuildJob): Promise<void> {
         wiringNotes.push(...repairNames(draft, available));
         const errors = validateSpec(draft, manifest);
         if (errors.length > 0) {
-          feedback = errors.map(e => `${e.path}: ${e.message}`).join('\n');
+          feedback = withSuggestions(errors, available).join('\n');
           lastDraft = draft;
           lastErrors = errors;
           if (attempt === 3) throw new Error('The design would not validate after 3 attempts:\n' + feedback);

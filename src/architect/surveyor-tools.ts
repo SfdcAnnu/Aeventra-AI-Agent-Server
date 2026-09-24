@@ -274,16 +274,21 @@ export async function listKnowledgeBases(orgId: string): Promise<Array<{ agentAp
  * compile time. CRUD identities come from the integration user's real
  * object permissions (describeGlobal flags), so "can do" not "exists".
  */
-export async function buildCapabilityManifest(orgId: string, opts: ListMcpOptions = {}): Promise<{
-  manifest: CapabilityManifest;
-  counts: Record<string, number>;
-}> {
-  const [objects, invocables, mcp] = await Promise.all([
-    listObjects(orgId),
-    listInvocables(orgId),
-    listMcpToolsLive(orgId, opts),
-  ]);
-
+/**
+ * The manifest from an inventory ALREADY READ.
+ *
+ * The build used to read the org twice in parallel -- once for the
+ * survey, once for this manifest -- and only the survey's read waited out
+ * a tool server's cold start. The manifest kept the cold read: forty-four
+ * real tools in the survey, none in the manifest, and the validator
+ * rejected `getObjectSchema`, `soqlQuery` and `createSobjectRecord` as
+ * "not discovered" three times over. One read, one manifest.
+ */
+export function manifestFromInventory(
+  objects: ObjectSummary[],
+  invocables: InvocableSummary[],
+  mcp: McpToolInventory[],
+): { manifest: CapabilityManifest; counts: Record<string, number> } {
   const entries: string[] = [];
   for (const inv of invocables) {
     entries.push(`${inv.kind === 'apex' ? 'apex_invocable' : 'flow_invocable'}:${inv.name}`);
@@ -297,27 +302,24 @@ export async function buildCapabilityManifest(orgId: string, opts: ListMcpOption
   }
   let crudCount = 0;
   for (const o of objects) {
-    if (o.createable) {
-      entries.push(`crud:${o.name}:create`);
-      crudCount++;
-    }
-    if (o.updateable) {
-      entries.push(`crud:${o.name}:update`);
-      crudCount++;
-    }
-    if (o.queryable) {
-      entries.push(`crud:${o.name}:query`);
-      crudCount++;
-    }
+    if (o.createable) { entries.push(`crud:${o.name}:create`); crudCount++; }
+    if (o.updateable) { entries.push(`crud:${o.name}:update`); crudCount++; }
+    if (o.queryable) { entries.push(`crud:${o.name}:query`); crudCount++; }
   }
-
   return {
     manifest: manifestFromNames(entries),
-    counts: {
-      objects: objects.length,
-      invocables: invocables.length,
-      mcpTools: mcpCount,
-      crudOperations: crudCount,
-    },
+    counts: { objects: objects.length, invocables: invocables.length, mcpTools: mcpCount, crudOperations: crudCount },
   };
+}
+
+export async function buildCapabilityManifest(orgId: string, opts: ListMcpOptions = {}): Promise<{
+  manifest: CapabilityManifest;
+  counts: Record<string, number>;
+}> {
+  const [objects, invocables, mcp] = await Promise.all([
+    listObjects(orgId),
+    listInvocables(orgId),
+    listMcpToolsLive(orgId, opts),
+  ]);
+  return manifestFromInventory(objects, invocables, mcp);
 }

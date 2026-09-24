@@ -103,6 +103,24 @@ export function closestName(wanted: string, candidates: string[]): string | null
   return best !== null && bestScore >= SIMILARITY_FLOOR && !tie ? best : null;
 }
 
+/**
+ * The closest few names, verb or no verb, for the validator's message.
+ *
+ * repairNames refuses to change a verb, rightly. But when the designer
+ * invents `getPicklistValues` for a server that publishes
+ * `getObjectSchema`, telling it "not found, copy the Surveyor's spelling"
+ * three times produced three identical inventions and a failed build: it
+ * had nothing to copy from. Naming what does exist is what ends the loop.
+ */
+export function suggestNames(wanted: string, candidates: string[], n = 5): string[] {
+  const k = key(wanted.split(/[.:/]/).pop() ?? wanted);
+  return [...new Set(candidates)]
+    .map(c => ({ c, s: dice(k, key(c)) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, n)
+    .map(x => x.c);
+}
+
 /** `Lead` for `lead`; `Project__c` for `Project` or `project__C`; never a guess between two. */
 function closestObject(wanted: string, objects: string[]): string | null {
   if (objects.includes(wanted)) return wanted;
