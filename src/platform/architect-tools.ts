@@ -201,10 +201,14 @@ const resumeBuild = define({
   name: 'resume_build',
   title: 'Resume a build',
   description: 'Continue a paused or failed build from its checkpoint to the end, returning as soon as it is under way. Finished stages are not paid for again; the build card shows the rest.',
-  inputSchema: { jobId: z.string().min(1), maxCostUsd: z.number().min(0.1).max(50).optional().describe('New ceiling for the whole chain; default is what was spent plus $2.') },
+  inputSchema: {
+    jobId: z.string().min(1),
+    maxCostUsd: z.number().min(0.1).max(50).optional().describe('New ceiling for the whole chain; default is what was spent plus $2.'),
+    answers: z.string().max(6000).optional().describe('The answers the person gave to the build questions, and any "Agent type: communication|automation|both" decision, verbatim. They are folded into the requirement every later stage reads.'),
+  },
   readOnly: false,
-  handler: async ({ jobId, maxCostUsd }, p) => {
-    const job = await resumeBuildJob(p.orgId, jobId, maxCostUsd);
+  handler: async ({ jobId, maxCostUsd, answers }, p) => {
+    const job = await resumeBuildJob(p.orgId, jobId, maxCostUsd, undefined, answers);
     if (!job) {
       // WHY IT CANNOT BE RESUMED IS THE ONLY USEFUL PART OF THIS MESSAGE.
       // Without it the caller learns that the build is not paused, which

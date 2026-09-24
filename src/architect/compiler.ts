@@ -183,7 +183,7 @@ function slugify(name: string): string {
  */
 export async function compileSpec(
   spec: AgentSpec,
-  opts: { conn: Connection; orgId: string; manifest?: CapabilityManifest; existingAgentId?: string },
+  opts: { conn: Connection; orgId: string; manifest?: CapabilityManifest; existingAgentId?: string; executeType?: 'Chat' | 'Trigger' | 'Both' },
 ): Promise<CompileResult> {
   const errors = validateSpec(spec, opts.manifest);
   if (errors.length > 0) {
@@ -508,7 +508,9 @@ export async function compileSpec(
     Department__c: spec.department,
     Description__c: spec.description ?? '',
     Status__c: status,
-    ExecuteType__c: 'Chat',
+    // What the Analyst decided (communication / automation / both), or
+    // what the person changed it to on the build card. Was always 'Chat'.
+    ExecuteType__c: opts.executeType ?? 'Chat',
     CanvasJson__c: JSON.stringify({ connections, spec: { lifecycle: spec.lifecycle, architecture: spec.architecture, trigger: spec.trigger } }),
     SetupChecklistJson__c: JSON.stringify(checklist),
     Version__c: spec.lifecycle?.version ?? 1,
