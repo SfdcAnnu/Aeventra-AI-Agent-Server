@@ -756,12 +756,32 @@ async function runBuild(job: BuildJob): Promise<void> {
       ...(attachmentText ? { attachedDocument: attachmentText.slice(0, 30_000) } : {}),
       note:
         'This build runs without a back-and-forth: resolve what you can from the text; anything genuinely ' +
-        'unresolvable goes in openQuestions as an assumption you made, phrased as the assumption.',
+        'unresolvable goes in openQuestions as an assumption you made, phrased as the assumption. ' +
+        'NEVER ask about what the platform already provides: receiving and sending messages on the channel ' +
+        '(WhatsApp, SMS, web chat, email), keeping the conversation and its state across turns, identifying the ' +
+        'sender and loading the record the conversation is anchored to, calling Salesforce tools in the same ' +
+        'turn (create, update, Event, Task, Chatter), reading picklist values live, routing between specialists, ' +
+        'and the approval gate on writes. The Org Surveyor runs next and verifies objects, fields and tools; ' +
+        'do not ask whether they exist. Ask only what a business owner must decide.',
     }),
     r => ({ detail: `${r.capabilities.length} capabilities` }),
     r => { cp.requirement = r; },
   );
 
+  // A BUILD PAUSED FOR QUESTIONS PAUSES NOW, NOT AFTER THE ORG ANSWERS.
+  //
+  // With stopAfter 'understand' the job used to reach this line and wait
+  // for the gather -- and for the tool servers' cold start, up to five
+  // minutes -- before the pause that lets the person answer. The card
+  // showed the questions with a disabled button and "Working…" the whole
+  // time, and one such build died at the survey gate before it could
+  // pause at all. The gather keeps running; a resume re-reads the org.
+  guardStop(job, 'survey');
+  {
+    const gathering = step(job, 'survey');
+    gathering.state = 'running';
+    gathering.detail = 'Reading your org…';
+  }
   const [objects, invocables, mcpFirstRead, kbs, manifestBuilt] = await orgGather;
   const manifest: CapabilityManifest = manifestBuilt.manifest;
   const found = manifestBuilt.counts.invocables + manifestBuilt.counts.mcpTools + (kbs.length || 0);
@@ -801,6 +821,8 @@ async function runBuild(job: BuildJob): Promise<void> {
       { orgId: job.orgId, jobId: job.id, attempt, providers: asleep.map(m => m.provider) },
       'architect_tool_server_unreachable_waiting',
     );
+    step(job, 'survey').detail = `Waking ${asleep.map(m => m.provider).join(', ')} (attempt ${attempt} of ${MCP_WAKE_ATTEMPTS})…`;
+    await saveJob(job);
     await new Promise(resolve => setTimeout(resolve, MCP_WAKE_WAIT_MS));
     mcp = await listMcpToolsLive(job.orgId);
   }
