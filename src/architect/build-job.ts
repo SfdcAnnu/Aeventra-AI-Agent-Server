@@ -73,6 +73,8 @@ export interface BuildStep {
   calls?: BuildCall[];
   tokensIn?: number;
   tokensOut?: number;
+  /** When this stage began, so the screen can count while it runs. */
+  startedAt?: number;
 }
 
 export interface BuildCall {
@@ -479,6 +481,20 @@ function step(job: BuildJob, key: string): BuildStep {
   return job.steps.find(s => s.key === key)!;
 }
 
+/**
+ * What the running stage is doing right now, under its row on the card.
+ * A 90-second design call used to be a spinner and nothing else; three
+ * validation attempts looked like one silent stage; the review's repair
+ * round was invisible. The card polls every couple of seconds, so a line
+ * written here is seen.
+ */
+function narrate(job: BuildJob, key: string, text: string): void {
+  const s = job.steps.find(x => x.key === key);
+  if (!s) return;
+  s.detail = text;
+  void saveJob(job);
+}
+
 function recordCall(job: BuildJob, specialist: string, model: string, usage: SpecialistUsage, failed?: string): void {
   const s = job.currentStep ? job.steps.find(x => x.key === job.currentStep) : undefined;
   if (!s) return;
@@ -553,6 +569,9 @@ async function stage<T>(
 
   s.state = 'running';
   const startedAt = Date.now();
+  s.startedAt = startedAt;
+  s.detail = '';
+  await saveJob(job);
   const spentBefore = job.costUsd;
   const value = await produce();
   s.ms = Date.now() - startedAt;
@@ -903,10 +922,13 @@ async function runBuild(job: BuildJob): Promise<void> {
   // 3 — match
   const match = await stage<MatchResult>(
     job, 'match', cp.match,
-    () => specialist<MatchResult>(job, engine, 'match_capabilities', {
+    () => {
+      narrate(job, 'match', `Matching ${requirement.capabilities.length} capabilities against ${mcpToolNames.length} tools and ${crudObjects.length} objects (gpt-5.5)…`);
+      return specialist<MatchResult>(job, engine, 'match_capabilities', {
       capabilities: requirement.capabilities,
       orgInventory: surveyed,
-    }),
+      });
+    },
     m => {
       const n = (m.partial?.length ?? 0) + (m.missing?.length ?? 0);
       return {
@@ -972,6 +994,7 @@ async function runBuild(job: BuildJob): Promise<void> {
       // three times over. Attempt 2 patches attempt 1 at low effort; if
       // the patch does not help, attempt 3 starts over.
       const patchedDesign = async (): Promise<AgentSpec | null> => {
+        narrate(job, 'design', `Patching the design for ${lastErrors.length} validation finding${lastErrors.length === 1 ? '' : 's'} (gpt-5.5, low effort)…`);
         const answer = await specialist<unknown>(job, engine, 'design_flow', {
           requirement,
           currentDesign: lastDraft,
@@ -995,7 +1018,9 @@ async function runBuild(job: BuildJob): Promise<void> {
       }, { rawJson: true, maxOutputTokens: 8000 });
       for (let attempt = 1; attempt <= 3; attempt++) {
         const patchable = lastDraft !== null && (attempt === 2 || (attempt === 1 && lastDraft === cp.spec));
+        if (!patchable) narrate(job, 'design', attempt === 1 ? 'Designing the agent — root, specialists, tools, approvals (gpt-5.5, deep)…' : `Redesigning from scratch, attempt ${attempt} of 3 (gpt-5.5, deep)…`);
         const draft = patchable ? (await patchedDesign()) ?? await fullDesign() : await fullDesign();
+        narrate(job, 'design', `Checking attempt ${attempt} against the org…`);
         // A shapeless answer is a retryable mistake, not a crash. The model
         // can return prose, a wrapper object, or a truncated spec; each of
         // those used to take the whole build down inside the repair below.
@@ -1063,11 +1088,13 @@ async function runBuild(job: BuildJob): Promise<void> {
   // with the texts inside — up to 12,000 output tokens, minutes of
   // generation, and edges it could drop on the way.
   const writePrompts = async (target: AgentSpec, onlyIds: string[] | null, firstFeedback: string): Promise<void> => {
+    const current = job.currentStep ?? 'prompts';
     let promptFeedback = firstFeedback;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const writeFor = target.nodes
         .filter(n => (n.type === 'agent' || n.type === 'subagent' || n.type === 'tool') && (!onlyIds || onlyIds.includes(n.id)))
         .map(n => n.id);
+      narrate(job, current, `Writing instructions for ${writeFor.length} node${writeFor.length === 1 ? '' : 's'}${attempt > 1 ? `, attempt ${attempt} of 3` : ''} (gpt-4.1)…`);
       const answer = await specialist<unknown>(job, engine, 'write_prompts', {
         draftSpec: target,
         requirement,
@@ -1176,6 +1203,7 @@ async function runBuild(job: BuildJob): Promise<void> {
             'for is absent — not for style, naming or efficiency.',
         });
 
+      narrate(job, 'review', 'Judging the design against your requirement (gpt-5.5, deep)…');
       const first = await judged();
       // What triggers a repair is the UNCOVERED LIST, not the verdict.
       // Gating on `fail` alone shipped an agent with five things the client
@@ -1198,6 +1226,8 @@ async function runBuild(job: BuildJob): Promise<void> {
       // full effort — this is judgement, not spelling — and then texts for
       // what the patch touched. The whole graph used to be re-emitted and
       // re-prompted for a fix the Evaluator had already named.
+      const findings = (first.uncovered?.length ?? 0) + (first.fixes?.length ?? 0);
+      narrate(job, 'review', `The reviewer found ${findings} thing${findings === 1 ? '' : 's'} missing — repairing the design (gpt-5.5)…`);
       const answer = await specialist<unknown>(job, engine, 'design_flow', {
         requirement,
         currentDesign: spec,
@@ -1226,6 +1256,7 @@ async function runBuild(job: BuildJob): Promise<void> {
       }
       spec = patched.spec;
       cp.spec = patched.spec;
+      narrate(job, 'review', 'Re-judging the repaired design (gpt-5.5)…');
       const second = await judged();
       return { ...second, repaired: true };
     },
@@ -1245,6 +1276,9 @@ async function runBuild(job: BuildJob): Promise<void> {
   guardStop(job, 'gaps');
   let s = step(job, 'gaps');
   s.state = 'running';
+  s.startedAt = Date.now();
+  s.detail = gaps > 0 ? `Writing setup items for ${gaps} gap${gaps === 1 ? '' : 's'} (gpt-4.1)…` : '';
+  await saveJob(job);
   // Normalised on the RESTORE path too, not just when freshly written: a
   // build checkpointed before this coercion existed holds the raw shape,
   // and resuming it would otherwise replay the exact failure it stopped on.
@@ -1348,6 +1382,9 @@ async function runBuild(job: BuildJob): Promise<void> {
   s = step(job, 'compile');
   s.state = 'running';
   const compileStartedAt = Date.now();
+  s.startedAt = compileStartedAt;
+  s.detail = 'Compiling and saving the agent in your org…';
+  await saveJob(job);
   const finalErrors = validateSpec(spec, manifest);
   if (finalErrors.length > 0) {
     throw new Error('Final spec failed validation:\n' + finalErrors.map(e => `${e.path}: ${e.message}`).join('\n'));
