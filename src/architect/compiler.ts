@@ -458,6 +458,33 @@ export async function compileSpec(
     connections.push({ id: edgeId(rootIndex, injected), fromIndex: rootIndex, toIndex: injected, fromPort: 'tool', toPort: 'in' });
   }
 
+  // AN AUTOMATION AGENT STARTS AT A TRIGGER NODE, so the compiler adds one.
+  //
+  // A headless run begins at the graph's trigger node and stops before it
+  // begins without one ("No trigger node found"). The Architect's graphs
+  // never had one, so an agent it built as automation could not run --
+  // and the automation canvas was read-only, so nobody could add it.
+  // The subtype follows the spec's trigger; a Flow or Apex call is the
+  // 'record' kind, the one Run AI Agent uses.
+  if (opts.executeType === 'Trigger' || opts.executeType === 'Both') {
+    const rootIndex = indexOfSpec.get(root.id)!;
+    const rootNode = platformNodes[rootIndex];
+    const subtype = spec.trigger.type === 'webhook' ? 'webhook' : spec.trigger.type === 'schedule' ? 'schedule' : 'record';
+    platformNodes.push({
+      specId: '__trigger__',
+      name: subtype === 'webhook' ? 'Webhook' : subtype === 'schedule' ? 'Schedule' : 'Run from Flow or Apex',
+      nodeType: 'trigger',
+      nodeSubType: subtype,
+      config: {},
+      x: Math.max(20, rootNode.x - 260),
+      y: rootNode.y,
+      enabled: true,
+    });
+    const triggerIndex = platformNodes.length - 1;
+    connections.push({ id: `e${triggerIndex}:out-${rootIndex}:in`, fromIndex: triggerIndex, toIndex: rootIndex, fromPort: 'out', toPort: 'in' });
+    notes.push('Added a Trigger node so the agent can run from a Flow or Apex — an automation run starts there.');
+  }
+
   // ── Status mapping — the activation guard, applied twice ───────────
   const state = spec.lifecycle?.state ?? 'draft';
   let status = 'Draft';
