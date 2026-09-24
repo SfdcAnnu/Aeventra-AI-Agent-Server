@@ -97,7 +97,7 @@ function gapOf(item: Record<string, unknown>, state: 'partial' | 'missing'): Rec
 
 export function buildDetail(job: BuildJob): Record<string, unknown> {
   const cp = job.checkpoint ?? {};
-  const req = cp.requirement as { goal?: string; capabilities?: string[]; openQuestions?: string[]; successCriteria?: string[]; riskLevel?: string; trigger?: string } | undefined;
+  const req = cp.requirement as { goal?: string; capabilities?: string[]; openQuestions?: string[]; successCriteria?: string[]; riskLevel?: string; trigger?: string; agentType?: string; clarifications?: string[] } | undefined;
   const surveyed = cp.surveyed as Record<string, unknown> | undefined;
   const match = cp.match as { matched?: Array<Record<string, unknown>>; partial?: Array<Record<string, unknown>>; missing?: Array<Record<string, unknown>>; coverage?: number } | undefined;
   const spec = cp.spec as AgentSpec | undefined;
@@ -114,6 +114,8 @@ export function buildDetail(job: BuildJob): Record<string, unknown> {
       successCriteria: (req.successCriteria ?? []).map(q => asStr(q, 200)),
       riskLevel: req.riskLevel ?? null,
       trigger: asStr(req.trigger, 120) || null,
+      agentType: req.agentType ?? 'communication',
+      clarifications: (req.clarifications ?? []).map(c => asStr(c, 600)),
     } : null,
     survey: surveyed ? surveyOutline(surveyed) : null,
     match: match ? {

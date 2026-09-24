@@ -444,9 +444,23 @@ export async function resumeBuildJob(
   jobId: string,
   maxCostUsd?: number,
   stopAfter?: string,
+  answers?: string,
 ): Promise<BuildJob | null> {
   const prior = await getBuildJob(jobId, orgId);
   if (!prior) return null;
+  // THE ANSWERS USED TO GO NOWHERE. The card said "fold these into the
+  // requirement and continue", the copilot called resume_build, and the
+  // build resumed with the requirement exactly as first written: the
+  // person's decisions lived only in the chat. They go into the
+  // checkpointed requirement now, where every later specialist reads them.
+  if (answers && answers.trim()) {
+    const req = (prior.checkpoint.requirement ?? {}) as Requirement;
+    req.clarifications = [...(req.clarifications ?? []), answers.trim()];
+    const kind = /agent\s*type\s*[:=]\s*(communication|automation|both)/i.exec(answers);
+    if (kind) req.agentType = kind[1].toLowerCase() as AgentKind;
+    prior.checkpoint.requirement = req;
+    prior.requirement = `${prior.requirement}\n\nClarifications from the requester:\n${answers.trim()}`;
+  }
   const resumable =
     prior.status === 'paused' ||
     (prior.status === 'failed' && Object.keys(prior.checkpoint ?? {}).length > 0);
@@ -672,9 +686,18 @@ function needsText(n: SpecNode): boolean {
   return false;
 }
 
+/** Communication -> Chat, automation -> Trigger, both -> Both. */
+export type AgentKind = 'communication' | 'automation' | 'both';
+export const EXECUTE_TYPE_OF_KIND: Record<AgentKind, 'Chat' | 'Trigger' | 'Both'> = { communication: 'Chat', automation: 'Trigger', both: 'Both' };
+
 interface Requirement {
   goal: string;
   capabilities: string[];
+  /** What kind of agent this is; the compiler writes ExecuteType__c from it. */
+  agentType?: AgentKind;
+  /** The person's answers to openQuestions, folded in on resume. Every
+   *  later specialist receives the requirement whole, so they see these. */
+  clarifications?: string[];
   trigger?: string;
   successCriteria: string[];
   outOfScope: string[];
@@ -1391,7 +1414,10 @@ async function runBuild(job: BuildJob): Promise<void> {
   }
   let compiled;
   try {
-    compiled = await compileSpec(spec, { conn, orgId: job.orgId, manifest });
+    compiled = await compileSpec(spec, {
+      conn, orgId: job.orgId, manifest,
+      executeType: EXECUTE_TYPE_OF_KIND[requirement.agentType ?? 'communication'],
+    });
   } catch (e) {
     throw e instanceof CompileError ? new Error('Compile refused: ' + e.message) : e;
   }

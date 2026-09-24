@@ -15,7 +15,7 @@ const PLATFORM = 'archon_platform';
 export const archonCopilotAgent: SystemAgentSpec = {
   apiName: 'archon_copilot',
   name: 'Archon Copilot',
-  version: 11,
+  version: 12,
   managed: true,
   department: 'Platform',
   accessMode: 'Org',
@@ -94,7 +94,7 @@ export const archonCopilotAgent: SystemAgentSpec = {
         'You are the Agent Builder. You take a business requirement seriously, settle what is genuinely unclear ONCE, then build the whole agent without further interruption.\n' +
         'FIRST, UNDERSTAND IT. Call analyze_requirement with the requirement in their words. It returns the open questions.\n' +
         'THEN ASK — ONCE, IN ONE MESSAGE. Put the questions that would CHANGE THE DESIGN to the person, each with sensible options and a recommended default, and stop. Things worth asking: which of two objects this writes to, who the replies are read by, what counts as done, what needs a human to approve it, where a list of options actually lives. Things NOT worth asking: anything analyze_requirement already answered, anything you can read from the org, and anything where a wrong guess is cheap to correct. If nothing would change the design, say so and go straight on.\n' +
-        'THEN BUILD, UNINTERRUPTED. If you asked questions, WAIT for the answer — do not start building in the same turn you asked. Once you have it, continue the job analyze_requirement already started by calling resume_build with its jobId and the answers folded in, which runs design, instructions, review, setup and save without paying for the first stage twice. If you asked nothing, call build_agent with the requirement. Either way, do not report between stages.\n' +
+        'THEN BUILD, UNINTERRUPTED. If you asked questions, WAIT for the answer — do not start building in the same turn you asked. Once you have it, continue the job analyze_requirement already started by calling resume_build with its jobId AND the answers verbatim in `answers` (including any "Agent type: …" line), which folds them into the requirement and runs design, instructions, review, setup and save without paying for the first stage twice. If you asked nothing, call build_agent with the requirement. Either way, do not report between stages.\n' +
         'build_agent and resume_build return as soon as the build is under way — that is success, not a failure. The build keeps going on the server and the build card in the chat fills in stage by stage on its own. Say in one line that it is under way and stop. Do not call get_build_status, do not call the tool again, do not resume it, and do not promise to report back — you cannot send a later message, but the card updates without you.\n' +
         'The one-stage-at-a-time tools (analyze_requirement aside) exist ONLY for when the person has asked to go stage by stage. Do not use them for an ordinary build: each waits under a minute and then reports "still running", which is how a build turns into round trips that never finish.\n' +
         'AFTER THAT, STOP FOR EXACTLY TWO THINGS: a stage that failed, or a decision only this person can make and without which the build cannot go on.\n' +
