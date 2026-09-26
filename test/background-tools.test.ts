@@ -47,7 +47,7 @@ vi.mock('../src/salesforce/per-org-connection', () => ({
 }));
 
 const {
-  backgroundGate, awaitPendingBackground, backgroundResultsBlock, backgroundToolNames, backgroundPromptLine, speaksThenActs, sweepOrphanedBackgroundRuns,
+  backgroundGate, awaitPendingBackground, backgroundResultsBlock, backgroundToolNames, backgroundPromptLine, speaksThenActs, sweepOrphanedBackgroundRuns, mustRunInline,
 } = await import('../src/lc/background-tools');
 
 const meta = { orgId: '00D', sessionId: 'sess-1', agentApiName: 'intake', recordContextId: '00Q1', recordContextType: 'Lead' };
@@ -106,7 +106,7 @@ describe('background tools', () => {
     ] } as never;
     expect([...backgroundToolNames(agent)].sort()).toEqual(['createSobjectRecord', 'updateSobjectRecord']);
     expect(backgroundPromptLine(new Set())).toBeNull();
-    expect(backgroundPromptLine(new Set(['updateSobjectRecord']))).toContain('SAME message');
+    expect(backgroundPromptLine(new Set(['updateSobjectRecord']))).toContain('same assistant message');
   });
 
   it('speaks-then-acts only when there is text and every call is a background tool', () => {
@@ -118,6 +118,26 @@ describe('background tools', () => {
     expect(speaksThenActs(noText, names)).toBe(false);
     expect(speaksThenActs(mixed, names)).toBe(false);
     expect(speaksThenActs(withText, new Set())).toBe(false);
+  });
+
+  it('a create runs inline while the conversation has no record, and in the background once it has one', async () => {
+    const created = tool(async () => JSON.stringify({ success: true, id: '00Qnew' }), { name: 'createSobjectRecord', description: 'd', schema: z.object({ field: z.string() }) });
+    expect(mustRunInline('createSobjectRecord', { ...meta, recordContextId: null })).toBe(true);
+    expect(mustRunInline('createSobjectRecord', meta)).toBe(false);
+    expect(mustRunInline('updateSobjectRecord', { ...meta, recordContextId: null })).toBe(false);
+    const inline = JSON.parse(String(await backgroundGate({ ...meta, sessionId: 'sess-3', recordContextId: null })(created).invoke({ field: 'x' })));
+    expect(inline).toEqual({ success: true, id: '00Qnew' });      // the Id comes back, nothing queued
+    const queued = JSON.parse(String(await backgroundGate({ ...meta, sessionId: 'sess-3' })(created).invoke({ field: 'x' })));
+    expect(queued.queued).toBe(true);
+    await awaitPendingBackground('sess-3', 5_000);
+  });
+
+  it('a failure with no anchored record still leaves a Task', async () => {
+    const bg = backgroundGate({ ...meta, sessionId: 'sess-4', recordContextId: null })(rejecting);
+    await bg.invoke({ field: 'Budget' });
+    await awaitPendingBackground('sess-4', 5_000);
+    expect(taskCreates).toHaveLength(1);
+    expect(taskCreates[0]).not.toHaveProperty('WhoId');
   });
 
   it('a restart marks whatever was still queued as failed', async () => {
