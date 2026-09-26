@@ -8,6 +8,7 @@ import { AgentCache } from '../chat/agent-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { logger } from '../logger';
 import { define, ok, fail } from './tool-kit';
+import { homeStats } from './inspector-tools';
 
 /**
  * A transfer is a RESULT the client acts on, not something the server does:
@@ -30,6 +31,76 @@ const transferToAgent = define({
     if (!agent) return fail(`No agent with API name ${agentApiName} — call list_agents first.`);
     if (agent.status !== 'Active') return fail(`${agent.name} is ${agent.status}, not Active — it cannot take a conversation.`);
     return ok({ transfer: { agentApiName: agent.apiName, agentName: agent.name, message } }, `TRANSFER to ${agent.name} (${agent.apiName}): ${message}`);
+  },
+});
+
+/**
+ * A view on the screen is a RESULT the client acts on, like a transfer:
+ * the Archon screen draws the named view beside the conversation from
+ * live org data. For the usage and cost views the result also carries the
+ * per-agent rows, so the screen and the words come from the same numbers
+ * and the person never sees a table that disagrees with the reply.
+ */
+export const SCREEN_VIEWS = ['dashboard', 'usage', 'failures', 'drafts', 'approvals', 'cost', 'build'] as const;
+export type ScreenView = (typeof SCREEN_VIEWS)[number];
+
+export interface UsageRow { apiName: string; name: string; turns: number; tokensIn: number; tokensOut: number }
+export interface UsageStats { days: number; byAgent: Array<{ apiName: string | null; name: string | null; turns: number; tokensIn: number; tokensOut: number }> }
+
+export function screenPayload(view: ScreenView, days: number | undefined, agentApiName: string | undefined, stats: UsageStats | null) {
+  const screen = { view, days: days ?? null, agentApiName: agentApiName ?? null };
+  if (!stats) return { screen };
+  const rows: UsageRow[] = stats.byAgent
+    .filter((r): r is UsageStats['byAgent'][number] & { apiName: string } => !!r.apiName)
+    .filter(r => !agentApiName || r.apiName === agentApiName)
+    .map(r => ({ apiName: r.apiName, name: r.name ?? r.apiName, turns: r.turns, tokensIn: r.tokensIn, tokensOut: r.tokensOut }))
+    .sort((a, b) => (b.tokensIn + b.tokensOut) - (a.tokensIn + a.tokensOut));
+  return {
+    screen,
+    usage: {
+      days: stats.days,
+      turns: rows.reduce((s, r) => s + r.turns, 0),
+      tokensIn: rows.reduce((s, r) => s + r.tokensIn, 0),
+      tokensOut: rows.reduce((s, r) => s + r.tokensOut, 0),
+      byAgent: rows,
+    },
+  };
+}
+
+const showOnScreen = define({
+  name: 'show_on_screen',
+  title: 'Show on the screen',
+  description:
+    'Put a view on the screen beside this conversation. The Archon screen draws it from live org data: ' +
+    'dashboard (today: runs, chat turns, approvals waiting, spend, runs by hour, what happened), ' +
+    'usage (turns, tokens and spend per agent over the last N days — the report of who used what), ' +
+    'failures (runs that failed today), drafts (agents not yet active), approvals (waiting for a decision), ' +
+    'cost (spend per agent over the last N days as a chart), build (the Architect\'s current build). ' +
+    'Call it whenever the person asks to see, show, display, visualise, report, or put something on the dashboard or screen; ' +
+    'then tell them in words what it shows. The screen changes on its own — nothing else is needed.',
+  inputSchema: {
+    view: z.enum(SCREEN_VIEWS).describe('Which view to show.'),
+    days: z.number().int().min(1).max(31).optional().describe('For usage and cost: how many days back — today = 1, this week = 7, this month = 31. Default 31.'),
+    agentApiName: z.string().max(120).optional().describe('Narrow usage or cost to one agent, when the person named one.'),
+  },
+  readOnly: true,
+  handler: async ({ view, days, agentApiName }, p) => {
+    let stats: UsageStats | null = null;
+    if (view === 'usage' || view === 'cost') {
+      try {
+        stats = await homeStats(await getOrgConnection(p.orgId), days ?? 31);
+      } catch (err) {
+        // The screen can still draw the view from the org itself; only the
+        // rows travelling with the words are lost.
+        logger.warn({ err, view }, 'show_on_screen: could not read usage rows');
+      }
+    }
+    const payload = screenPayload(view, days ?? (stats ? stats.days : undefined), agentApiName, stats);
+    return ok(
+      payload,
+      `${JSON.stringify(payload)}\nSHOWN: the ${view} view is on the screen beside this conversation now and the person can see it. ` +
+        'Describe what it shows in a sentence or two with the key figures. Never say you cannot display or visualise it.',
+    );
   },
 });
 
@@ -193,4 +264,4 @@ const addAgentTool = define({
   },
 });
 
-export const AGENT_TOOLS = [transferToAgent, updateAgent, addAgentTool];
+export const AGENT_TOOLS = [transferToAgent, showOnScreen, updateAgent, addAgentTool];

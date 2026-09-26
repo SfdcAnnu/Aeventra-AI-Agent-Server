@@ -23,7 +23,7 @@ function esc(s: string): string {
 /** The same aggregate the Home page's Apex builds, from Node: per day and
  *  per agent across runs AND chat turns. TurnStatus__c may not exist in an
  *  org yet — the query degrades to "all turns ok" rather than failing. */
-async function homeStats(conn: Connection, days: number) {
+export async function homeStats(conn: Connection, days: number) {
   const start = new Date();
   start.setDate(start.getDate() - (days - 1));
   start.setHours(0, 0, 0, 0);
