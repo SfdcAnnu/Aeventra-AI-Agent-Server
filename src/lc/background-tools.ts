@@ -63,6 +63,12 @@ export function backgroundToolNames(agent: AgentDefinition): Set<string> {
 // ── The queue: one chain per session, durable rows ────────────────────
 const chains = new Map<string, Promise<void>>();
 const RESULT_CHARS = 2_000;
+// Sessions with an outcome not yet shown. Reading the table on every turn
+// cost ~240 ms of buildPrompt (a Postgres round trip from Render) even
+// when nothing had been queued; a session is read once after boot, then
+// only when a job of its own has finished.
+const unreported = new Set<string>();
+const readOnce = new Set<string>();
 
 interface Enqueued { id: string; queuedAt: Date }
 
@@ -101,6 +107,7 @@ async function runJob(id: string, meta: BackgroundMeta, t: StructuredToolInterfa
       where: { id },
       data: { status: failedInside ? 'failed' : 'done', result: text.slice(0, RESULT_CHARS), error: failedInside ? text.slice(0, 500) : null, finishedAt: new Date(), ms: Date.now() - startedAt.getTime() },
     });
+    unreported.add(meta.sessionId);
     logger.info({ orgId: meta.orgId, sessionId: meta.sessionId, tool: t.name, ms: Date.now() - startedAt.getTime(), failed: failedInside }, 'background_tool_done');
     if (failedInside) await leaveFollowUpTask(meta, t.name, text.slice(0, 500), args);
   } catch (err) {
@@ -109,6 +116,7 @@ async function runJob(id: string, meta: BackgroundMeta, t: StructuredToolInterfa
       where: { id },
       data: { status: 'failed', error: message.slice(0, 500), finishedAt: new Date(), ms: Date.now() - startedAt.getTime() },
     }).catch(() => { /* best effort */ });
+    unreported.add(meta.sessionId);
     logger.error({ orgId: meta.orgId, sessionId: meta.sessionId, tool: t.name, err: message }, 'background_tool_failed');
     await leaveFollowUpTask(meta, t.name, message, args);
   }
@@ -117,17 +125,18 @@ async function runJob(id: string, meta: BackgroundMeta, t: StructuredToolInterfa
 /** A write that failed after the customer was told it was done leaves a
  *  Task on the record so a person sees it even if the customer goes quiet. */
 async function leaveFollowUpTask(meta: BackgroundMeta, toolName: string, error: string, args: unknown): Promise<void> {
-  if (!meta.recordContextId) return;
   try {
     const conn = await getOrgConnection(meta.orgId);
     const isPerson = meta.recordContextType === 'Lead' || meta.recordContextType === 'Contact';
     await conn.sobject('Task').create({
       Subject: `Agent action failed: ${toolName}`,
-      Description: `The ${meta.agentApiName} agent told the customer this was done, but it failed afterwards.\n\nError: ${error}\n\nArguments: ${JSON.stringify(args).slice(0, 1500)}`,
+      Description: `The ${meta.agentApiName} agent told the customer this was done, but it failed afterwards.\nSession: ${meta.sessionId}\n\nError: ${error}\n\nArguments: ${JSON.stringify(args).slice(0, 1500)}`,
       Status: 'Not Started',
       Priority: 'High',
       ActivityDate: new Date().toISOString().slice(0, 10),
-      ...(isPerson ? { WhoId: meta.recordContextId } : { WhatId: meta.recordContextId }),
+      // No anchored record (a web-chat session): the Task still exists, on
+      // the running user, with the session named so a person can find it.
+      ...(meta.recordContextId ? (isPerson ? { WhoId: meta.recordContextId } : { WhatId: meta.recordContextId }) : {}),
     });
   } catch (err) {
     logger.warn({ orgId: meta.orgId, err: err instanceof Error ? err.message : String(err) }, 'background_follow_up_task_failed');
@@ -136,10 +145,28 @@ async function leaveFollowUpTask(meta: BackgroundMeta, toolName: string, error: 
 
 /** Wrap a tool so a call queues instead of running. The answer the model
  *  reads says so plainly; the prompt line tells it what that means. */
+const CREATE_RE = /create|insert|upsert/i;
+
+/**
+ * A create the conversation has no record for yet runs INLINE: its Id is
+ * the handle every later write needs. Measured: with the Lead's create
+ * queued, the model had no Id for the email update, wrote "use-latest"
+ * into every update and every one failed while the customer was told
+ * they were saved. Once the session is anchored to a record, creates of
+ * other records (an Event, a Task on the Lead) go to the background.
+ */
+export function mustRunInline(toolName: string, meta: BackgroundMeta): boolean {
+  return CREATE_RE.test(toolName) && !meta.recordContextId;
+}
+
 export function backgroundGate(meta: BackgroundMeta): (t: StructuredToolInterface) => StructuredToolInterface {
   return (t: StructuredToolInterface) =>
     tool(
       async (args: unknown) => {
+        if (mustRunInline(t.name, meta)) {
+          const raw = await t.invoke(args as never);
+          return typeof raw === 'string' ? raw : JSON.stringify(raw);
+        }
         const { id } = await enqueue(meta, t, args);
         return JSON.stringify({ queued: true, job: id, note: 'This action runs in the background right after your reply. Treat it as done; a later "Background results" note reports the outcome.' });
       },
@@ -162,6 +189,9 @@ export async function awaitPendingBackground(sessionId: string, capMs = 2_000): 
  * and mark them shown, so a failure is reported once, not on every turn.
  */
 export async function backgroundResultsBlock(sessionId: string): Promise<string | null> {
+  if (!unreported.has(sessionId) && readOnce.has(sessionId)) return null;
+  readOnce.add(sessionId);
+  unreported.delete(sessionId);
   let rows: Array<{ id: string; tool: string; status: string; error: string | null; args: unknown; finishedAt: Date | null }> = [];
   try {
     rows = await prisma.backgroundToolRun.findMany({
@@ -202,8 +232,10 @@ export function backgroundPromptLine(names: Set<string>): string | null {
   if (names.size === 0) return null;
   return (
     `BACKGROUND TOOLS: ${[...names].sort().join(', ')}. They answer {queued:true} at once and run right after your reply. ` +
-    'When every tool you need in a step is one of these, write the customer\'s reply in the SAME message as the tool calls and treat the action as done. ' +
-    'If a later "Background results" note says one failed, tell the customer and ask again.'
+    'FORMAT RULE, every time a step calls only these tools: put the customer-facing reply in the CONTENT of the same assistant message that carries the tool calls -- ' +
+    'text and tool calls together, one message. Never send a tool-call-only message and reply afterwards; that costs the customer an extra wait. ' +
+    'Treat the action as done in that reply. A create that starts a new record (no record anchored yet) runs at once and returns its Id as usual -- use that Id in later writes. ' +
+    'If a later "Background results" note says an action failed, tell the customer and ask again.'
   );
 }
 
