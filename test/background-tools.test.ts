@@ -47,7 +47,7 @@ vi.mock('../src/salesforce/per-org-connection', () => ({
 }));
 
 const {
-  backgroundGate, awaitPendingBackground, backgroundResultsBlock, backgroundToolNames, backgroundPromptLine, speaksThenActs, sweepOrphanedBackgroundRuns, mustRunInline,
+  backgroundGate, awaitPendingBackground, backgroundResultsBlock, backgroundToolNames, backgroundPromptLine, speaksThenActs, sweepOrphanedBackgroundRuns, mustRunInline, _forgetCreatedAnchors,
 } = await import('../src/lc/background-tools');
 
 const meta = { orgId: '00D', sessionId: 'sess-1', agentApiName: 'intake', recordContextId: '00Q1', recordContextType: 'Lead' };
@@ -121,15 +121,21 @@ describe('background tools', () => {
   });
 
   it('a create runs inline while the conversation has no record, and in the background once it has one', async () => {
-    const created = tool(async () => JSON.stringify({ success: true, id: '00Qnew' }), { name: 'createSobjectRecord', description: 'd', schema: z.object({ field: z.string() }) });
+    const created = tool(async () => JSON.stringify({ success: true, id: '00Qg5000008kiKnEAI' }), { name: 'createSobjectRecord', description: 'd', schema: z.object({ field: z.string() }) });
     expect(mustRunInline('createSobjectRecord', { ...meta, recordContextId: null })).toBe(true);
     expect(mustRunInline('createSobjectRecord', meta)).toBe(false);
     expect(mustRunInline('updateSobjectRecord', { ...meta, recordContextId: null })).toBe(false);
     const inline = JSON.parse(String(await backgroundGate({ ...meta, sessionId: 'sess-3', recordContextId: null })(created).invoke({ field: 'x' })));
-    expect(inline).toEqual({ success: true, id: '00Qnew' });      // the Id comes back, nothing queued
+    expect(inline).toEqual({ success: true, id: '00Qg5000008kiKnEAI' });      // the Id comes back, nothing queued
     const queued = JSON.parse(String(await backgroundGate({ ...meta, sessionId: 'sess-3' })(created).invoke({ field: 'x' })));
     expect(queued.queued).toBe(true);
     await awaitPendingBackground('sess-3', 5_000);
+    // The inline create above left the conversation with a record: the next
+    // create in the same session (an Event, a Task) goes to the background.
+    const second = JSON.parse(String(await backgroundGate({ ...meta, sessionId: 'sess-3', recordContextId: null })(created).invoke({ field: 'y' })));
+    expect(second.queued).toBe(true);
+    await awaitPendingBackground('sess-3', 5_000);
+    _forgetCreatedAnchors();
   });
 
   it('a failure with no anchored record still leaves a Task', async () => {
