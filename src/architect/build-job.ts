@@ -820,7 +820,8 @@ async function runBuild(job: BuildJob): Promise<void> {
         'sender and loading the record the conversation is anchored to, calling Salesforce tools in the same ' +
         'turn (create, update, Event, Task, Chatter), reading picklist values live, routing between specialists, ' +
         'and the approval gate on writes. The Org Surveyor runs next and verifies objects, fields and tools; ' +
-        'do not ask whether they exist. Ask only what a business owner must decide.',
+        'do not ask whether they exist. Ask only what a business owner must decide — at most three questions. ' +
+        'Decide as a senior Salesforce architect would and do not ask: activities are Task, Event and EmailMessage; access follows the running user\'s Salesforce permissions; users are internal unless the text says customers or partners; read-only unless writes are asked; English; "recent" is the last 7 days by LastModifiedDate unless a period is named; a reply shows the fields the question needs.',
     }),
     r => ({ detail: `${r.capabilities.length} capabilities` }),
     r => { cp.requirement = r; },
