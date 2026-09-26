@@ -79,7 +79,6 @@ import { callModel } from './stream-call';
 import type { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import { persistTrace } from '../trace/writer';
 import { approvalGate, approvalRequiredNames } from './approval-gate';
-import { backgroundToolNames, backgroundGate, awaitPendingBackground, backgroundResultsBlock, backgroundPromptLine, speaksThenActs } from './background-tools';
 import {
   createTurnBudget,
   checkBudget,
@@ -169,10 +168,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
   // The KB and record-context blocks need only what the request carries.
   // Started here they overlap everything below; awaited in buildPrompt.
-  // Writes the last reply queued in the background must land before this
-  // turn reads the record; the wait is bounded and usually zero.
-  const backgroundNames = backgroundToolNames(req.agent);
-  const backgroundAwaitMs = await awaitPendingBackground(req.sessionId);
   const prefetched = prefetchPromptBlocks(req.agent, req.context, req.newUserMessage, req.engineOverride);
 
   const [install, orgConn, memory] = await Promise.all([
@@ -278,14 +273,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
   });
   const approvalNames = approvalRequiredNames(topLevelActions);
-  // A background tool answers {queued:true} at once and runs after the
-  // reply (lc/background-tools.ts). The approval gate wins over it.
-  const bgGate = backgroundGate({
-    orgId: req.context.orgId, sessionId: req.sessionId, agentApiName: req.agent.apiName,
-    recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
-  });
-  const mcpTools = loaded.tools.map(t => (approvalNames.has(t.name) ? gate(t) : backgroundNames.has(t.name) ? bgGate(t) : t));
-  if (backgroundAwaitMs > 0) phase['background.await'] = backgroundAwaitMs;
+  const mcpTools = loaded.tools.map(t => (approvalNames.has(t.name) ? gate(t) : t));
   const prebuiltTools = buildPrebuiltTools(
     { orgId: req.context.orgId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
     graph, aiNode, gate,
@@ -326,11 +314,9 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         'guess, or substitute a different tool or specialist for the one you are missing.'
       : null;
 
-    const backgroundResults = backgroundNames.size > 0 || backgroundAwaitMs > 0 ? await backgroundResultsBlock(req.sessionId) : null;
-    const extraContext = [connectorNotice, backgroundPromptLine(backgroundNames), backgroundResults].filter((x): x is string => !!x && x.trim().length > 0).join('\n\n');
     const promptParts = await buildSystemPromptParts(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
-      extraContext || connectorNotice, prefetched,
+      connectorNotice, prefetched,
     );
     const systemMessage = cacheAwareSystem(aiNode.nodeSubType, promptParts);
     mark('buildPrompt');
@@ -473,20 +459,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
           goto: END,
           update: { messages: [response, ...answers], handoffNodeId: matched.subagentNodeId },
         });
-      }
-      if (calls.length > 0 && speaksThenActs(response, backgroundNames)) {
-        // The reply is in this message and every tool it wants runs in the
-        // background: queue them, answer their calls, and end the turn.
-        // The second model call that used to phrase the reply is not made.
-        const byName = new Map(allRouterTools.map(t => [t.name, t]));
-        const answers = await Promise.all(calls.map(async c => {
-          noteToolCall(budget, c.name, c.args, 'router');
-          const t = byName.get(c.name);
-          const content = t ? String(await t.invoke(c.args as never)) : `Unknown tool ${c.name}`;
-          return new ToolMessage({ content, tool_call_id: c.id ?? '' });
-        }));
-        logger.info({ orgId: req.context.orgId, tools: calls.map(c => c.name) }, 'lc_speak_then_act');
-        return new Command({ goto: END, update: { messages: [response, ...answers] } });
       }
       if (calls.length > 0) {
         const fanout = calls.filter(c => c.name.startsWith('ask_')).length;
@@ -839,12 +811,7 @@ async function runSubagentTurn(
     recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
   });
   const subApprovalNames = approvalRequiredNames(subActions);
-  const subBgNames = backgroundToolNames(req.agent);
-  const subBgGate = backgroundGate({
-    orgId: req.context.orgId, sessionId: req.sessionId, agentApiName: req.agent.apiName,
-    recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
-  });
-  const subMcpTools = loaded.tools.map(t => (subApprovalNames.has(t.name) ? subGate(t) : subBgNames.has(t.name) ? subBgGate(t) : t));
+  const subMcpTools = loaded.tools.map(t => (subApprovalNames.has(t.name) ? subGate(t) : t));
   try {
     // Same inspector knobs, this specialist's own values.
     const subTuning = modelOptionsFromConfig(synthetic.config);

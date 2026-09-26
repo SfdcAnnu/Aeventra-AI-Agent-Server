@@ -49,9 +49,7 @@ const store = new Map<string, Entry>();
 /** Results that mean "this call did not produce an answer" — never cached.
  *  PENDING_APPROVAL/REJECTED/BLOCKED are the approval-gate and argument
  *  pre-flight signals (approval-gate.ts, mcp-tools.ts). */
-// A background tool's {"queued":true,...} names a job, not a result: cached, a
-// repeat of the call would return the old job id and never queue the write.
-const NON_ANSWER_RE = /^\s*(Error\b|REJECTED\b|PENDING_APPROVAL\b|BLOCKED\b|\{\s*"queued"\s*:\s*true)/;
+const NON_ANSWER_RE = /^\s*(Error\b|REJECTED\b|PENDING_APPROVAL\b|BLOCKED\b)/;
 
 /** Stable key regardless of argument key order — the model does not emit
  *  object keys in a fixed order, and `{a,b}` must hit `{b,a}`.

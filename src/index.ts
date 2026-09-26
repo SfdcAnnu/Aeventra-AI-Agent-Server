@@ -1,5 +1,4 @@
 import http from 'node:http';
-import { sweepOrphanedBackgroundRuns } from './lc/background-tools';
 import express from 'express';
 import pinoHttp from 'pino-http';
 import { config } from './config';
@@ -79,9 +78,6 @@ const app = buildApp();
 const server = http.createServer(app);
 attachWsGateway(server);
 server.listen(config.port, () => {
-  // Background writes still queued when the last process died are marked
-  // failed now, so the next turn reports them instead of waiting on them.
-  void sweepOrphanedBackgroundRuns();
   logger.info({ port: config.port, nodeEnv: config.nodeEnv }, 'archon_ai_server_started');
   // Storing credentials in clear text should be a decision somebody made,
   // not something nobody noticed.
