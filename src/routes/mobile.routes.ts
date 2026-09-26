@@ -20,8 +20,45 @@ import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { runChatTurn } from '../lc/graph-runtime';
+import type { Connection } from 'jsforce';
+import type { AgentDefinition } from '../types';
 
 export const mobileRouter = Router();
+
+/** Node provider vocabulary → AiEngineConnection__c.EngineType__c. */
+const ENGINE_FOR_SUBTYPE: Record<string, string> = { gpt4: 'openai', openai: 'openai', claude: 'claude', anthropic: 'claude', gemini: 'gemini' };
+
+interface EngineConn { Id: string; EngineType__c: string; ApiKey__c?: string; Endpoint__c?: string; DefaultModel__c?: string; IsPreferred__c?: boolean; ValidationStatus__c?: string }
+
+/**
+ * The org's AI engine key for this agent's AI node, the way Apex resolves it
+ * for desktop turns (the phone bypasses Apex, so the server does it here):
+ * prefer a connection whose provider matches the agent's node, then a
+ * preferred/validated one, then any active connection with a key.
+ */
+async function resolveEngineOverride(conn: Connection, agent: AgentDefinition) {
+  const aiNode = agent.nodes.find(n => n.nodeType === 'ai');
+  const wantEngine = aiNode ? ENGINE_FOR_SUBTYPE[aiNode.nodeSubType] ?? null : null;
+  const res = await conn.query<EngineConn>(
+    'SELECT Id, EngineType__c, ApiKey__c, Endpoint__c, DefaultModel__c, IsPreferred__c, ValidationStatus__c FROM AiEngineConnection__c WHERE IsActive__c = true',
+  );
+  const usable = res.records.filter(r => r.ApiKey__c);
+  if (usable.length === 0) return null;
+  const pick =
+    (wantEngine && usable.find(r => r.EngineType__c === wantEngine && r.IsPreferred__c && r.ValidationStatus__c === 'Success')) ||
+    (wantEngine && usable.find(r => r.EngineType__c === wantEngine && r.ValidationStatus__c === 'Success')) ||
+    (wantEngine && usable.find(r => r.EngineType__c === wantEngine)) ||
+    usable.find(r => r.IsPreferred__c && r.ValidationStatus__c === 'Success') ||
+    usable[0];
+  const nodeModel = (aiNode?.config as { model?: string } | undefined)?.model;
+  return {
+    engineType: pick.EngineType__c,
+    apiKey: pick.ApiKey__c!,
+    endpoint: pick.Endpoint__c ?? null,
+    defaultModel: nodeModel || pick.DefaultModel__c || null,
+    connectionId: pick.Id,
+  };
+}
 
 // Wide-open CORS: the bearer is the guard, not the origin.
 mobileRouter.use('/api/mobile', (req: Request, res: Response, next: NextFunction) => {
@@ -101,13 +138,21 @@ mobileRouter.post('/api/mobile/chat', mobileAuth, async (req, res) => {
     const agent = await AgentCache.load(orgId, parsed.data.agentApiName, conn);
     if (!agent) { res.status(404).json({ error: 'agent_not_found' }); return; }
     if (agent.status !== 'Active') { res.status(409).json({ error: 'agent_not_active', status: agent.status }); return; }
-    const connectors = await connectorsForAgent(conn, agent, orgId);
+    const [connectors, engineOverride] = await Promise.all([
+      connectorsForAgent(conn, agent, orgId),
+      resolveEngineOverride(conn, agent),
+    ]);
+    if (!engineOverride) {
+      res.status(409).json({ error: 'no_ai_engine', message: 'No active AI engine connection with a key in this org. Add one on the AI Models page.' });
+      return;
+    }
     const result = await runChatTurn({
       agent,
       sessionId: parsed.data.sessionId,
       history: parsed.data.history,
       newUserMessage: parsed.data.newUserMessage,
       connectors,
+      engineOverride,
       context: { orgId, userId: 'mobile-demo', recordContextId: null, recordContextType: null },
     });
     res.json({
