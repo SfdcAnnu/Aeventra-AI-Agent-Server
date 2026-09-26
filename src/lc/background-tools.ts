@@ -136,7 +136,9 @@ async function leaveFollowUpTask(meta: BackgroundMeta, toolName: string, error: 
       ActivityDate: new Date().toISOString().slice(0, 10),
       // No anchored record (a web-chat session): the Task still exists, on
       // the running user, with the session named so a person can find it.
-      ...(meta.recordContextId ? (isPerson ? { WhoId: meta.recordContextId } : { WhatId: meta.recordContextId }) : {}),
+      ...(meta.recordContextId
+        ? (isPerson ? { WhoId: meta.recordContextId } : { WhatId: meta.recordContextId })
+        : createdAnchor.has(meta.sessionId) ? { WhoId: createdAnchor.get(meta.sessionId) } : {}),
     });
   } catch (err) {
     logger.warn({ orgId: meta.orgId, err: err instanceof Error ? err.message : String(err) }, 'background_follow_up_task_failed');
@@ -155,9 +157,19 @@ const CREATE_RE = /create|insert|upsert/i;
  * they were saved. Once the session is anchored to a record, creates of
  * other records (an Event, a Task on the Lead) go to the background.
  */
+// The record a web-chat conversation created for itself. The session row
+// carries no anchor on that path, so the first successful inline create
+// is remembered here: from then on the conversation HAS a record, and the
+// Event and Task it creates later go to the background like any write.
+const createdAnchor = new Map<string, string>();
+const SF_ID_RE = /"(?:id|Id)"\s*:\s*"([a-zA-Z0-9]{15,18})"/;
+
 export function mustRunInline(toolName: string, meta: BackgroundMeta): boolean {
-  return CREATE_RE.test(toolName) && !meta.recordContextId;
+  return CREATE_RE.test(toolName) && !meta.recordContextId && !createdAnchor.has(meta.sessionId);
 }
+
+/** For tests. */
+export function _forgetCreatedAnchors(): void { createdAnchor.clear(); }
 
 export function backgroundGate(meta: BackgroundMeta): (t: StructuredToolInterface) => StructuredToolInterface {
   return (t: StructuredToolInterface) =>
@@ -165,7 +177,10 @@ export function backgroundGate(meta: BackgroundMeta): (t: StructuredToolInterfac
       async (args: unknown) => {
         if (mustRunInline(t.name, meta)) {
           const raw = await t.invoke(args as never);
-          return typeof raw === 'string' ? raw : JSON.stringify(raw);
+          const text = typeof raw === 'string' ? raw : JSON.stringify(raw);
+          const m = SF_ID_RE.exec(text);
+          if (m && !/"success"\s*:\s*false/.test(text)) createdAnchor.set(meta.sessionId, m[1]);
+          return text;
         }
         const { id } = await enqueue(meta, t, args);
         return JSON.stringify({ queued: true, job: id, note: 'This action runs in the background right after your reply. Treat it as done; a later "Background results" note reports the outcome.' });
