@@ -15,6 +15,7 @@ import { kbRouter } from './routes/kb.routes';
 import { runsRouter } from './routes/runs.routes';
 import { wsRouter } from './routes/ws.routes';
 import { platformRouter } from './platform/mcp-endpoint';
+import { mobileRouter } from './routes/mobile.routes';
 import { systemAgentsRouter } from './routes/system-agents.routes';
 import { artifactsRouter } from './routes/artifacts.routes';
 import { adminTracesRouter, adminTracesEnabled } from './routes/admin-traces.routes';
@@ -46,6 +47,7 @@ function buildApp(): express.Express {
   app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
   app.use(wsRouter);         // /api/ws/ticket — sessionAuth-guarded (Apex-only)
   app.use(platformRouter);   // /platform/* — the server's own tools as an MCP endpoint (per-turn token)
+  app.use(mobileRouter);     // /api/mobile/* — sideloaded demo APK (shared demo token)
   app.use(systemAgentsRouter);
   app.use(artifactsRouter);   // /api/artifacts/:id — a stored tool result in full, for the chat UI // /api/system-agents/* — platform-shipped agents written into the org's records
 
