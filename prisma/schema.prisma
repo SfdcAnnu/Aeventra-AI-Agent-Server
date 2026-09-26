@@ -441,3 +441,30 @@ model ArchitectBuild {
   @@index([orgId, startedAt])
   @@index([orgId, status])
 }
+
+/// A write the agent queued instead of waiting for -- see lc/background-tools.ts.
+/// Per session, in order; the next turn waits for this session's pending rows
+/// before it reads the record, and reports finished outcomes to the model once.
+model BackgroundToolRun {
+  id                String    @id @default(uuid())
+  orgId             String
+  sessionId         String
+  agentApiName      String
+  recordContextId   String?
+  recordContextType String?
+  tool              String
+  args              Json
+  /// queued | running | done | failed
+  status            String
+  result            String?
+  error             String?
+  ms                Int?
+  queuedAt          DateTime  @default(now())
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  /// When the outcome was put in front of the model, so it is reported once.
+  reportedAt        DateTime?
+
+  @@index([sessionId, queuedAt])
+  @@index([orgId, status])
+}
