@@ -1213,7 +1213,9 @@ async function runBuild(job: BuildJob): Promise<void> {
           instruction:
             'Judge this DESIGN against the requirement. For every capability, successCriteria entry and ' +
             'explicit rule in the requirement, decide whether some node, edge, tool or approval setting ' +
-            'actually delivers it. List anything the design does NOT deliver in `uncovered`, quoting the ' +
+            'actually delivers it — AND READ EACH AGENT\'S `instructions` TEXT: a calculation, a scoring rule, an order of steps or a wording rule ' +
+            'written there IS covered. Something the agent cannot do because no tool exists for it (web search, an external API) is uncovered; say which tool is missing. ' +
+            'List anything the design does NOT deliver in `uncovered`, quoting the ' +
             'requirement\'s own words. Treat a stated approval or permission rule with no corresponding ' +
             'approval setting as uncovered.\n' +
             'IF THE REQUIREMENT IS A SCRIPT — numbered steps, example wording, a table of statuses — the right tools are not enough. Read the agent\'s own instructions and check they carry the order, what makes each answer valid, what happens when it is not, which field each step writes, and EVERY status transition the client named. A design with the correct tools and no script does not deliver a scripted requirement: report each missing step as uncovered.\n' +
@@ -1480,7 +1482,16 @@ function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<str
     trigger: spec.trigger,
     agents: spec.nodes
       .filter(n => n.type === 'agent' || n.type === 'subagent')
-      .map(n => ({ id: n.id, role: n.type, label: n.label, whenToUse: n.description ?? null })),
+      // THE INSTRUCTIONS ARE WHERE MOST OF A REQUIREMENT LIVES. Without them
+      // the reviewer saw names and one-line descriptions only, and reported
+      // a scoring table, a calculation and a reason rule as "not covered" on
+      // an agent whose instructions carried all three — a false FAIL that
+      // paid for a repair round and left the person unable to trust the
+      // verdict. Clipped so a long script cannot swamp the judgement.
+      .map(n => ({
+        id: n.id, role: n.type, label: n.label, whenToUse: n.description ?? null,
+        instructions: typeof n.instructions === 'string' ? (n.instructions.length > 9000 ? `${n.instructions.slice(0, 9000)} …` : n.instructions) : null,
+      })),
     tools: spec.nodes
       .filter(n => n.type === 'tool')
       .map(n => ({
