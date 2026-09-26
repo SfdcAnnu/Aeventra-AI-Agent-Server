@@ -30,6 +30,12 @@ function postgresUrl(name: string): string {
 
 export const config = {
   port: Number(process.env.PORT ?? 3000),
+  // Mock mobile demo: a single shared bearer that maps to one org, so a
+  // sideloaded demo APK can reach the agents without a Salesforce login.
+  mobile: {
+    demoToken: optional('MOBILE_DEMO_TOKEN'),
+    demoOrgId: optional('MOBILE_DEMO_ORG_ID'),
+  },
   nodeEnv: process.env.NODE_ENV ?? 'development',
   logLevel: process.env.LOG_LEVEL ?? 'info',
 
