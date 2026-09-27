@@ -3,7 +3,7 @@
  *
  *   1. Apex POST /api/setup/authorize-url
  *        body:    { orgId, userId, sfMyDomainUrl, returnUrl }
- *        server:  generate sessionKey + state, create PendingSetup
+ *        server:  generate sessionKey + state + PKCE verifier, create PendingSetup
  *        returns: { authorizeUrl, sessionKey }
  *      → Apex stashes the sessionKey in ArchonInstall__c immediately
  *        (server doesn't recognise it yet — no OrgInstall row exists)
@@ -24,7 +24,7 @@ import crypto from 'node:crypto';
 import { logger } from '../logger';
 import { config } from '../config';
 import { InstallsRepo } from '../db/installs.repo';
-import { exchangeCode, fetchUserInfo, parseUserIdFromIdUrl } from '../oauth/salesforce';
+import { createPkcePair, exchangeCode, fetchUserInfo, parseUserIdFromIdUrl } from '../oauth/salesforce';
 
 export const setupRouter = Router();
 
@@ -58,7 +58,10 @@ setupRouter.post('/api/setup/authorize-url', async (req, res) => {
 
   const state      = crypto.randomUUID();
   const sessionKey = crypto.randomUUID();
-  await InstallsRepo.createPending({ state, orgId, userId, returnUrl, sessionKey });
+  // PKCE: the challenge goes to Salesforce now, the verifier only on the
+  // code exchange, from this row. See oauth/salesforce.ts.
+  const pkce = createPkcePair();
+  await InstallsRepo.createPending({ state, orgId, userId, returnUrl, sessionKey, codeVerifier: pkce.verifier });
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -67,6 +70,8 @@ setupRouter.post('/api/setup/authorize-url', async (req, res) => {
     scope:         'refresh_token api id',
     state,
     prompt:        'login consent',
+    code_challenge:        pkce.challenge,
+    code_challenge_method: 'S256',
   });
   const authorizeUrl = `${sfMyDomainUrl.replace(/\/+$/, '')}/services/oauth2/authorize?${params.toString()}`;
 
@@ -96,7 +101,7 @@ setupRouter.get('/api/setup/callback', async (req, res) => {
   }
 
   try {
-    const tok = await exchangeCode(code);
+    const tok = await exchangeCode(code, undefined, pending.codeVerifier);
     const userInfo = await fetchUserInfo(tok.instance_url, tok.access_token).catch(() => ({}));
 
     const idUserId = parseUserIdFromIdUrl(tok.id);

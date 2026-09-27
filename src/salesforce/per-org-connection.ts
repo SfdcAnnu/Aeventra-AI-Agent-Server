@@ -10,14 +10,20 @@
  *        refresh at most every 20 minutes per org. Without this, a null
  *        expiry meant we NEVER refreshed and turns failed with
  *        INVALID_AUTH_HEADER / INVALID_JWT_FORMAT once the token aged out.
- *   2. REACTIVE — the returned Connection carries oauth2 + refreshToken,
- *      so jsforce transparently refreshes on a 401 mid-request and emits
- *      'refresh', which we persist back to the DB + cache.
+ *   2. REACTIVE — on a 401 mid-request jsforce calls OUR refresh function
+ *      (refreshFn), which goes through the same refreshOrgInstall as the
+ *      proactive path.
+ *
+ * Refresh-token rotation: every refresh may hand back a new refresh token
+ * and revoke the old one. refreshOrgInstall is the ONE place an org's
+ * tokens are refreshed, and it always stores the refresh token it got
+ * back. jsforce's built-in refresh is not used: it keeps the new refresh
+ * token to itself, so the stored one would go stale on the first rotation
+ * and the org would drop off at the next refresh.
  *
  * Perf: install rows come from InstallsCache (30s RAM, promise-dedup).
  */
-import { Connection, OAuth2 } from 'jsforce';
-import { config } from '../config';
+import { Connection } from 'jsforce';
 import { InstallsRepo } from '../db/installs.repo';
 import { InstallsCache } from '../db/installs-cache';
 import { refreshAccessToken } from '../oauth/salesforce';
@@ -38,28 +44,29 @@ export async function getOrgConnection(orgId: string): Promise<Connection> {
   }
   const fresh = await ensureFresh(install);
 
-  const oauth2 = fresh.sfRefreshToken
-    ? new OAuth2({
-        loginUrl:     config.salesforce.loginUrl,
-        clientId:     config.salesforce.mcpClientId || config.salesforce.clientId,
-        clientSecret: config.salesforce.mcpClientSecret || config.salesforce.clientSecret,
-      })
-    : undefined;
-
   const conn = new Connection({
-    oauth2,
     instanceUrl:  fresh.sfInstanceUrl,
     accessToken:  fresh.sfAccessToken,
-    refreshToken: fresh.sfRefreshToken ?? undefined,
     version: '62.0',
-  });
-
-  // Reactive refresh — persist the new token so the NEXT turn (and the
-  // Managed-MCP bearer) uses it too.
-  conn.on('refresh', (newAccessToken: string) => {
-    logger.info({ orgId }, 'org_connection_reactive_refresh');
-    persistRefreshedToken(fresh, newAccessToken).catch(err =>
-      logger.error({ err, orgId }, 'org_connection_refresh_persist_failed'));
+    // Reactive refresh through refreshOrgInstall, so a rotated refresh
+    // token is stored and the NEXT turn (and the Managed-MCP bearer) uses
+    // the new access token too.
+    ...(fresh.sfRefreshToken
+      ? {
+          refreshFn: (_c: unknown, callback: (err: Error | null, accessToken?: string, res?: never) => void) => {
+            logger.info({ orgId }, 'org_connection_reactive_refresh');
+            // Read the row again: another request may have rotated the
+            // token since this connection was built.
+            InstallsCache.findByOrgId(orgId)
+              .then(latest => refreshOrgInstall(latest ?? fresh))
+              .then(updated => callback(null, updated.sfAccessToken))
+              .catch(err => {
+                logger.error({ err, orgId }, 'org_connection_reactive_refresh_failed');
+                callback(err instanceof Error ? err : new Error(String(err)));
+              });
+          },
+        }
+      : {}),
   });
 
   return conn;
@@ -84,6 +91,19 @@ async function ensureFresh(install: OrgInstall): Promise<OrgInstall> {
   }
 
   logger.info({ orgId: install.orgId, hasExpiry }, 'install_token_refreshing');
+  return refreshOrgInstall(install);
+}
+
+/**
+ * Refresh an org's Salesforce tokens and store them — the access token,
+ * and the refresh token Salesforce handed back (rotated or not). The only
+ * place an OrgInstall's tokens are refreshed. Concurrent calls for one
+ * refresh token share a single Salesforce call (oauth/salesforce.ts).
+ */
+export async function refreshOrgInstall(install: OrgInstall): Promise<OrgInstall> {
+  if (!install.sfRefreshToken) {
+    throw new Error('No refresh token on file — admin must re-run Archon Setup.');
+  }
   let tok;
   try {
     tok = await refreshAccessToken(install.sfRefreshToken);
@@ -106,20 +126,4 @@ async function ensureFresh(install: OrgInstall): Promise<OrgInstall> {
   });
   InstallsCache.put(updated);
   return updated;
-}
-
-async function persistRefreshedToken(install: OrgInstall, newAccessToken: string): Promise<void> {
-  lastProactiveRefresh.set(install.orgId, Date.now());
-  const updated = await InstallsRepo.upsert({
-    orgId:          install.orgId,
-    sessionKey:     install.sessionKey,
-    sfAccessToken:  newAccessToken,
-    sfRefreshToken: install.sfRefreshToken,
-    sfInstanceUrl:  install.sfInstanceUrl,
-    sfUserId:       install.sfUserId,
-    sfUserEmail:    install.sfUserEmail,
-    tokenExpiresAt: null,
-    scopes:         install.scopes,
-  });
-  InstallsCache.put(updated);
 }

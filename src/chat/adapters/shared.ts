@@ -56,9 +56,12 @@ export async function freshConnectorToken(row: Connector): Promise<string | null
       return updated.accessToken;
     }
     if (row.providerKey === 'salesforce_mcp') {
+      // Salesforce ROTATES refresh tokens when the External Client App asks
+      // it to — store the one that came back, or the next refresh fails.
       const tok = await refreshSalesforceToken(row.refreshToken);
       const updated = await ConnectorsRepo.updateTokens(row.id, {
         accessToken:    tok.access_token,
+        refreshToken:   tok.refresh_token ?? undefined,
         tokenExpiresAt: tok.expires_in ? new Date(Date.now() + Number(tok.expires_in) * 1000) : null,
         instanceUrl:    tok.instance_url ?? undefined,
       });

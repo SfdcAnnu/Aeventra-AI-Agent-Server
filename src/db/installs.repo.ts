@@ -93,6 +93,7 @@ export const InstallsRepo = {
     userId: string;
     returnUrl: string;
     sessionKey: string;
+    codeVerifier?: string | null;
   }): Promise<PendingSetup> {
     return prisma.pendingSetup.create({ data: args });
   },
