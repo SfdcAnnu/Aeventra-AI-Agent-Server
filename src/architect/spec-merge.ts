@@ -13,6 +13,7 @@
  * is free, deterministic and cannot lose anything it was not told to.
  */
 import type { AgentSpec, SpecEdge, SpecNode } from './spec';
+import type { FlowStep } from './flow';
 
 // ── The Prompt Engineer's answer ─────────────────────────────────────
 
@@ -77,6 +78,8 @@ export interface SpecPatch {
   removeNodeIds?: string[];
   /** The complete edge list, when any edge changes. Omitted = unchanged. */
   edges?: SpecEdge[];
+  /** The complete automation step list, when any step changes. Omitted = unchanged. */
+  flow?: FlowStep[];
 }
 
 export interface SpecPatchResult {
@@ -91,7 +94,7 @@ export interface SpecPatchResult {
 export function isSpecPatch(answer: unknown): answer is SpecPatch {
   const a = answer as Record<string, unknown> | null;
   if (!a || typeof a !== 'object') return false;
-  return Array.isArray(a.nodes) || Array.isArray(a.removeNodeIds) || Array.isArray(a.edges);
+  return Array.isArray(a.nodes) || Array.isArray(a.removeNodeIds) || Array.isArray(a.edges) || Array.isArray(a.flow);
 }
 
 /**
@@ -128,5 +131,6 @@ export function applySpecPatch(spec: AgentSpec, patch: SpecPatch): SpecPatchResu
     next.edges = patch.edges;
     edgesReplaced = true;
   }
+  if (Array.isArray(patch.flow)) next.flow = patch.flow;
   return { spec: next, changedIds, removedIds, edgesReplaced };
 }

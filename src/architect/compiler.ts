@@ -13,6 +13,8 @@
  *   - crud compiles onto the Salesforce Platform MCP standard tools
  *   - approval compiles onto the write tool (approval.required →
  *     requiresApproval — enforced at runtime by approval-as-suspension)
+ *   - automation agents: `flow` compiles into logic/action nodes after the
+ *     trigger, wired on the engine's own ports (see flow.ts)
  *
  * Invariants preserved from the platform:
  *   - every subagent/tool/catalog attachment uses fromPort 'tool' — the
@@ -31,6 +33,7 @@ import {
   type SpecPrerequisite,
   type CapabilityManifest,
 } from './spec';
+import { compileFlow } from './flow';
 
 // ── Model tier resolution (same classification the UI pickers use) ───
 const FAST_RE = /mini|nano|lite|flash|haiku|small/i;
@@ -481,8 +484,32 @@ export async function compileSpec(
       enabled: true,
     });
     const triggerIndex = platformNodes.length - 1;
-    connections.push({ id: `e${triggerIndex}:out-${rootIndex}:in`, fromIndex: triggerIndex, toIndex: rootIndex, fromPort: 'out', toPort: 'in' });
     notes.push('Added a Trigger node so the agent can run from a Flow or Apex — an automation run starts there.');
+
+    if (spec.flow && spec.flow.length > 0) {
+      // THE AUTOMATION STEPS. The trigger enters the first step; the root
+      // AI node runs only where the flow places an agent step, so a flow
+      // that is pure data handling pays for no model call at all.
+      const compiled = compileFlow(spec.flow, [{ from: 'start', port: 'out' }], { x: rootNode.x, y: rootNode.y + 240 });
+      const base = platformNodes.length;
+      compiled.nodes.forEach((f, i) => platformNodes.push({
+        specId: `__flow_${i}__`, name: f.name, nodeType: f.nodeType, nodeSubType: f.nodeSubType, config: f.config, x: f.x, y: f.y, enabled: true,
+      }));
+      const at = (ref: number | 'agent' | 'start'): number => (ref === 'start' ? triggerIndex : ref === 'agent' ? rootIndex : base + ref);
+      for (const e of compiled.edges) {
+        const from = at(e.from);
+        const to = at(e.to);
+        connections.push({ id: `e${from}:${e.port}-${to}:in`, fromIndex: from, toIndex: to, fromPort: e.port, toPort: 'in' });
+      }
+      notes.push(
+        `Built ${compiled.nodes.length} automation step${compiled.nodes.length === 1 ? '' : 's'} after the trigger` +
+          (compiled.usesAgent ? ', with the AI agent running where the flow calls for it.' : '. The flow never calls the AI agent, so runs make no model call; the agent stays for chat.'),
+      );
+    } else {
+      connections.push({ id: `e${triggerIndex}:out-${rootIndex}:in`, fromIndex: triggerIndex, toIndex: rootIndex, fromPort: 'out', toPort: 'in' });
+    }
+  } else if (spec.flow && spec.flow.length > 0) {
+    notes.push('The design carried automation steps, but this is a chat agent, so they were not built. Change it to Automation or Both to use them.');
   }
 
   // ── Status mapping — the activation guard, applied twice ───────────
