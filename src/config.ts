@@ -92,11 +92,11 @@ export const config = {
 
   // Public-facing base URL of THIS server. Used to build the OAuth
   // redirect_uri the External Client App / Auth Provider sends users back to.
-  // Example: https://synapse.example.com  (or ngrok URL for dev)
+  // Example: https://archon.example.com  (or ngrok URL for dev)
   serverPublicUrl: optional('SERVER_PUBLIC_URL', 'http://localhost:3000'),
 
   // POSTGRES OR NOTHING. schema.prisma says provider = "postgresql", so the
-  // old `file:./synapse.db` default could never work — it let the server
+  // old `file:./archon.db` default could never work — it let the server
   // boot without a database and fail later, somewhere with no clue in it.
   // A config that cannot be honoured is refused at startup instead.
   databaseUrl: postgresUrl('DATABASE_URL'),

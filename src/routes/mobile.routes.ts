@@ -17,6 +17,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Connection } from 'jsforce';
 import { config } from '../config';
 import { logger } from '../logger';
+import { pkgConn } from '../salesforce/namespace';
 import { prisma } from '../db/client';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
@@ -217,7 +218,7 @@ interface EngineConn { Id: string; EngineType__c: string; ApiKey__c?: string; En
 async function resolveEngineOverride(conn: Connection, agent: AgentDefinition) {
   const aiNode = agent.nodes.find(n => n.nodeType === 'ai');
   const wantEngine = aiNode ? ENGINE_FOR_SUBTYPE[aiNode.nodeSubType] ?? null : null;
-  const res = await conn.query<EngineConn>(
+  const res = await pkgConn(conn).query<EngineConn>(
     'SELECT Id, EngineType__c, ApiKey__c, Endpoint__c, DefaultModel__c, IsPreferred__c, ValidationStatus__c FROM AiEngineConnection__c WHERE IsActive__c = true',
   );
   const usable = res.records.filter(r => r.ApiKey__c);
@@ -236,7 +237,7 @@ mobileRouter.get('/api/mobile/agents', mobileAuth, async (req, res) => {
   const { orgId } = req.mobile!;
   try {
     const conn = await getOrgConnection(orgId);
-    const q = await conn.query<{ Name: string; ApiName__c: string; Department__c?: string; Status__c: string; Description__c?: string }>(
+    const q = await pkgConn(conn).query<{ Name: string; ApiName__c: string; Department__c?: string; Status__c: string; Description__c?: string }>(
       "SELECT Name, ApiName__c, Department__c, Status__c, Description__c FROM AgentDefinition__c WHERE Status__c = 'Active' ORDER BY Name",
     );
     const agents = q.records.map(r => ({

@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Connection } from 'jsforce';
+import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
 import { buildChatModel } from '../lc/models';
 import { messageText } from '../lc/message-text';
@@ -100,7 +101,7 @@ export interface ArchitectEngine {
 const SUBTYPE_FOR_ENGINE: Record<string, string> = { claude: 'claude', openai: 'gpt4', gemini: 'gemini' };
 
 export async function resolveArchitectEngine(conn: Connection): Promise<ArchitectEngine> {
-  const res = await conn.query<{
+  const res = await pkgConn(conn).query<{
     EngineType__c: string;
     ApiKey__c?: string;
     Endpoint__c?: string;

@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { AgentCache } from '../chat/agent-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
+import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
 import { define, ok, fail } from './tool-kit';
 import { homeStats } from './inspector-tools';
@@ -151,7 +152,7 @@ const updateAgent = define({
       applied.push({ nodeId: node.id, node: node.name, kind: op.kind });
     }
     if (updates.length === 0) return fail(`Nothing applied: ${skipped.join('; ')}`);
-    const res = await conn.sobject('AgentNode__c').update(updates);
+    const res = await pkgConn(conn).sobject('AgentNode__c').update(updates);
     const failed = (Array.isArray(res) ? res : [res]).filter(r => !r.success);
     if (failed.length) return fail(`${failed.length} node update(s) failed: ${JSON.stringify(failed[0])}`);
     AgentCache.invalidate(p.orgId, apiName);
@@ -212,7 +213,7 @@ const addAgentTool = define({
     const rootIndex = ordered.findIndex(n => n.id === root.id);
     const newIndex = ordered.length;
 
-    const created = await conn.sobject('AgentNode__c').insert({
+    const created = await pkgConn(conn).sobject('AgentNode__c').insert({
       AgentDefinition__c: agent.id,
       Name: label.slice(0, 80),
       NodeType__c: 'tool',
@@ -248,7 +249,7 @@ const addAgentTool = define({
       fromPort: 'tool',
       toPort: 'in',
     });
-    await conn.sobject('AgentDefinition__c').update({
+    await pkgConn(conn).sobject('AgentDefinition__c').update({
       Id: agent.id,
       CanvasJson__c: JSON.stringify({ ...canvas, connections }),
     });

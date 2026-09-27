@@ -7,7 +7,7 @@
  *   2. Browser navigates to login.salesforce.com → user consents → SF redirects
  *      to <SERVER_PUBLIC_URL>/api/oauth/callback?code=...&state=...
  *   3. We exchange code for tokens, persist on Connector row, redirect the
- *      browser back to the SF Lightning page with ?synapse_connected=1.
+ *      browser back to the SF Lightning page with ?archon_connected=1.
  */
 import { config } from '../config';
 

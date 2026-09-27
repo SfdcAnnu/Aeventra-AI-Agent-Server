@@ -18,6 +18,7 @@ import { logger } from '../logger';
 import type { ChatHistoryMessage } from './adapters/types';
 import { resolveEngine, type EngineOverride } from './engine-resolver';
 import { getOrgConnection } from '../salesforce/per-org-connection';
+import { pkgConn } from '../salesforce/namespace';
 
 const TITLE_PROMPT =
   'Give a 3-6 word title for this conversation. Plain text only. ' +
@@ -123,7 +124,7 @@ async function generateSessionTitle(params: GenerateTitleParams): Promise<void> 
   if (title.length > 117) title = title.slice(0, 117);
 
   // Persist to Salesforce.
-  const conn = await getOrgConnection(params.orgId);
+  const conn = pkgConn(await getOrgConnection(params.orgId));
   await conn.sobject('ChatSession__c').update({
     Id: params.sessionId,
     Title__c: title,

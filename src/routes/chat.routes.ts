@@ -86,7 +86,7 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
     // 3.4s, and only ~850ms of the gap was network and Apex. preTurn is
     // this route's share; wall clock minus `route` is the transport.
     const routeT0 = Date.now();
-    // Use the per-org tokens captured during Synapse Setup, NOT the bootstrap
+    // Use the per-org tokens captured during Archon Setup, NOT the bootstrap
     // Client Credentials connection (which subscribers may not have enabled).
     const conn = await getOrgConnection(orgId);
     // AgentCache serves the AgentDefinition + nodes from RAM for up to 60s,

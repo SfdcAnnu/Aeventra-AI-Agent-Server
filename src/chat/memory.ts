@@ -23,6 +23,7 @@
  *     full raw history like before" — memory can never break a turn.
  */
 import { getOrgConnection } from '../salesforce/per-org-connection';
+import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
 import type { ChatHistoryMessage, EngineOverrideInput } from './adapters/types';
 
@@ -58,7 +59,7 @@ export async function loadSessionMemory(orgId: string, sessionId: string): Promi
   const cached = memoryCache.get(key);
   if (cached) return cached;
   try {
-    const conn = await getOrgConnection(orgId);
+    const conn = pkgConn(await getOrgConnection(orgId));
     const res = await conn.query<{
       MemorySummary__c: string | null;
       MemoryFactsJson__c: string | null;
@@ -156,7 +157,7 @@ export function maybeUpdateMemoryAsync(args: MemoryUpdateArgs): void {
       coveredCount: newCovered,
     };
     try {
-      const conn = await getOrgConnection(orgId);
+      const conn = pkgConn(await getOrgConnection(orgId));
       await conn.sobject('ChatSession__c').update({
         Id: sessionId,
         MemorySummary__c: updated.summary,

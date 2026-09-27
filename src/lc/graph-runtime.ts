@@ -178,7 +178,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     loadSessionMemory(req.context.orgId, req.sessionId),
   ]);
   if (!install?.sfAccessToken) {
-    throw new Error('Org has no Salesforce tokens. Admin must run Synapse Setup first.');
+    throw new Error('Org has no Salesforce tokens. Admin must run Archon Setup first.');
   }
 
   // Connections the tool nodes name without a catalog node, and the turn

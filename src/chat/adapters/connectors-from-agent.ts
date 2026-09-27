@@ -6,6 +6,7 @@
  * with the org's own connection).
  */
 import type { Connection } from 'jsforce';
+import { pkgConn } from '../../salesforce/namespace';
 import type { AgentDefinition, AgentNode } from '../../types';
 import type { ConnectorInput } from './types';
 
@@ -35,7 +36,7 @@ export async function buildConnectorInputsFromAgent(
   );
   if (catalogNodes.length === 0) return [];
 
-  const res = await conn.query<{ DeveloperName: string; McpServerUrl__c?: string }>(
+  const res = await pkgConn(conn).query<{ DeveloperName: string; McpServerUrl__c?: string }>(
     'SELECT DeveloperName, McpServerUrl__c FROM ConnectorCatalog__mdt',
   );
   const urlByProvider = new Map<string, string>();
@@ -47,7 +48,7 @@ export async function buildConnectorInputsFromAgent(
   // Claude's own "add a custom MCP server" — providerKey is 'custom_<Id>'
   // (see AgentConnectorController.getDirectory), so any catalog node bound
   // to one resolves its URL here exactly like a packaged provider does.
-  const customRes = await conn.query<{ Id: string; McpServerUrl__c?: string }>(
+  const customRes = await pkgConn(conn).query<{ Id: string; McpServerUrl__c?: string }>(
     'SELECT Id, McpServerUrl__c FROM CustomMcpServer__c WHERE IsActive__c = true',
   );
   for (const row of customRes.records) {

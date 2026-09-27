@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import type { Connection } from 'jsforce';
 import { getOrgConnection } from '../salesforce/per-org-connection';
+import { pkgConn } from '../salesforce/namespace';
 import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
 import { logger } from '../logger';
 import { define, ok, fail, clip } from './tool-kit';
@@ -23,7 +24,8 @@ function esc(s: string): string {
 /** The same aggregate the Home page's Apex builds, from Node: per day and
  *  per agent across runs AND chat turns. TurnStatus__c may not exist in an
  *  org yet — the query degrades to "all turns ok" rather than failing. */
-export async function homeStats(conn: Connection, days: number) {
+export async function homeStats(rawConn: Connection, days: number) {
+  const conn = pkgConn(rawConn);
   const start = new Date();
   start.setDate(start.getDate() - (days - 1));
   start.setHours(0, 0, 0, 0);
@@ -88,7 +90,7 @@ const listRuns = define({
   inputSchema: { status: z.string().max(30).optional(), agentApiName: z.string().max(120).optional(), limit: z.number().int().min(1).max(50).default(20) },
   readOnly: true,
   handler: async ({ status, agentApiName, limit }, p) => {
-    const conn = await getOrgConnection(p.orgId);
+    const conn = pkgConn(await getOrgConnection(p.orgId));
     const where = [status ? `Status__c = '${esc(status)}'` : '', agentApiName ? `AgentDefinition__r.ApiName__c = '${esc(agentApiName)}'` : ''].filter(Boolean);
     const r = await conn.query<Record<string, unknown>>(
       `SELECT Id, Name, AgentDefinition__r.Name, AgentDefinition__r.ApiName__c, Status__c, ExecutionMs__c, CorrelationId__c, AgentReason__c, CreatedDate FROM AgentExecution__c${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY CreatedDate DESC LIMIT ${limit}`,
@@ -104,7 +106,7 @@ const listConversations = define({
   inputSchema: { agentApiName: z.string().max(120).optional(), limit: z.number().int().min(1).max(50).default(20) },
   readOnly: true,
   handler: async ({ agentApiName, limit }, p) => {
-    const conn = await getOrgConnection(p.orgId);
+    const conn = pkgConn(await getOrgConnection(p.orgId));
     const where = agentApiName ? ` WHERE AgentDefinition__r.ApiName__c = '${esc(agentApiName)}'` : '';
     const r = await conn.query<Record<string, unknown>>(
       `SELECT Id, Name, Title__c, Status__c, AgentDefinition__r.Name, AgentDefinition__r.ApiName__c, TotalTurns__c, TokensIn__c, TokensOut__c, LastActivityAt__c FROM ChatSession__c${where} ORDER BY LastActivityAt__c DESC NULLS LAST LIMIT ${limit}`,
@@ -120,7 +122,7 @@ const conversationDetail = define({
   inputSchema: { sessionId: z.string().min(15).max(18), limit: z.number().int().min(1).max(60).default(40) },
   readOnly: true,
   handler: async ({ sessionId, limit }, p) => {
-    const conn = await getOrgConnection(p.orgId);
+    const conn = pkgConn(await getOrgConnection(p.orgId));
     const base = `FROM ChatMessage__c WHERE ChatSession__c = '${esc(sessionId)}' ORDER BY SequenceNumber__c ASC LIMIT ${limit}`;
     let r;
     try {
@@ -142,7 +144,7 @@ const listApprovals = define({
     const chat = await ChatApprovalsRepo.listForOrg(p.orgId, { status, limit }).catch(() => []);
     let runs: Array<Record<string, unknown>> = [];
     try {
-      const conn = await getOrgConnection(p.orgId);
+      const conn = pkgConn(await getOrgConnection(p.orgId));
       const r = await conn.query<Record<string, unknown>>(`SELECT Id, Name, Status__c, CreatedDate FROM AgentApproval__c WHERE Status__c = '${esc(status)}' ORDER BY CreatedDate DESC LIMIT ${limit}`);
       runs = r.records.map(x => ({ id: x.Id, name: x.Name, status: x.Status__c, at: x.CreatedDate }));
     } catch (err) {
@@ -159,7 +161,7 @@ const listConnectors = define({
   inputSchema: {},
   readOnly: true,
   handler: async (_a, p) => {
-    const conn = await getOrgConnection(p.orgId);
+    const conn = pkgConn(await getOrgConnection(p.orgId));
     const cat = await conn.query<Record<string, unknown>>('SELECT DeveloperName, DisplayName__c, Category__c, McpServerUrl__c, MapsToCatalogType__c FROM ConnectorCatalog__mdt ORDER BY SortOrder__c');
     let custom: Array<Record<string, unknown>> = [];
     try {
@@ -177,7 +179,7 @@ const connectorTools = define({
   inputSchema: { provider: z.string().min(1).max(120) },
   readOnly: true,
   handler: async ({ provider }, p) => {
-    const conn = await getOrgConnection(p.orgId);
+    const conn = pkgConn(await getOrgConnection(p.orgId));
     let url: string | undefined;
     if (provider.startsWith('custom_')) {
       const r = await conn.query<{ McpServerUrl__c?: string }>(`SELECT McpServerUrl__c FROM CustomMcpServer__c WHERE Id = '${esc(provider.slice(7))}' LIMIT 1`);

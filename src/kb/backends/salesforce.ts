@@ -13,6 +13,7 @@
  * step entirely for this backend.
  */
 import { getOrgConnection } from '../../salesforce/per-org-connection';
+import { pkgConn } from '../../salesforce/namespace';
 import { logger } from '../../logger';
 import type { KbBackend } from './types';
 
@@ -27,7 +28,7 @@ export const salesforceBackend: KbBackend = {
   usesEmbeddings: false,
 
   async indexDocument({ orgId, agentApiName, documentId, documentTitle, chunks }) {
-    const conn = await getOrgConnection(orgId);
+    const conn = pkgConn(await getOrgConnection(orgId));
     const existing = await conn.query<{ Id: string }>(
       `SELECT Id FROM ${OBJECT} WHERE DocumentExternalId__c = '${documentId.replace(/'/g, "\\'")}'`,
     );
@@ -55,7 +56,7 @@ export const salesforceBackend: KbBackend = {
   },
 
   async deleteDocument({ orgId, documentId }) {
-    const conn = await getOrgConnection(orgId);
+    const conn = pkgConn(await getOrgConnection(orgId));
     const existing = await conn.query<{ Id: string }>(
       `SELECT Id FROM ${OBJECT} WHERE DocumentExternalId__c = '${documentId.replace(/'/g, "\\'")}'`,
     );
@@ -65,7 +66,7 @@ export const salesforceBackend: KbBackend = {
   },
 
   async retrieve({ orgId, agentApiName, query, k }) {
-    const conn = await getOrgConnection(orgId);
+    const conn = pkgConn(await getOrgConnection(orgId));
     const term = escapeSosl(query.trim());
     if (!term) return [];
     const agentFilter = agentApiName.replace(/'/g, "\\'");

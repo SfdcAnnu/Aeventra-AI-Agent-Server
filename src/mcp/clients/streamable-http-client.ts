@@ -8,7 +8,7 @@
 import { logger } from '../../logger';
 
 const PROTOCOL_VERSION = '2025-06-18';
-const CLIENT_INFO      = { name: 'synapse-portal', version: '0.1.0' };
+const CLIENT_INFO      = { name: 'archon-portal', version: '0.1.0' };
 
 export interface RemoteTool {
   name:         string;

@@ -10,6 +10,7 @@
  * keep the two in sync if either changes.
  */
 import type { Connection } from 'jsforce';
+import { pkgConn } from './namespace';
 
 export interface GuardrailCheckResult {
   blocked: boolean;
@@ -49,7 +50,7 @@ export async function checkGuardrails(conn: Connection, orgId: string): Promise<
   if (hit && Date.now() - hit.at < SETTINGS_TTL_MS) {
     row = hit.row;
   } else {
-    const rows = await conn.query<GuardrailsRow>(
+    const rows = await pkgConn(conn).query<GuardrailsRow>(
       `SELECT IsEnabled__c, MaxTokensPerDay__c, MaxTokensPerMonth__c FROM AgentGuardrails__c WHERE SetupOwnerId = '${orgId}' LIMIT 1`,
     );
     row = rows.records[0];
@@ -84,7 +85,7 @@ export async function checkGuardrails(conn: Connection, orgId: string): Promise<
 async function sumTokensSince(conn: Connection, since: Date): Promise<number> {
   // SOQL datetime literals are unquoted ISO-8601.
   const literal = since.toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const result = await conn.query<TokenSumRow>(
+  const result = await pkgConn(conn).query<TokenSumRow>(
     `SELECT SUM(TokensIn__c) tIn, SUM(TokensOut__c) tOut FROM ChatMessage__c WHERE Role__c = 'Assistant' AND CreatedDate >= ${literal}`,
   );
   const row = result.records[0];

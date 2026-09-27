@@ -16,6 +16,7 @@ import { InstallsRepo } from '../db/installs.repo';
 import { resolveProviderToken } from '../chat/adapters/shared';
 import { callMcpTool, safeBaseUrl } from '../mcp/mcp-client';
 import { logger } from '../logger';
+import { pkgConn } from '../salesforce/namespace';
 
 interface CallToolConfig {
   provider?: string;         // ConnectorCatalog__mdt DeveloperName, e.g. 'salesforce_mcp'
@@ -71,7 +72,7 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
     }
 
     // Standard MCP tool — resolve the provider's server URL + token, one-shot call.
-    const urlRes = await ctx.conn.query<{ McpServerUrl__c?: string }>(
+    const urlRes = await pkgConn(ctx.conn).query<{ McpServerUrl__c?: string }>(
       `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
     );
     const baseUrl = urlRes.records[0]?.McpServerUrl__c;
