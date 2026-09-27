@@ -1,41 +1,219 @@
 /**
- * /api/mobile — a self-contained surface for the sideloaded demo APK.
+ * /api/mobile — the surface for the Archon mobile app.
  *
- * A phone app outside Salesforce cannot mint the Apex WebSocket ticket or
- * hold a Salesforce session, so this gives it the two things it needs over
- * plain REST: list the org's agents, and take a chat turn — authenticated
- * by ONE shared demo bearer that maps to one org (MOBILE_DEMO_TOKEN /
- * MOBILE_DEMO_ORG_ID). It is a mock-demo door, off unless both are set.
+ * Auth is server-brokered OAuth with PKCE (the platform's own pattern): the
+ * phone never holds the Salesforce client secret or refresh token. The app
+ * opens Salesforce login in the system browser; Salesforce redirects to this
+ * server; the server exchanges the code, stores the user's SF tokens on their
+ * per-user Connector row, and hands the device only a revocable session token
+ * via a custom-scheme deep link. Every turn then runs as that signed-in user.
  *
- * Connectors are derived server-side (same as the WebSocket gateway), so
- * the app sends only an agent and a message. CORS is wide open here because
- * the door is the token, not the origin — a Capacitor WebView's origin is
- * localhost, never a Salesforce domain.
+ * A shared demo token (MOBILE_DEMO_TOKEN → MOBILE_DEMO_ORG_ID) stays as a
+ * fallback for quick demos; it maps to the org with a synthetic user.
  */
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
+import { createHash, randomBytes } from 'node:crypto';
+import type { Connection } from 'jsforce';
 import { config } from '../config';
 import { logger } from '../logger';
+import { prisma } from '../db/client';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { connectorsForAgent } from '../salesforce/agent-connectors';
 import { runChatTurn } from '../lc/graph-runtime';
-import type { Connection } from 'jsforce';
+import { ConnectorsRepo } from '../db/connectors.repo';
+import { fetchUserInfo } from '../oauth/salesforce';
 import type { AgentDefinition } from '../types';
 
 export const mobileRouter = Router();
 
-/** Node provider vocabulary → AiEngineConnection__c.EngineType__c. */
-const ENGINE_FOR_SUBTYPE: Record<string, string> = { gpt4: 'openai', openai: 'openai', claude: 'claude', anthropic: 'claude', gemini: 'gemini' };
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const PENDING_TTL_MS = 10 * 60 * 1000;           // 10 minutes
+const APP_SCHEME = () => (process.env.MOBILE_APP_SCHEME || 'com.archon.demo').replace(/[^a-z0-9.\-_]/gi, '');
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+const b64url = (b: Buffer) => b.toString('base64url');
 
+// ── CORS: the bearer is the guard, not the origin (Capacitor is localhost) ──
+mobileRouter.use('/api/mobile', (req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
+  res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Vary', 'Origin');
+  if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+  next();
+});
+
+// ── resolved caller ─────────────────────────────────────────────────
+interface Caller { orgId: string; userId: string }
+declare global { namespace Express { interface Request { mobile?: Caller } } }
+
+async function mobileAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const header = req.header('authorization') ?? '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token) { res.status(401).json({ error: 'missing_token' }); return; }
+
+  // 1) A real per-user session (server-brokered OAuth).
+  const row = await prisma.mobileSession.findUnique({ where: { id: sha256(token) } }).catch(() => null);
+  if (row) {
+    if (row.expiresAt.getTime() < Date.now()) {
+      await prisma.mobileSession.delete({ where: { id: row.id } }).catch(() => undefined);
+      res.status(401).json({ error: 'session_expired' });
+      return;
+    }
+    prisma.mobileSession.update({ where: { id: row.id }, data: { lastSeenAt: new Date() } }).catch(() => undefined);
+    req.mobile = { orgId: row.orgId, userId: row.userId };
+    next();
+    return;
+  }
+
+  // 2) The shared demo token (fallback).
+  if (config.mobile.demoToken && config.mobile.demoOrgId && token === config.mobile.demoToken) {
+    req.mobile = { orgId: config.mobile.demoOrgId, userId: 'mobile-demo' };
+    next();
+    return;
+  }
+  res.status(401).json({ error: 'invalid_token' });
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  OAuth: log in with Salesforce (server-brokered, PKCE)
+// ════════════════════════════════════════════════════════════════════
+
+/** Normalise the chosen org into a Salesforce login host. */
+function loginHostFor(env: string, myDomain?: string | null): string {
+  const md = (myDomain || '').trim();
+  if (md) {
+    if (/^https?:\/\//i.test(md)) return md.replace(/\/+$/, '');
+    const sub = md.replace(/\.my\.salesforce\.com.*$/i, '').replace(/[^a-z0-9-]/gi, '');
+    if (sub) return `https://${sub}.my.salesforce.com`;
+  }
+  return env === 'sandbox' ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
+}
+
+const startSchema = z.object({
+  env: z.enum(['prod', 'sandbox']).default('prod'),
+  myDomain: z.string().max(200).optional(),
+});
+
+mobileRouter.post('/api/mobile/oauth/start', async (req, res) => {
+  if (!config.salesforce.mcpClientId || !config.salesforce.mcpClientSecret) {
+    res.status(503).json({ error: 'oauth_not_configured', message: 'Salesforce login is not configured on this server.' });
+    return;
+  }
+  const parsed = startSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: 'invalid_body' }); return; }
+
+  const state = b64url(randomBytes(24));
+  const verifier = b64url(randomBytes(48));
+  const challenge = b64url(createHash('sha256').update(verifier).digest());
+  const loginHost = loginHostFor(parsed.data.env, parsed.data.myDomain);
+  await prisma.mobileAuthPending.create({
+    data: { state, verifier, loginHost, expiresAt: new Date(Date.now() + PENDING_TTL_MS) },
+  });
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: config.salesforce.mcpClientId,
+    redirect_uri: `${config.serverPublicUrl.replace(/\/+$/, '')}/api/mobile/oauth/callback`,
+    scope: 'api refresh_token openid',
+    state,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    prompt: 'login',
+  });
+  res.json({ authorizeUrl: `${loginHost}/services/oauth2/authorize?${params.toString()}` });
+});
+
+/** Redirect target for Salesforce — no bearer (the browser carries none). */
+mobileRouter.get('/api/mobile/oauth/callback', async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const scheme = APP_SCHEME();
+  const bounce = (params: Record<string, string>) => {
+    const u = new URLSearchParams(params).toString();
+    res.redirect(`${scheme}://auth?${u}`);
+  };
+  const pending = q.state ? await prisma.mobileAuthPending.findUnique({ where: { state: q.state } }).catch(() => null) : null;
+  if (pending) await prisma.mobileAuthPending.delete({ where: { state: pending.state } }).catch(() => undefined);
+  if (!pending || pending.expiresAt.getTime() < Date.now()) { bounce({ error: 'expired' }); return; }
+  if (q.error || !q.code) { bounce({ error: (q.error_description || q.error || 'denied').slice(0, 80) }); return; }
+
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: q.code,
+      client_id: config.salesforce.mcpClientId,
+      client_secret: config.salesforce.mcpClientSecret,
+      redirect_uri: `${config.serverPublicUrl.replace(/\/+$/, '')}/api/mobile/oauth/callback`,
+      code_verifier: pending.verifier,
+    });
+    const tokRes = await fetch(`${pending.loginHost}/services/oauth2/token`, {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body,
+    });
+    const tok = (await tokRes.json()) as { access_token?: string; refresh_token?: string; instance_url?: string; error_description?: string; error?: string };
+    if (!tokRes.ok || !tok.access_token || !tok.instance_url) {
+      logger.warn({ err: tok.error_description ?? tok.error }, 'mobile_oauth_token_failed');
+      bounce({ error: 'token_exchange_failed' });
+      return;
+    }
+    const who = await fetchUserInfo(tok.instance_url, tok.access_token);
+    if (!who.user_id || !who.organization_id) { bounce({ error: 'identity_failed' }); return; }
+
+    // Store the user's SF tokens on their per-user Connector row, so every
+    // per-user token lookup (chat, MCP) finds them — the same mechanism as
+    // "Connect my Salesforce" on desktop.
+    const connector = await ConnectorsRepo.upsertPending({
+      orgId: who.organization_id, providerKey: 'salesforce_mcp',
+      displayName: who.email || 'Salesforce (mobile)', authType: 'OAuth2', configuredBy: who.user_id,
+    });
+    await ConnectorsRepo.markConnected(connector.id, {
+      accessToken: tok.access_token,
+      refreshToken: tok.refresh_token ?? null,
+      instanceUrl: tok.instance_url,
+      accountEmail: who.email ?? null,
+      externalAccountId: who.user_id,
+      scopes: 'api refresh_token openid',
+    });
+
+    // Mint the device session (only its hash is stored).
+    const sessionToken = b64url(randomBytes(32));
+    await prisma.mobileSession.create({
+      data: { id: sha256(sessionToken), orgId: who.organization_id, userId: who.user_id, username: who.email ?? null, expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
+    });
+    logger.info({ orgId: who.organization_id, userId: who.user_id }, 'mobile_oauth_connected');
+    bounce({ session: sessionToken });
+  } catch (err) {
+    logger.error({ err: (err as Error).message }, 'mobile_oauth_callback_failed');
+    bounce({ error: 'server_error' });
+  }
+});
+
+mobileRouter.post('/api/mobile/logout', mobileAuth, async (req, res) => {
+  const header = req.header('authorization') ?? '';
+  const token = header.slice(7).trim();
+  await prisma.mobileSession.delete({ where: { id: sha256(token) } }).catch(() => undefined);
+  res.json({ ok: true });
+});
+
+/** Who am I — lets the app show the signed-in user and validate its session. */
+mobileRouter.get('/api/mobile/me', mobileAuth, async (req, res) => {
+  const { orgId, userId } = req.mobile!;
+  const demo = userId === 'mobile-demo';
+  let username: string | null = null;
+  if (!demo) {
+    const row = await prisma.mobileSession.findFirst({ where: { orgId, userId }, orderBy: { lastSeenAt: 'desc' } }).catch(() => null);
+    username = row?.username ?? null;
+  }
+  res.json({ orgId, userId, username, demo });
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  Agents + chat (run as the resolved caller)
+// ════════════════════════════════════════════════════════════════════
+
+const ENGINE_FOR_SUBTYPE: Record<string, string> = { gpt4: 'openai', openai: 'openai', claude: 'claude', anthropic: 'claude', gemini: 'gemini' };
 interface EngineConn { Id: string; EngineType__c: string; ApiKey__c?: string; Endpoint__c?: string; DefaultModel__c?: string; IsPreferred__c?: boolean; ValidationStatus__c?: string }
 
-/**
- * The org's AI engine key for this agent's AI node, the way Apex resolves it
- * for desktop turns (the phone bypasses Apex, so the server does it here):
- * prefer a connection whose provider matches the agent's node, then a
- * preferred/validated one, then any active connection with a key.
- */
 async function resolveEngineOverride(conn: Connection, agent: AgentDefinition) {
   const aiNode = agent.nodes.find(n => n.nodeType === 'ai');
   const wantEngine = aiNode ? ENGINE_FOR_SUBTYPE[aiNode.nodeSubType] ?? null : null;
@@ -51,58 +229,20 @@ async function resolveEngineOverride(conn: Connection, agent: AgentDefinition) {
     usable.find(r => r.IsPreferred__c && r.ValidationStatus__c === 'Success') ||
     usable[0];
   const nodeModel = (aiNode?.config as { model?: string } | undefined)?.model;
-  return {
-    engineType: pick.EngineType__c,
-    apiKey: pick.ApiKey__c!,
-    endpoint: pick.Endpoint__c ?? null,
-    defaultModel: nodeModel || pick.DefaultModel__c || null,
-    connectionId: pick.Id,
-  };
+  return { engineType: pick.EngineType__c, apiKey: pick.ApiKey__c!, endpoint: pick.Endpoint__c ?? null, defaultModel: nodeModel || pick.DefaultModel__c || null, connectionId: pick.Id };
 }
 
-// Wide-open CORS: the bearer is the guard, not the origin.
-mobileRouter.use('/api/mobile', (req: Request, res: Response, next: NextFunction) => {
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
-  res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Vary', 'Origin');
-  if (req.method === 'OPTIONS') { res.status(204).end(); return; }
-  next();
-});
-
-function mobileAuth(req: Request, res: Response, next: NextFunction): void {
-  const token = config.mobile.demoToken;
-  const orgId = config.mobile.demoOrgId;
-  if (!token || !orgId) {
-    res.status(503).json({ error: 'mobile_demo_disabled', message: 'The mobile demo door is not configured on this server.' });
-    return;
-  }
-  const header = req.header('authorization') ?? '';
-  const given = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  if (given !== token) {
-    res.status(401).json({ error: 'invalid_demo_token' });
-    return;
-  }
-  req.orgId = orgId;
-  next();
-}
-
-/** The agents to show, copilot first. */
 mobileRouter.get('/api/mobile/agents', mobileAuth, async (req, res) => {
-  const orgId = req.orgId!;
+  const { orgId } = req.mobile!;
   try {
     const conn = await getOrgConnection(orgId);
     const q = await conn.query<{ Name: string; ApiName__c: string; Department__c?: string; Status__c: string; Description__c?: string }>(
       "SELECT Name, ApiName__c, Department__c, Status__c, Description__c FROM AgentDefinition__c WHERE Status__c = 'Active' ORDER BY Name",
     );
     const agents = q.records.map(r => ({
-      name: r.Name,
-      apiName: r.ApiName__c,
-      department: r.Department__c ?? null,
-      description: r.Description__c ?? null,
-      copilot: r.ApiName__c === 'archon_copilot',
+      name: r.Name, apiName: r.ApiName__c, department: r.Department__c ?? null,
+      description: r.Description__c ?? null, copilot: r.ApiName__c === 'archon_copilot',
     }));
-    // Copilot first, then the rest alphabetical (already sorted).
     agents.sort((a, b) => Number(b.copilot) - Number(a.copilot));
     res.json({ agents });
   } catch (err) {
@@ -124,15 +264,10 @@ const turnSchema = z.object({
   })).default([]),
 });
 
-/** One chat turn against a chosen agent. Synchronous, like the desktop REST
- *  path, so it is bounded by the model loop, not a background job. */
 mobileRouter.post('/api/mobile/chat', mobileAuth, async (req, res) => {
-  const orgId = req.orgId!;
+  const { orgId, userId } = req.mobile!;
   const parsed = turnSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
-    return;
-  }
+  if (!parsed.success) { res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() }); return; }
   try {
     const conn = await getOrgConnection(orgId);
     const agent = await AgentCache.load(orgId, parsed.data.agentApiName, conn);
@@ -142,10 +277,7 @@ mobileRouter.post('/api/mobile/chat', mobileAuth, async (req, res) => {
       connectorsForAgent(conn, agent, orgId),
       resolveEngineOverride(conn, agent),
     ]);
-    if (!engineOverride) {
-      res.status(409).json({ error: 'no_ai_engine', message: 'No active AI engine connection with a key in this org. Add one on the AI Models page.' });
-      return;
-    }
+    if (!engineOverride) { res.status(409).json({ error: 'no_ai_engine', message: 'No active AI engine connection with a key in this org.' }); return; }
     const result = await runChatTurn({
       agent,
       sessionId: parsed.data.sessionId,
@@ -153,7 +285,7 @@ mobileRouter.post('/api/mobile/chat', mobileAuth, async (req, res) => {
       newUserMessage: parsed.data.newUserMessage,
       connectors,
       engineOverride,
-      context: { orgId, userId: 'mobile-demo', recordContextId: null, recordContextType: null },
+      context: { orgId, userId, recordContextId: null, recordContextType: null },
     });
     res.json({
       status: result.status,
