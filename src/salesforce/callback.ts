@@ -1,4 +1,6 @@
+import type { Connection } from 'jsforce';
 import { getOrgConnection } from './per-org-connection';
+import { pkgConn } from './namespace';
 import { config } from '../config';
 import { logger } from '../logger';
 import type { GraphResult } from '../types';
@@ -62,11 +64,7 @@ export async function schedulePlatformEvent(args: {
       ExecutionMs__c: args.result.durationMs,
     };
 
-    const sobject = (conn as unknown as {
-      sobject: (name: string) => {
-        upsert: (data: unknown, extIdField: string) => Promise<unknown>;
-      };
-    }).sobject('AgentExecution__c');
+    const sobject = pkgConn(conn).sobject('AgentExecution__c');
 
     // Upsert on the external id, exactly as the handler's
     // `upsert toUpsert CorrelationId__c` did: the queued row written at
@@ -89,17 +87,17 @@ export async function schedulePlatformEvent(args: {
 const AGENT_ID_TTL_MS = 5 * 60_000;
 const agentIdCache = new Map<string, { id: string | null; at: number }>();
 
-async function lookupAgentId(conn: unknown, apiName: string): Promise<string | null> {
+async function lookupAgentId(conn: Connection, apiName: string): Promise<string | null> {
   const key = `${(conn as { instanceUrl?: string }).instanceUrl ?? ''}|${apiName}`;
   const hit = agentIdCache.get(key);
   if (hit && Date.now() - hit.at < AGENT_ID_TTL_MS) return hit.id;
 
-  const q = conn as { query: (soql: string) => Promise<{ records?: Array<{ Id: string }> }> };
+  const q = pkgConn(conn);
   // apiName comes from the agent record this run was dispatched for, not
   // from user input, but it is still quoted into SOQL — so anything that
   // is not a plain API name is refused rather than escaped.
   if (!/^[A-Za-z0-9_]{1,80}$/.test(apiName)) return null;
-  const rows = await q.query(
+  const rows = await q.query<{ Id: string }>(
     `SELECT Id FROM AgentDefinition__c WHERE ApiName__c = '${apiName}' LIMIT 1`,
   );
   const id = rows.records?.[0]?.Id ?? null;

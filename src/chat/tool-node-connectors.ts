@@ -14,6 +14,7 @@
  * exactly as they were.
  */
 import type { Connection } from 'jsforce';
+import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
 import type { AgentDefinition } from '../types';
 import type { ConnectorInput } from './adapters/types';
@@ -39,12 +40,12 @@ export async function providerUrls(conn: Connection, orgKey: string): Promise<Ma
   const hit = urlCache.get(orgKey);
   if (hit && Date.now() - hit.fetchedAt < URL_CACHE_TTL_MS) return hit.urls;
   const urls = new Map<string, string>();
-  const rows = await conn.query<{ DeveloperName: string; McpServerUrl__c?: string | null }>(
+  const rows = await pkgConn(conn).query<{ DeveloperName: string; McpServerUrl__c?: string | null }>(
     'SELECT DeveloperName, McpServerUrl__c FROM ConnectorCatalog__mdt WHERE McpServerUrl__c != null',
   );
   for (const r of rows.records) if (r.McpServerUrl__c) urls.set(r.DeveloperName, r.McpServerUrl__c.replace(/\/+$/, ''));
   try {
-    const custom = await conn.query<{ Id: string; McpServerUrl__c?: string | null }>(
+    const custom = await pkgConn(conn).query<{ Id: string; McpServerUrl__c?: string | null }>(
       'SELECT Id, McpServerUrl__c FROM CustomMcpServer__c WHERE IsActive__c = true',
     );
     for (const r of custom.records) if (r.McpServerUrl__c) urls.set(`custom_${r.Id}`, r.McpServerUrl__c.replace(/\/+$/, ''));

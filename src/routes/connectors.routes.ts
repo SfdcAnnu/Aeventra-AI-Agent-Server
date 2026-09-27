@@ -12,6 +12,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { logger } from '../logger';
+import { pkgConn } from '../salesforce/namespace';
 import { config } from '../config';
 import { sessionAuth } from '../auth/session';
 import { InstallsRepo } from '../db/installs.repo';
@@ -329,12 +330,12 @@ connectorsRouter.post('/api/mcp-tool-schemas', sessionAuth, async (req, res) => 
 
     if (isCustom) {
       const customId = provider.slice('custom_'.length);
-      const customRes = await conn.query<{ McpServerUrl__c?: string }>(
+      const customRes = await pkgConn(conn).query<{ McpServerUrl__c?: string }>(
         `SELECT McpServerUrl__c FROM CustomMcpServer__c WHERE Id = '${customId.replace(/'/g, "\\'")}' AND IsActive__c = true LIMIT 1`,
       );
       baseUrl = customRes.records[0]?.McpServerUrl__c;
     } else {
-      const catalogRes = await conn.query<{ McpServerUrl__c?: string }>(
+      const catalogRes = await pkgConn(conn).query<{ McpServerUrl__c?: string }>(
         `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
       );
       baseUrl = catalogRes.records[0]?.McpServerUrl__c;

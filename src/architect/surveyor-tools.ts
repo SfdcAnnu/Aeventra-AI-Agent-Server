@@ -13,6 +13,7 @@
  * time AND again at compile time, because orgs change between the two.
  */
 import { getOrgConnection } from '../salesforce/per-org-connection';
+import { pkgConn } from '../salesforce/namespace';
 import { ensureMcpServerAwake, resolveProviderToken } from '../chat/adapters/shared';
 import { listToolsCached } from '../mcp/tool-list-cache';
 import { InstallsRepo } from '../db/installs.repo';
@@ -208,7 +209,7 @@ async function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 export async function listMcpToolsLive(orgId: string, opts: ListMcpOptions = {}): Promise<McpToolInventory[]> {
-  const conn = await getOrgConnection(orgId);
+  const conn = pkgConn(await getOrgConnection(orgId));
   const install = await InstallsRepo.findByOrgId(orgId);
 
   const servers: Array<{ provider: string; url: string }> = [];

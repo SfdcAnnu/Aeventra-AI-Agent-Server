@@ -24,6 +24,7 @@
  */
 import type { Connection } from 'jsforce';
 import type { ChatTurnResult, ModelUsage } from '../chat/adapters/types';
+import { pkgConn } from './namespace';
 
 const EXPIRY_HOURS = 24; // matches AgentChatController.EXPIRY_HOURS
 
@@ -35,7 +36,7 @@ export async function createWsChatSession(
 ): Promise<string> {
   const now = new Date();
   const expires = new Date(now.getTime() + EXPIRY_HOURS * 60 * 60 * 1000);
-  const result = await conn.sobject('ChatSession__c').create({
+  const result = await pkgConn(conn).sobject('ChatSession__c').create({
     AgentDefinition__c: agentId,
     User__c: userId,
     Status__c: 'Active',
@@ -89,13 +90,13 @@ export async function resolveWsChatSession(
     // so an id taken off the wire would let any user read any record and
     // skip their own sharing rules. Apex wrote these two fields when the
     // session was created, through that user's permissions.
-    const existing = await conn.query<{ Id: string; RecordContextId__c: string | null; RecordContextType__c: string | null; SenderPhone__c: string | null; Channel__c: string | null }>(
+    const existing = await pkgConn(conn).query<{ Id: string; RecordContextId__c: string | null; RecordContextType__c: string | null; SenderPhone__c: string | null; Channel__c: string | null }>(
       `SELECT Id, RecordContextId__c, RecordContextType__c, SenderPhone__c, Channel__c FROM ChatSession__c ` +
       `WHERE Id = '${candidateSessionId}' AND AgentDefinition__c = '${agentId}' LIMIT 1`,
     );
     const row = existing.records[0];
     if (row) {
-      const lastSeq = await conn.query<{ SequenceNumber__c: number }>(
+      const lastSeq = await pkgConn(conn).query<{ SequenceNumber__c: number }>(
         `SELECT SequenceNumber__c FROM ChatMessage__c WHERE ChatSession__c = '${candidateSessionId}' ORDER BY SequenceNumber__c DESC LIMIT 1`,
       );
       const nextSeq = (lastSeq.records[0]?.SequenceNumber__c ?? 0) + 1;
@@ -175,7 +176,9 @@ async function hasTurnStatusField(conn: Connection): Promise<boolean> {
   const key = conn.instanceUrl ?? 'default';
   let p = turnStatusFieldByOrg.get(key);
   if (!p) {
-    p = conn
+    // Through pkgConn: the describe comes back with the namespace stripped,
+    // so the bare name matches in a managed-package org too.
+    p = pkgConn(conn)
       .sobject('ChatMessage__c')
       .describe()
       .then(d => d.fields.some(f => f.name === 'TurnStatus__c'))
@@ -196,7 +199,7 @@ export async function recordWsTurn(
   // transcript), so the sequence continues from what is really there,
   // never from a counter kept since the socket opened.
   try {
-    const last = await conn.query<{ SequenceNumber__c: number }>(
+    const last = await pkgConn(conn).query<{ SequenceNumber__c: number }>(
       `SELECT SequenceNumber__c FROM ChatMessage__c WHERE ChatSession__c = '${sessionId.replace(/[^A-Za-z0-9]/g, '')}' ORDER BY SequenceNumber__c DESC LIMIT 1`,
     );
     seqStart = Math.max(seqStart, (last.records[0]?.SequenceNumber__c ?? 0) + 1);
@@ -250,12 +253,12 @@ export async function recordWsTurn(
     ApprovalStatus__c: 'NotRequired',
   });
 
-  await conn.sobject('ChatMessage__c').create(rows);
+  await pkgConn(conn).sobject('ChatMessage__c').create(rows);
 
   // Read-then-increment: these are per-session counters with a single
   // writer (one websocket connection), so a read-modify-write is safe and
   // keeps the HTTP and WS paths producing identical session totals.
-  const current = await conn.query<{
+  const current = await pkgConn(conn).query<{
     Title__c: string | null;
     TotalTurns__c: number | null;
     TokensIn__c: number | null;
@@ -269,7 +272,7 @@ export async function recordWsTurn(
   );
   const prev = current.records[0];
   const now = new Date();
-  await conn.sobject('ChatSession__c').update({
+  await pkgConn(conn).sobject('ChatSession__c').update({
     Id: sessionId,
     LastActivityAt__c: now.toISOString(),
     ExpiresAt__c: new Date(now.getTime() + EXPIRY_HOURS * 60 * 60 * 1000).toISOString(),
@@ -324,14 +327,14 @@ export async function recordWsTurnFailure(
       ApprovalStatus__c: 'NotRequired',
     },
   ];
-  await conn.sobject('ChatMessage__c').create(rows);
+  await pkgConn(conn).sobject('ChatMessage__c').create(rows);
 
-  const current = await conn.query<{ Title__c: string | null; TotalTurns__c: number | null }>(
+  const current = await pkgConn(conn).query<{ Title__c: string | null; TotalTurns__c: number | null }>(
     `SELECT Title__c, TotalTurns__c FROM ChatSession__c WHERE Id = '${sessionId}' LIMIT 1`,
   );
   const prev = current.records[0];
   const now = new Date();
-  await conn.sobject('ChatSession__c').update({
+  await pkgConn(conn).sobject('ChatSession__c').update({
     Id: sessionId,
     LastActivityAt__c: now.toISOString(),
     ExpiresAt__c: new Date(now.getTime() + EXPIRY_HOURS * 60 * 60 * 1000).toISOString(),

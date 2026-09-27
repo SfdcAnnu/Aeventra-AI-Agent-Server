@@ -13,6 +13,7 @@
  * the tool nodes (chat/tool-node-connectors.ts) and scoped per node.
  */
 import type { Connection } from 'jsforce';
+import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
 import { AgentCache } from '../chat/agent-cache';
 import { modelForTier, resolveArchitectEngine, type ArchitectEngine } from '../architect/specialists';
@@ -199,7 +200,7 @@ async function hasField(conn: Connection, field: string): Promise<boolean> {
   const key = `${conn.instanceUrl ?? 'default'}::${field}`;
   let p = fieldByOrg.get(key);
   if (!p) {
-    p = conn.sobject('AgentDefinition__c').describe().then(d => d.fields.some(f => f.name === field)).catch(() => false);
+    p = pkgConn(conn).sobject('AgentDefinition__c').describe().then(d => d.fields.some(f => f.name === field)).catch(() => false);
     fieldByOrg.set(key, p);
   }
   return p;
@@ -215,7 +216,7 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
   const withSystemFlag = await hasField(conn, 'IsSystem__c');
   const withStreamFlag = await hasField(conn, 'StreamReplies__c');
 
-  const existing = await conn.query<{ Id: string }>(
+  const existing = await pkgConn(conn).query<{ Id: string }>(
     `SELECT Id FROM AgentDefinition__c WHERE ApiName__c = '${spec.apiName.replace(/'/g, "\\'")}' LIMIT 1`,
   );
   let agentId = existing.records[0]?.Id ?? null;
@@ -240,12 +241,12 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
   };
   let created = false;
   if (agentId) {
-    await conn.sobject('AgentDefinition__c').update({ Id: agentId, ...defFields });
-    const old = await conn.query<{ Id: string }>(`SELECT Id FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`);
-    if (old.records.length > 0) await conn.sobject('AgentNode__c').destroy(old.records.map(r => r.Id));
+    await pkgConn(conn).sobject('AgentDefinition__c').update({ Id: agentId, ...defFields });
+    const old = await pkgConn(conn).query<{ Id: string }>(`SELECT Id FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`);
+    if (old.records.length > 0) await pkgConn(conn).sobject('AgentNode__c').destroy(old.records.map(r => r.Id));
   } else {
     // Status is the org's switch: set once on create, never on re-sync.
-    const ins = await conn.sobject('AgentDefinition__c').insert({ ...defFields, Status__c: 'Active' });
+    const ins = await pkgConn(conn).sobject('AgentDefinition__c').insert({ ...defFields, Status__c: 'Active' });
     if (!ins.success) throw new Error('Could not create the system agent record.');
     agentId = ins.id as string;
     created = true;
@@ -261,7 +262,7 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
     SortOrder__c: i,
     IsEnabled__c: true,
   }));
-  const inserted = await conn.sobject('AgentNode__c').insert(rows);
+  const inserted = await pkgConn(conn).sobject('AgentNode__c').insert(rows);
   const failed = (Array.isArray(inserted) ? inserted : [inserted]).filter(r => !r.success);
   if (failed.length > 0) throw new Error(`Could not create ${failed.length} node record(s) for ${spec.apiName}.`);
 

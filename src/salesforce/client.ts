@@ -3,6 +3,7 @@ import { config } from '../config';
 import { logger } from '../logger';
 import type { AgentDefinition, AgentNode } from '../types';
 import { fnv1a } from '../util/hash';
+import { pkgConn } from './namespace';
 
 /**
  * Salesforce OAuth 2.0 Client Credentials Flow.
@@ -85,7 +86,7 @@ export function clearConnection(): void {
 
 /** Load an agent definition + all nodes from Salesforce by ApiName__c. */
 export async function loadAgentDefinition(apiName: string, connOverride?: Connection): Promise<AgentDefinition | null> {
-  const conn = connOverride ?? await getConnection();
+  const conn = pkgConn(connOverride ?? await getConnection());
 
   const result = await conn.query<{
     Id: string;

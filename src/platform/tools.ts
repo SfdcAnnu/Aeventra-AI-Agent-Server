@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { AgentCache } from '../chat/agent-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
+import { pkgConn } from '../salesforce/namespace';
 import { define, ok, fail, type PlatformTool, type PlatformToolResult } from './tool-kit';
 import { ARCHITECT_TOOLS } from './architect-tools';
 import { INSPECTOR_TOOLS } from './inspector-tools';
@@ -29,7 +30,7 @@ const listAgents = define({
   },
   readOnly: true,
   handler: async ({ nameLike, status, limit }, p) => {
-    const conn = await getOrgConnection(p.orgId);
+    const conn = pkgConn(await getOrgConnection(p.orgId));
     const where: string[] = [];
     if (status) where.push(`Status__c = '${status}'`);
     if (nameLike) {

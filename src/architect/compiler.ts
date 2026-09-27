@@ -24,6 +24,7 @@
  *     produce Status__c 'Active' — belt here, braces in assertActivatable
  */
 import type { Connection } from 'jsforce';
+import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
 import {
   validateSpec,
@@ -66,7 +67,7 @@ export const ENGINE_DEFAULT_MODELS: Record<string, string[]> = {
 };
 
 export async function loadOrgModels(conn: Connection): Promise<OrgModels> {
-  const res = await conn.query<{
+  const res = await pkgConn(conn).query<{
     EngineType__c: string;
     DefaultModel__c?: string;
     AvailableModelsJson__c?: string;
@@ -543,7 +544,7 @@ export async function compileSpec(
   }));
 
   // ── Persist: Archon records ONLY ───────────────────────────────────
-  const conn = opts.conn;
+  const conn = pkgConn(opts.conn);
   const apiName = spec.requirementId && spec.requirementId.startsWith('agent_')
     ? spec.requirementId
     : slugify(spec.name);

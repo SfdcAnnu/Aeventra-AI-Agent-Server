@@ -16,6 +16,7 @@
 import type { Connection } from 'jsforce';
 import type { ChatApproval } from '@prisma/client';
 import { getOrgConnection } from './per-org-connection';
+import { pkgConn } from './namespace';
 import { logger } from '../logger';
 
 const NAME_TTL_MS = 10 * 60 * 1000;
@@ -66,7 +67,8 @@ export async function recordApprovalDecision(
   try {
     const conn = await getOrgConnection(row.orgId);
     const name = (await userDisplayName(conn, deciderUserId)) ?? deciderUserId ?? 'an unknown user';
-    const last = await conn.query<{ SequenceNumber__c: number }>(
+    const pc = pkgConn(conn);
+    const last = await pc.query<{ SequenceNumber__c: number }>(
       `SELECT SequenceNumber__c FROM ChatMessage__c WHERE ChatSession__c = '${row.sessionId.replace(/[^A-Za-z0-9]/g, '')}' ORDER BY SequenceNumber__c DESC LIMIT 1`,
     );
     const seq = (last.records[0]?.SequenceNumber__c ?? 0) + 1;
@@ -87,7 +89,7 @@ export async function recordApprovalDecision(
       status: outcome.status,
       resultText: clip(outcome.resultText, 2000) || null,
     };
-    await conn.sobject('ChatMessage__c').create({
+    await pc.sobject('ChatMessage__c').create({
       ChatSession__c: row.sessionId,
       Role__c: 'System',
       Content__c: content.slice(0, 131_072),
