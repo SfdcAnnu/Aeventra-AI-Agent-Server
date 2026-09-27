@@ -16,11 +16,12 @@ import { pkgConn } from '../salesforce/namespace';
 import { config } from '../config';
 import { sessionAuth } from '../auth/session';
 import { InstallsRepo } from '../db/installs.repo';
+import { refreshOrgInstall } from '../salesforce/per-org-connection';
 import { ConnectorsRepo, PendingOAuthRepo } from '../db/connectors.repo';
 import { ConnectorsCache } from '../db/connectors-cache';
 import { mcpListTools } from '../mcp/clients/streamable-http-client';
 import { listToolsCached, McpRateLimited } from '../mcp/tool-list-cache';
-import { refreshAccessToken, buildAuthorizeUrl, exchangeCode, fetchUserInfo, parseUserIdFromIdUrl, brokerRedirectUri as sfBrokerRedirectUri } from '../oauth/salesforce';
+import { buildAuthorizeUrl, createPkcePair, exchangeCode, fetchUserInfo, parseUserIdFromIdUrl, brokerRedirectUri as sfBrokerRedirectUri } from '../oauth/salesforce';
 import {
   googleConfigured,
   buildGoogleAuthorizeUrl,
@@ -45,13 +46,17 @@ interface OAuthStartCtx {
   /** The org's My Domain (from OrgInstall) — Salesforce authorize must run
    *  there; orgfarm dev orgs error out on generic login.salesforce.com. */
   sfMyDomainUrl?: string | null;
+  /** S256 PKCE challenge, for a provider with `pkce: true`. */
+  codeChallenge?: string | null;
 }
 
 interface OAuthProvider {
   configured: () => boolean;
   notConfiguredHint: string;
   authorizeUrl: (state: string, ctx: OAuthStartCtx) => string;
-  finish: (code: string) => Promise<{
+  /** Sends a PKCE challenge; the verifier comes back to `finish`. */
+  pkce?: boolean;
+  finish: (code: string, codeVerifier?: string | null) => Promise<{
     accessToken: string;
     refreshToken?: string | null;
     tokenExpiresAt?: Date | null;
@@ -73,9 +78,10 @@ const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
     // proven against the same External Client App. Requesting a scope the
     // ECA doesn't have (e.g. chatter_api) fails at the approval step with
     // OAUTH_APPROVAL_ERROR_GENERIC.
-    authorizeUrl: (state, ctx) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'id'], sfBrokerRedirectUri(), ctx.sfMyDomainUrl),
-    finish: async (code) => {
-      const tok = await exchangeCode(code, sfBrokerRedirectUri());
+    pkce: true,
+    authorizeUrl: (state, ctx) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'id'], sfBrokerRedirectUri(), ctx.sfMyDomainUrl, ctx.codeChallenge),
+    finish: async (code, codeVerifier) => {
+      const tok = await exchangeCode(code, sfBrokerRedirectUri(), codeVerifier);
       const who = await fetchUserInfo(tok.instance_url, tok.access_token);
       return {
         accessToken:       tok.access_token,
@@ -157,9 +163,10 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
     });
     ConnectorsCache.invalidateOrg(orgId);
     const state = crypto.randomUUID();
-    await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id });
+    const pkce = provider.pkce ? createPkcePair() : null;
+    await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id, codeVerifier: pkce?.verifier ?? null });
     const install = await InstallsRepo.findByOrgId(orgId);
-    const authorizeUrl = provider.authorizeUrl(state, { sfMyDomainUrl: install?.sfInstanceUrl ?? null });
+    const authorizeUrl = provider.authorizeUrl(state, { sfMyDomainUrl: install?.sfInstanceUrl ?? null, codeChallenge: pkce?.challenge ?? null });
     logger.info({
       orgId, providerKey, userId,
       connectorId: connector.id,
@@ -220,7 +227,7 @@ connectorsRouter.get('/api/connectors/oauth/callback', async (req, res) => {
 
   try {
     logger.info({ providerKey: pending.providerKey }, 'connector_oauth_exchanging_code');
-    const result = await provider.finish(code);
+    const result = await provider.finish(code, pending.codeVerifier);
     await ConnectorsRepo.markConnected(pending.connectorId, result);
     logger.info({
       orgId: pending.orgId,
@@ -584,16 +591,7 @@ async function ensureFreshInstallToken(install: OrgInstall): Promise<OrgInstall>
     throw new Error('SF access token expired and no refresh token on file — admin must re-run Archon Setup.');
   }
   logger.info({ orgId: install.orgId }, 'install_token_refreshing');
-  const tok = await refreshAccessToken(install.sfRefreshToken);
-  return InstallsRepo.upsert({
-    orgId:          install.orgId,
-    sessionKey:     install.sessionKey,
-    sfAccessToken:  tok.access_token,
-    sfRefreshToken: tok.refresh_token ?? install.sfRefreshToken,
-    sfInstanceUrl:  tok.instance_url ?? install.sfInstanceUrl,
-    sfUserId:       install.sfUserId,
-    sfUserEmail:    install.sfUserEmail,
-    tokenExpiresAt: tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
-    scopes:         tok.scope ?? install.scopes,
-  });
+  // The shared routine: stores the rotated refresh token and updates the
+  // install cache, so the next connection is built from the new tokens.
+  return refreshOrgInstall(install);
 }

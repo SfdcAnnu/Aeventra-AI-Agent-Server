@@ -61,6 +61,7 @@ model PendingOAuth {
   displayName       String
   returnUrl         String              // SF Lightning page to send the user back to
   connectorId       String?             // existing connector if this is a re-auth
+  codeVerifier      String?             // PKCE verifier; null for a flow started before PKCE
   createdAt         DateTime  @default(now())
 
   @@index([orgId])
@@ -124,6 +125,7 @@ model PendingSetup {
   userId            String
   returnUrl         String              // Lightning page to send the user back to
   sessionKey        String              // pre-minted; promoted to OrgInstall on success
+  codeVerifier      String?             // PKCE verifier; null for a setup started before PKCE
   createdAt         DateTime  @default(now())
 
   @@index([orgId])

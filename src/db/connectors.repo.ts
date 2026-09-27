@@ -171,9 +171,9 @@ export const ConnectorsRepo = {
 };
 
 export const PendingOAuthRepo = {
-  async create(args: { state: string; orgId: string; providerKey: string; displayName: string; returnUrl: string; connectorId?: string }) {
+  async create(args: { state: string; orgId: string; providerKey: string; displayName: string; returnUrl: string; connectorId?: string; codeVerifier?: string | null }) {
     return prisma.pendingOAuth.create({
-      data: { ...args, connectorId: args.connectorId ?? null },
+      data: { ...args, connectorId: args.connectorId ?? null, codeVerifier: args.codeVerifier ?? null },
     });
   },
 
