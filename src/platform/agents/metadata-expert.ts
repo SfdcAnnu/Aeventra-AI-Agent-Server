@@ -11,6 +11,7 @@
 import type { SystemAgentSpec, SystemToolSpec } from '../system-agents';
 
 const META = 'salesforce_metadata';
+const PLATFORM = 'archon_platform';
 
 const SHARED: SystemToolSpec[] = [
   { name: 'Resolve object', provider: META, toolName: 'resolve_object', description: 'Turn an object label into its API name, with candidates when unsure.' },
@@ -68,7 +69,8 @@ export const metadataExpertAgent: SystemAgentSpec = {
       'LOOK BEFORE YOU ASK. The person does not have API names memorised and may misspell or half-remember one; you have their org. When they name a component loosely ("the onboarding SMS flow on leads"), send the specialist the brief in their words and let it find and read the real thing — do not ask them to spell it correctly. Never ask what reading the org would tell you: which component they mean, how many elements of a kind it has, what a field is called, whether something exists. ' +
       'NEVER RE-ASK WHAT THEY ALREADY SAID. Read the whole conversation first. If they named the object, the component, or what to change — even loosely, even with a typo — that is answered. Asking them to confirm it again reads as not listening. ' +
       'Then ask only the decisions the change genuinely needs and reading cannot settle, in ONE message, at most once per task. A decision is something only they can choose, like which of two matching flows they meant or what a new email should say. Removing or deleting something usually needs no decisions at all — do not recite a checklist of when it fires, where content comes from and who acts for a change that answers none of them. When nothing is genuinely open, do the work and show them the diff instead of asking. ' +
-      'Never claim anything was created or changed until the deploy result says so. Never guess an API name.',
+      'Never claim anything was created or changed until the deploy result says so. Never guess an API name.\n' +
+      'HANDED OVER BY ARCHON. When the conversation came from Archon (the first message says why it is needed), you are doing one job for it. Once that job is deployed, or the person says they are done or want to go back, call return_to_previous_agent with a short summary: what was created or changed (API names), and anything still open. Archon then carries on with the task it was doing.',
     tools: [
       { name: 'Snapshot', provider: META, toolName: 'snapshot', description: 'Store the current XML of the affected components before a change.' },
       { name: 'Deploy change', provider: META, toolName: 'deploy', description: 'Deploy a checked change to the org (snapshot first). Waits for a person\'s approval.', requiresApproval: true },
@@ -76,6 +78,7 @@ export const metadataExpertAgent: SystemAgentSpec = {
       { name: 'Rollback', provider: META, toolName: 'rollback', description: 'Redeploy a snapshot to undo a change. Waits for approval.', requiresApproval: true },
       { name: 'Activate flow', provider: META, toolName: 'activate_flow', description: 'Activate a deployed flow version. Waits for approval.', requiresApproval: true },
       { name: 'Refresh catalog', provider: META, toolName: 'refresh_catalog', description: 'Clear the describe and action caches after changes made outside this agent.' },
+      { name: 'Hand back to Archon', provider: PLATFORM, toolName: 'return_to_previous_agent', description: 'Hand the conversation back to Archon when the job it gave you is done, with a short summary.' },
     ],
   },
   subagents: [

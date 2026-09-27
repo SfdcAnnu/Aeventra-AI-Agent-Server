@@ -45,6 +45,7 @@ import {
   listMcpToolsLive,
   listKnowledgeBases,
   manifestFromInventory,
+  describeObjectCompact,
 } from './surveyor-tools';
 import { validateSpec, normalizePrerequisites, attachOrphansToRoot, type AgentSpec, type SpecNode, type SpecError, type SpecPrerequisite, type CapabilityManifest } from './spec';
 import { estimateSpec } from './estimate';
@@ -52,6 +53,7 @@ import { SpecialistError, type SpecialistUsage } from './specialists';
 import { repairNames, suggestNames, type AvailableNames } from './name-repair';
 import { applyPromptMap, applySpecPatch, isSpecPatch } from './spec-merge';
 import { inventoryFromGather } from './survey-inventory';
+import { mentionedObjects, verifyPrerequisites, settleTrigger } from './org-facts';
 import { compileSpec, CompileError } from './compiler';
 
 // ── Job model ────────────────────────────────────────────────────────
@@ -188,6 +190,9 @@ const CORE_OBJECTS = new Set([
   'Account', 'Contact', 'Lead', 'Opportunity', 'OpportunityLineItem', 'Case', 'Task', 'Event',
   'Product2', 'Pricebook2', 'PricebookEntry', 'Quote', 'QuoteLineItem', 'Contract', 'Order',
   'Campaign', 'CampaignMember', 'User', 'Knowledge__kav', 'ContentDocument', 'EmailMessage',
+  // A Chatter post is a FeedItem record — without it listed, every requirement
+  // that posts to a feed was reported as needing a Flow or Apex to do it.
+  'FeedItem',
 ]);
 
 const jobs = new Map<string, BuildJob>();
@@ -352,8 +357,12 @@ function launch(job: BuildJob): BuildJob {
   for (const [id, j] of jobs) {
     if (j.finishedAt && Date.now() - j.finishedAt > 24 * 3600_000) jobs.delete(id);
   }
-  void saveJob(job);
-  void runBuild(job).catch(err => {
+  // RECORD IT, THEN RUN IT. The build used to start while its row was
+  // still being written; the claim below then found no row, took that for
+  // another instance's claim, and refused with "already running somewhere
+  // else". Every resume after a failure hit it, and the copilot retried
+  // into the same wall.
+  void saveJob(job).then(() => runBuild(job)).catch(err => {
     // A step showing `running` when a build PAUSES never actually ran —
     // the guard fires before the call it was going to pay for — so it goes
     // back to pending and the resume starts in the right place.
@@ -713,10 +722,30 @@ interface MatchResult {
   coverage?: number;
 }
 
+/** THE PERSON'S OWN WORDS ARE THE SOURCE OF TRUTH.
+ *
+ * The Analyst's `requirement` is a summary, and summaries drop exactly the
+ * details an agent needs at run time: "create a Task with subject 'Renew
+ * {Asset Name} by {UsageEndDate}', Priority Normal, due 7 days before…"
+ * came out of it as "create a Task with specified fields", and the agent's
+ * instructions then said "follow the configured rules". Every stage that
+ * writes or judges the design gets the original text beside the summary,
+ * with this rule. */
+const VERBATIM_RULE =
+  'originalRequirement is the person\'s own words and the source of truth; `requirement` is only a summary of it. ' +
+  'Carry every concrete detail in originalRequirement into the design and the agent\'s instructions EXACTLY as written: each rule and the order rules are tried in, ' +
+  'every condition and threshold, every field and the value to set, every record name, subject and message template with its placeholders, ' +
+  'every date calculation, every format for numbers and dates, every duplicate check, every summary layout, and every "never" rule. ' +
+  'Do not paraphrase them, merge them, or replace them with "as specified", "per the requirements" or "the configured rules" — ' +
+  'at run time the agent sees only its own instructions, never the requirement.';
+
+/** What the Analyst summarised, plus the person's own words (with any answers they gave). */
 /** What the Flow Designer is told on a full emit. */
 const DESIGN_INSTRUCTION =
             'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else. Sub-agents need a ' +
             'description (when to use them). Only v1-compilable elements: trigger inbound_message/manual/webhook; ' +
+            'an agent that a Flow, Apex, a button, a record change or a schedule starts is trigger.type "manual" (it runs from a Flow or Apex); ' +
+            '"webhook" only when an outside system calls it over HTTP; ' +
             'node types agent/subagent/tool/tool_catalog; crud create/update/query. Leave instructions minimal — ' +
             'the Prompt Engineer fills them in.\n\n' +
             'EVERY node must be connected: emit an edge from the root to each sub-agent, and from its owner to ' +
@@ -767,7 +796,11 @@ async function claimBuild(job: BuildJob): Promise<boolean> {
       where: { id: job.id, orgId: job.orgId, status: { in: ['queued', 'paused', 'failed'] } },
       data: { status: 'running' },
     });
-    return count === 1;
+    if (count === 1) return true;
+    // No row moved. Either another instance owns it, or the row is not
+    // there yet — a brand-new build is nobody else's, so it is ours.
+    const row = await prisma.architectBuild.findUnique({ where: { id: job.id }, select: { status: true } });
+    return !row;
   } catch (err) {
     // The row may not exist yet: launch() persists in the background, and
     // a brand-new build is queued in memory before its first write lands.
@@ -918,8 +951,17 @@ async function runBuild(job: BuildJob): Promise<void> {
   const mcpToolsByServer = mcp
     .filter(m => m.tools.length > 0)
     .map(m => ({ connector: m.provider, tools: m.tools.map(t => t.name) }));
+  // EVERY OBJECT THE REQUIREMENT NAMES IS SURVEYED, whatever it is. The list
+  // was custom objects plus a fixed core set, so a standard object outside
+  // it (Asset, WorkOrder, Entitlement…) was invisible to every stage after
+  // this one — and the build then told the client the object its
+  // requirement was about did not exist. Named objects go first, so the
+  // size cap can never drop them.
+  const named = new Set(mentionedObjects(objects, `${job.requirement}\n${attachmentText ?? ''}`));
+  const listed = new Set([...CORE_OBJECTS, ...named]);
   const crudObjects = objects
-    .filter(o => (o.custom || CORE_OBJECTS.has(o.name)) && (o.createable || o.updateable || o.queryable))
+    .filter(o => (o.custom || listed.has(o.name)) && (o.createable || o.updateable || o.queryable))
+    .sort((a, b) => Number(named.has(b.name)) - Number(named.has(a.name)))
     .slice(0, 120)
     .map(o => ({
       sobject: o.name,
@@ -934,7 +976,7 @@ async function runBuild(job: BuildJob): Promise<void> {
   // A model used to be paid to re-type this list.
   const surveyed = await stage<Record<string, unknown>>(
     job, 'survey', cp.surveyed,
-    async () => inventoryFromGather({ objects, invocables, mcp, knowledgeBases: kbs, crud: crudObjects, coreObjects: CORE_OBJECTS }),
+    async () => inventoryFromGather({ objects, invocables, mcp, knowledgeBases: kbs, crud: crudObjects, coreObjects: listed, first: named }),
     () => ({ detail: `${found} things found` }),
     v => { cp.surveyed = v; },
   );
@@ -952,6 +994,12 @@ async function runBuild(job: BuildJob): Promise<void> {
       return specialist<MatchResult>(job, engine, 'match_capabilities', {
       capabilities: requirement.capabilities,
       orgInventory: surveyed,
+      note:
+        'The platform\'s Salesforce tools read, create and update ANY object listed in orgInventory with the matching permission — ' +
+        'an object listed there is available; never report it missing. A Chatter post is a FeedItem record created with those tools. ' +
+        'A duplicate check the requirement defines (by name, subject or any field value) is a query before the create, and needs nothing else. ' +
+        'Calculations, date arithmetic, formatting and summaries are done by the agent itself. A gap is only something the org does not have: ' +
+        'an object or field absent from orgInventory, a connector that is not connected, an external system, or data nobody has provided.',
       });
     },
     m => {
@@ -1022,10 +1070,11 @@ async function runBuild(job: BuildJob): Promise<void> {
         narrate(job, 'design', `Patching the design for ${lastErrors.length} validation finding${lastErrors.length === 1 ? '' : 's'} (gpt-5.5, low effort)…`);
         const answer = await specialist<unknown>(job, engine, 'design_flow', {
           requirement,
+          originalRequirement: job.requirement,
           currentDesign: lastDraft,
           validationErrors: withSuggestions(lastErrors, available),
           available,
-          instruction: DESIGN_PATCH_INSTRUCTION,
+          instruction: `${DESIGN_PATCH_INSTRUCTION}\n\n${VERBATIM_RULE}`,
         }, { rawJson: true, maxOutputTokens: 4000, effort: 'low' });
         if (!isSpecPatch(answer)) return null;
         const patched = applySpecPatch(lastDraft!, answer);
@@ -1034,6 +1083,7 @@ async function runBuild(job: BuildJob): Promise<void> {
       };
       const fullDesign = () => specialist<AgentSpec>(job, engine, 'design_flow', {
         requirement,
+        originalRequirement: job.requirement,
         matched: match.matched,
         partial: match.partial,
         missing: match.missing,
@@ -1041,10 +1091,8 @@ async function runBuild(job: BuildJob): Promise<void> {
         // An automation agent is told how to lay out its fixed sequence;
         // a chat agent never sees the step vocabulary it cannot use.
         instruction: requirement.agentType === 'automation' || requirement.agentType === 'both'
-          ? `${DESIGN_INSTRUCTION}
-
-${FLOW_INSTRUCTION}`
-          : DESIGN_INSTRUCTION,
+          ? `${DESIGN_INSTRUCTION}\n\n${FLOW_INSTRUCTION}\n\n${VERBATIM_RULE}`
+          : `${DESIGN_INSTRUCTION}\n\n${VERBATIM_RULE}`,
         ...(feedback ? { previousAttemptErrors: feedback } : {}),
       }, { rawJson: true, maxOutputTokens: 8000 });
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1129,11 +1177,13 @@ ${FLOW_INSTRUCTION}`
       const answer = await specialist<unknown>(job, engine, 'write_prompts', {
         draftSpec: target,
         requirement,
+        originalRequirement: job.requirement,
         writeFor,
         instruction:
           'Return ONE JSON object and nothing else: {"instructions": {"<nodeId>": "<text>"}, "descriptions": {"<nodeId>": "<text>"}}. ' +
           'instructions has one entry for every agent and sub-agent node in writeFor; descriptions has one entry for every ' +
-          'tool node in writeFor. Node ids exactly as in draftSpec. Do not return the spec itself.',
+          'tool node in writeFor. Node ids exactly as in draftSpec. Do not return the spec itself.\n\n' +
+          VERBATIM_RULE + ' The instructions must be complete on their own: write each rule out in full in the agent\'s instructions.',
         ...(promptFeedback ? { previousAttemptErrors: promptFeedback } : {}),
       }, { rawJson: true, maxOutputTokens: 8_000 });
       const merged = applyPromptMap(target, answer);
@@ -1216,8 +1266,12 @@ ${FLOW_INSTRUCTION}`
       const judgeRaw = (): Promise<ReviewResult> =>
         specialist<ReviewResult>(job, engine, 'evaluate', {
           requirement,
+          originalRequirement: job.requirement,
           design: summariseForReview(spec, mcpToolNames),
           instruction:
+            'Judge against originalRequirement, the person\'s own words, not only the summary. Every concrete value, template, threshold, ' +
+            'format, order and "never" rule it states must appear in the design or an agent\'s instructions EXACTLY; one that is missing, ' +
+            'generalised ("as specified", "the configured rules") or reworded is uncovered — quote it. ' +
             'Judge this DESIGN against the requirement. For every capability, successCriteria entry and ' +
             'explicit rule in the requirement, decide whether some node, edge, tool or approval setting ' +
             'actually delivers it — AND READ EACH AGENT\'S `instructions` TEXT: a calculation, a scoring rule, an order of steps or a wording rule ' +
@@ -1263,12 +1317,13 @@ ${FLOW_INSTRUCTION}`
       narrate(job, 'review', `The reviewer found ${findings} thing${findings === 1 ? '' : 's'} missing — repairing the design (gpt-5.5)…`);
       const answer = await specialist<unknown>(job, engine, 'design_flow', {
         requirement,
+        originalRequirement: job.requirement,
         currentDesign: spec,
         available,
         previousAttemptErrors: brief,
         instruction:
           DESIGN_PATCH_INSTRUCTION +
-          ' Keep everything that already works. Set approval.required on any tool the requirement says needs human approval.',
+          ' Keep everything that already works. Set approval.required on any tool the requirement says needs human approval.\n\n' + VERBATIM_RULE,
       }, { rawJson: true, maxOutputTokens: 6000 });
       if (!isSpecPatch(answer)) return { ...first, repaired: false };
       const patched = applySpecPatch(spec, answer);
@@ -1397,6 +1452,25 @@ ${FLOW_INSTRUCTION}`
       );
     }
   }
+  // A SETUP ITEM THE ORG CONTRADICTS IS CLOSED, with the check that settled
+  // it. "Asset is not queryable" and "Account.Description must exist" were
+  // raised as blocking, and the compiler switched off the tools that needed
+  // them — for an object and a field the org had all along.
+  {
+    const fieldCache = new Map<string, Promise<Awaited<ReturnType<typeof describeObjectCompact>> | null>>();
+    const checked = await verifyPrerequisites(prerequisites, objects, async (object, field) => {
+      if (!fieldCache.has(object)) fieldCache.set(object, describeObjectCompact(job.orgId, object, 1000).catch(() => null));
+      const d = await fieldCache.get(object)!;
+      if (!d) return null;
+      const f = d.fields.find(x => x.name.toLowerCase() === field.toLowerCase());
+      return { exists: !!f, updateable: !!f?.updateable };
+    }).catch(() => ({ prerequisites, closed: [] as string[] }));
+    if (checked.closed.length) {
+      prerequisites = checked.prerequisites;
+      wiringNotes.push(`Checked against your org and closed ${checked.closed.length} setup item${checked.closed.length === 1 ? '' : 's'} it already meets: ${checked.closed.join('; ')}.`);
+      logger.info({ jobId: job.id, closed: checked.closed }, 'architect_prereqs_verified_closed');
+    }
+  }
   const blockingCount = prerequisites.filter(p => p.blocking && p.status !== 'done' && p.status !== 'waived').length;
   spec.prerequisites = prerequisites;
   spec.lifecycle = { state: blockingCount > 0 ? 'blocked' : 'draft', version: 1 };
@@ -1418,6 +1492,8 @@ ${FLOW_INSTRUCTION}`
   s.startedAt = compileStartedAt;
   s.detail = 'Compiling and saving the agent in your org…';
   await saveJob(job);
+  const triggerNote = settleTrigger(spec, job.requirement, requirement.trigger);
+  if (triggerNote) wiringNotes.push(triggerNote);
   const finalErrors = validateSpec(spec, manifest);
   if (finalErrors.length > 0) {
     throw new Error('Final spec failed validation:\n' + finalErrors.map(e => `${e.path}: ${e.message}`).join('\n'));

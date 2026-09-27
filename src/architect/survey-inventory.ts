@@ -22,6 +22,8 @@ export interface SurveyInput {
   crud: Array<{ sobject: string; operations: string[] }>;
   /** Standard objects worth listing beside the org's custom ones. */
   coreObjects: Set<string>;
+  /** Objects the requirement names: listed first, so the size cap never drops them. */
+  first?: Set<string>;
   maxObjects?: number;
 }
 
@@ -29,6 +31,7 @@ export function inventoryFromGather(input: SurveyInput): Record<string, unknown>
   const max = input.maxObjects ?? 120;
   const objects = input.objects
     .filter(o => o.custom || input.coreObjects.has(o.name))
+    .sort((a, b) => Number(!!input.first?.has(b.name)) - Number(!!input.first?.has(a.name)))
     .slice(0, max)
     .map(o => ({ name: o.name, label: o.label, custom: o.custom, createable: o.createable, updateable: o.updateable, queryable: o.queryable }));
 
