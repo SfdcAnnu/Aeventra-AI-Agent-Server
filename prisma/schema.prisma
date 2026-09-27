@@ -468,3 +468,26 @@ model BackgroundToolRun {
   @@index([sessionId, queuedAt])
   @@index([orgId, status])
 }
+
+// ── Mobile app auth (server-brokered OAuth + PKCE) ──────────────────
+// The phone never holds the Salesforce secret or refresh token. The user's
+// SF tokens live on their per-user Connector row; the device holds only a
+// revocable session token (stored here by its hash).
+model MobileSession {
+  id         String   @id            // sha256(session token)
+  orgId      String
+  userId     String
+  username   String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+  @@index([orgId, userId])
+}
+
+model MobileAuthPending {
+  state     String   @id
+  verifier  String                   // PKCE code_verifier
+  loginHost String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+}

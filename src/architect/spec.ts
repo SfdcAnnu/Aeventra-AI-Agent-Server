@@ -19,6 +19,7 @@
  * (or with open blocking prerequisites) must never activate — enforced
  * here in assertActivatable AND again in the compiler's status mapping.
  */
+import { validateFlow, type FlowStep } from './flow';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020';
@@ -353,6 +354,10 @@ export interface AgentSpec {
   trigger: { type: string; channel?: string; sobject?: string; condition?: string; cron?: string };
   nodes: SpecNode[];
   edges: SpecEdge[];
+  /** Automation agents only: the fixed sequence a run follows once it
+   *  fires (see flow.ts). Compiled into logic and action nodes after the
+   *  trigger; ignored for a chat-only agent. */
+  flow?: FlowStep[];
   /** Who reads the replies — decided from the requirement, never from the
    *  channel. Drives the customer-facing guardrails; absent means internal. */
   audience?: 'customer' | 'internal';
@@ -743,6 +748,12 @@ export function validateSpecLogic(spec: AgentSpec, manifest?: CapabilityManifest
       }
     }
   }
+
+  // The automation steps, checked against the engine's own limits.
+  // Connector tool names are not held to the manifest here: it lists tools
+  // by name only, and an email step for a connector the client has yet to
+  // authorise is a setup item, not a wrong design.
+  errors.push(...validateFlow(spec.flow));
 
   return errors;
 }

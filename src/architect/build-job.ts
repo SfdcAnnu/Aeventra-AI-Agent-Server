@@ -29,6 +29,7 @@
  *     review is the only one that asks whether it does what the client
  *     said — and anything it finds missing leads the result's notes.
  */
+import { FLOW_INSTRUCTION, describeFlow } from './flow';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db/client';
 import { logger } from '../logger';
@@ -743,7 +744,7 @@ const DESIGN_INSTRUCTION =
 const DESIGN_PATCH_INSTRUCTION =
   'The design in currentDesign failed for exactly the reasons listed. Return ONE JSON object with ONLY what changes: ' +
   '{"nodes": [full node objects to add, or to replace the node with the same id], "removeNodeIds": [ids to drop], ' +
-  '"edges": [the complete edge list, only if an edge changes]}. Do not return unchanged nodes, do not return prose, ' +
+  '"edges": [the complete edge list, only if an edge changes], "flow": [the complete automation step list, only if a step changes]}. Do not return unchanged nodes, do not return prose, ' +
   'and copy every tool and object name character for character from `available`.';
 
 // ── The build ────────────────────────────────────────────────────────
@@ -1037,7 +1038,13 @@ async function runBuild(job: BuildJob): Promise<void> {
         partial: match.partial,
         missing: match.missing,
         available,
-        instruction: DESIGN_INSTRUCTION,
+        // An automation agent is told how to lay out its fixed sequence;
+        // a chat agent never sees the step vocabulary it cannot use.
+        instruction: requirement.agentType === 'automation' || requirement.agentType === 'both'
+          ? `${DESIGN_INSTRUCTION}
+
+${FLOW_INSTRUCTION}`
+          : DESIGN_INSTRUCTION,
         ...(feedback ? { previousAttemptErrors: feedback } : {}),
       }, { rawJson: true, maxOutputTokens: 8000 });
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1514,6 +1521,10 @@ function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<str
     // are sitting right there — which now costs a repair round chasing a
     // gap that does not exist.
     toolsReachableViaCatalog: catalogTools,
+    // An automation agent's fixed sequence, one line per step. Without it
+    // the reviewer would judge a record-processing agent on its root
+    // prompt alone and report the whole procedure as missing.
+    ...(spec.flow?.length ? { automationSteps: describeFlow(spec.flow) } : {}),
     wiring: spec.edges.map(e => ({
       from: byId.get(e.from)?.label ?? e.from,
       to: byId.get(e.to)?.label ?? e.to,

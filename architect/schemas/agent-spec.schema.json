@@ -93,6 +93,21 @@
         "$ref": "#/$defs/edge"
       }
     },
+    "flow": {
+      "type": "array",
+      "description": "Automation agents only: the ordered steps a run follows (see src/architect/flow.ts). Each step is checked in code.",
+      "items": {
+        "type": "object",
+        "required": [
+          "step"
+        ],
+        "properties": {
+          "step": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "knowledge": {
       "type": "array",
       "items": {
