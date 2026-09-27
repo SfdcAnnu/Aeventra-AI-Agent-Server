@@ -25,6 +25,7 @@
  */
 import type { Connection } from 'jsforce';
 import { pkgConn } from '../salesforce/namespace';
+import { fitToLengths } from './org-facts';
 import { logger } from '../logger';
 import {
   validateSpec,
@@ -570,6 +571,22 @@ export async function compileSpec(
     SetupChecklistJson__c: JSON.stringify(checklist),
     Version__c: spec.lifecycle?.version ?? 1,
   };
+
+  // EVERY VALUE FITS ITS FIELD. A description one sentence too long
+  // failed the save after every paid stage had finished — twice. The
+  // lengths come from the org, so this holds for any field, now or later.
+  try {
+    const d = await conn.sobject('AgentDefinition__c').describe();
+    const lengths = new Map<string, number>();
+    for (const f of (d as { fields: Array<{ name: string; type?: string; length?: number }> }).fields) {
+      if ((f.type === 'string' || f.type === 'textarea' || f.type === 'url' || f.type === 'email') && f.length) lengths.set(f.name, f.length);
+    }
+    const clipped = fitToLengths(defFields, lengths);
+    if (clipped.length) notes.push(`Shortened ${clipped.join(', ')} to fit ${clipped.length === 1 ? 'its field' : 'their fields'} in Salesforce.`);
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, 'architect_compile_describe_failed');
+    if (typeof defFields.Description__c === 'string' && defFields.Description__c.length > 255) defFields.Description__c = `${defFields.Description__c.slice(0, 254)}…`;
+  }
 
   if (agentId) {
     await conn.sobject('AgentDefinition__c').update({ Id: agentId, ...defFields });

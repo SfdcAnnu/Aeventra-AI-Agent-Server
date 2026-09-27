@@ -81,7 +81,25 @@ function engineOf(n: SpecNode): string {
   return 'gpt4';
 }
 
-const asStr = (v: unknown, max = 400): string => (v == null ? '' : String(v).slice(0, max));
+/** Readable text from whatever shape a model returned. A matcher that
+ *  answers with nested objects used to reach the card as "[object Object]";
+ *  the text inside is found instead: the usual text keys first, then any
+ *  string values, and a list becomes a joined sentence. */
+const TEXT_KEYS = ['text', 'description', 'detail', 'summary', 'name', 'title', 'label', 'capability', 'reason', 'why', 'need', 'value', 'object', 'field', 'tool'];
+export function textOf(v: unknown, depth = 0): string {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (depth > 3) return '';
+  if (Array.isArray(v)) return v.map(x => textOf(x, depth + 1)).filter(Boolean).join('; ');
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    for (const k of TEXT_KEYS) { const t = textOf(o[k], depth + 1); if (t) return t; }
+    return Object.values(o).map(x => (typeof x === 'string' ? x : '')).filter(Boolean).join(' — ');
+  }
+  return '';
+}
+const asStr = (v: unknown, max = 400): string => textOf(v).slice(0, max);
 
 /** One gap the match stage found, in the words the card shows. The
  *  matcher's items are free-form records; the common keys are read. */
