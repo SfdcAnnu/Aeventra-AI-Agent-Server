@@ -15,6 +15,7 @@ import { define, ok, fail, type PlatformTool, type PlatformToolResult } from './
 import { ARCHITECT_TOOLS } from './architect-tools';
 import { INSPECTOR_TOOLS } from './inspector-tools';
 import { AGENT_TOOLS } from './agent-tools';
+import { ASSIST_TOOLS } from './assist-tools';
 export type { PlatformTool, PlatformToolResult };
 
 const listAgents = define({
@@ -79,7 +80,7 @@ const agentDetails = define({
   },
 });
 
-export const PLATFORM_TOOLS: PlatformTool[] = [listAgents, agentDetails, ...INSPECTOR_TOOLS, ...ARCHITECT_TOOLS, ...AGENT_TOOLS];
+export const PLATFORM_TOOLS: PlatformTool[] = [listAgents, agentDetails, ...INSPECTOR_TOOLS, ...ARCHITECT_TOOLS, ...AGENT_TOOLS, ...ASSIST_TOOLS];
 
 export function platformToolCatalogue(): Array<{ name: string; title: string; description: string; readOnly: boolean }> {
   return PLATFORM_TOOLS.map(t => ({ name: t.name, title: t.title, description: t.description, readOnly: t.readOnly }));
