@@ -5,7 +5,7 @@
  *        body:    { orgId, userId, sfMyDomainUrl, returnUrl }
  *        server:  generate sessionKey + state, create PendingSetup
  *        returns: { authorizeUrl, sessionKey }
- *      → Apex stashes the sessionKey in SynapseInstall__c immediately
+ *      → Apex stashes the sessionKey in ArchonInstall__c immediately
  *        (server doesn't recognise it yet — no OrgInstall row exists)
  *
  *   2. LWC redirects browser to authorizeUrl
@@ -13,9 +13,9 @@
  *   3. Browser → GET /api/setup/callback?code=&state=
  *      → server exchanges code, verifies orgId match, PROMOTES the
  *        PendingSetup.sessionKey into an OrgInstall row, deletes PendingSetup
- *      → server 302s browser back to returnUrl?synapse_setup=1
+ *      → server 302s browser back to returnUrl?archon_setup=1
  *
- *   4. LWC sees ?synapse_setup=1 → refreshes status. From this moment the
+ *   4. the Setup page sees ?archon_setup=1 → refreshes status. From this moment the
  *      sessionKey Apex already has becomes recognised by sessionAuth.
  */
 import { Router } from 'express';
@@ -143,7 +143,10 @@ function finishWithRedirect(
     return res.status(ok ? 200 : 400).send(ok ? 'Setup complete (no returnUrl).' : `Setup failed: ${errorMsg}`);
   }
   const sep = returnUrl.includes('?') ? '&' : '?';
-  const params: string[] = [`synapse_setup=${ok ? 1 : 0}`];
+  // Only the Archon name is sent. The Setup page from the rename onward reads
+  // it; a bundle from before the rename read synapse_setup only, so deploy the
+  // UI bundle to an org before releasing this.
+  const params: string[] = [`archon_setup=${ok ? 1 : 0}`];
   if (!ok && errorMsg) params.push(`error=${encodeURIComponent(errorMsg)}`);
   return res.redirect(`${returnUrl}${sep}${params.join('&')}`);
 }

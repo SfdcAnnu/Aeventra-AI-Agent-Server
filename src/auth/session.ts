@@ -37,7 +37,7 @@ export async function sessionAuth(req: Request, res: Response, next: NextFunctio
     const install = await InstallsRepo.findBySessionKey(sessionKey);
     if (!install) {
       logger.warn({ keyPrefix: sessionKey.slice(0, 8) + '...' }, 'session_unknown');
-      res.status(401).json({ error: 'invalid_session', message: 'Session key not recognised — admin must re-run Synapse Setup.' });
+      res.status(401).json({ error: 'invalid_session', message: 'Session key not recognised — admin must re-run Archon Setup.' });
       return;
     }
     req.orgId = install.orgId;

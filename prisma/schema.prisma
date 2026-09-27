@@ -1,4 +1,4 @@
-// Synapse AI — connector storage
+// Archon — connector storage
 //
 // PostgreSQL (Render free tier in prod; local dev can point at the same
 // instance via the External connection string). SQLite era ended — deploys
@@ -95,7 +95,7 @@ model WsTicket {
   @@index([orgId])
 }
 
-// One row per SF org that has completed the Synapse Setup OAuth dance.
+// One row per SF org that has completed the Archon Setup OAuth dance.
 // `sessionKey` is what every subsequent Apex→server callout uses as Bearer.
 // The SF tokens give the server identity-of-the-org guarantees and can be
 // reused for back-channel callouts into the customer's SF org.

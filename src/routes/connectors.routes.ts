@@ -200,7 +200,7 @@ connectorsRouter.get('/api/connectors/oauth/callback', async (req, res) => {
   const bounce = (ok: boolean) => {
     try {
       const url = new URL(pending.returnUrl);
-      url.searchParams.set('synapse_connected', ok ? '1' : '0');
+      url.searchParams.set('archon_connected', ok ? '1' : '0');
       if (pending.connectorId) url.searchParams.set('connectorId', pending.connectorId);
       res.redirect(url.toString());
     } catch {
@@ -528,7 +528,7 @@ connectorsRouter.get('/api/connectors', sessionAuth, async (req, res) => {
 connectorsRouter.delete('/api/connectors/:id', sessionAuth, async (req, res) => {
   const orgId = req.orgId!;
   if (req.params.id === 'salesforce_mcp') {
-    res.status(400).json({ error: 'cannot_delete_setup_connector', message: 'To disconnect Salesforce MCP, reset Synapse Setup.' });
+    res.status(400).json({ error: 'cannot_delete_setup_connector', message: 'To disconnect Salesforce MCP, reset Archon Setup.' });
     return;
   }
   try {
@@ -558,7 +558,7 @@ connectorsRouter.get('/api/connectors/:id/tools', sessionAuth, async (req, res) 
 
   const install = await InstallsRepo.findByOrgId(orgId);
   if (!install) {
-    res.status(409).json({ error: 'not_configured', message: 'Run Synapse Setup before requesting tools.' });
+    res.status(409).json({ error: 'not_configured', message: 'Run Archon Setup before requesting tools.' });
     return;
   }
 
@@ -581,7 +581,7 @@ async function ensureFreshInstallToken(install: OrgInstall): Promise<OrgInstall>
   const stillValid = !install.tokenExpiresAt || install.tokenExpiresAt.getTime() - Date.now() > skewMs;
   if (stillValid) return install;
   if (!install.sfRefreshToken) {
-    throw new Error('SF access token expired and no refresh token on file — admin must re-run Synapse Setup.');
+    throw new Error('SF access token expired and no refresh token on file — admin must re-run Archon Setup.');
   }
   logger.info({ orgId: install.orgId }, 'install_token_refreshing');
   const tok = await refreshAccessToken(install.sfRefreshToken);
