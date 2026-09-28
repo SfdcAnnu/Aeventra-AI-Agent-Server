@@ -29,7 +29,7 @@
  *     review is the only one that asks whether it does what the client
  *     said — and anything it finds missing leads the result's notes.
  */
-import { FLOW_INSTRUCTION, describeFlow } from './flow';
+import { FLOW_INSTRUCTION, describeFlow, repeatedBranchTails, pruneForSteps, STEPS_ONLY_ROOT } from './flow';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db/client';
 import { logger } from '../logger';
@@ -1184,6 +1184,8 @@ async function runBuild(job: BuildJob): Promise<void> {
             ? `over cost target: $${est.warmUsd.toFixed(3)}/run`
             : `${est.latencySeconds}s per reply`;
         }
+        const stepsNote = pruneForSteps(draft, requirement.agentType);
+        if (stepsNote) wiringNotes.push(stepsNote);
         return draft;
       }
       throw new Error('No valid design produced.');
@@ -1207,6 +1209,9 @@ async function runBuild(job: BuildJob): Promise<void> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const writeFor = target.nodes
         .filter(n => (n.type === 'agent' || n.type === 'subagent' || n.type === 'tool') && (!onlyIds || onlyIds.includes(n.id)))
+        // A steps-only automation's agent node is not called by anything: its
+        // fixed text stays, and no model is paid to write a prompt for it.
+        .filter(n => n.instructions !== STEPS_ONLY_ROOT)
         .map(n => n.id);
       narrate(job, current, `Writing instructions for ${writeFor.length} node${writeFor.length === 1 ? '' : 's'}${attempt > 1 ? `, attempt ${attempt} of 3` : ''} (gpt-4.1)…`);
       const answer = await specialist<unknown>(job, engine, 'write_prompts', {
@@ -1304,6 +1309,10 @@ async function runBuild(job: BuildJob): Promise<void> {
           originalRequirement: job.requirement,
           design: summariseForReview(spec, mcpToolNames),
           instruction:
+            'For an automation\'s steps, check two more things. (1) A step the requirement wants whatever happens ("whatever rule matched", "in every case", "always") ' +
+            'must run on EVERY path, including the one where no rule matches — `structureNotes` points at steps copied into branches; if the requirement wants ' +
+            'that step on every path and one path lacks it, it is uncovered. (2) Steps that do work the requirement did not ask for (looking up a default, an extra ' +
+            'AI call) are a fix: name them. ' +
             'Judge against originalRequirement, the person\'s own words, not only the summary. Every concrete value, template, threshold, ' +
             'format, order and "never" rule it states must appear in the design or an agent\'s instructions EXACTLY; one that is missing, ' +
             'generalised ("as specified", "the configured rules") or reworded is uncovered — quote it. ' +
@@ -1508,6 +1517,23 @@ async function runBuild(job: BuildJob): Promise<void> {
     });
   }
 
+  // A CONNECTOR ONLY THE STEPS USE IS NOT BLOCKING. Its steps skip with a note
+  // until it is connected and the rest of the run works — so the item must
+  // not mark the agent blocked or switch any node off. (The gap writer
+  // raised "Connect Gmail" as blocking and it disabled a tool node.)
+  {
+    const stepConnectors = connectorsUsedBy(spec.flow).filter(c => notConnected.has(c));
+    const toolConnectors = new Set(spec.nodes.filter(n => n.type === 'tool').map(n => n.action?.connector ?? ''));
+    for (const pr of prerequisites) {
+      if (pr.kind !== 'connector' || pr.status === 'done') continue;
+      const hit = stepConnectors.find(c => !toolConnectors.has(c) && new RegExp(`\\b${c}\\b`, 'i').test(`${pr.title} ${pr.why}`));
+      if (!hit) continue;
+      pr.blocking = false;
+      pr.affects = [];
+      if (!/skipped/i.test(pr.why)) pr.why = `${pr.why} Until it is connected, the ${hit} steps are skipped with a note and the rest of the run carries on.`.slice(0, 500);
+    }
+  }
+
   // A SETUP ITEM THE ORG CONTRADICTS IS CLOSED, with the check that settled
   // it. "Asset is not queryable" and "Account.Description must exist" were
   // raised as blocking, and the compiler switched off the tools that needed
@@ -1548,6 +1574,8 @@ async function runBuild(job: BuildJob): Promise<void> {
   s.startedAt = compileStartedAt;
   s.detail = 'Compiling and saving the agent in your org…';
   await saveJob(job);
+  const stepsNoteFinal = pruneForSteps(spec, requirement.agentType);
+  if (stepsNoteFinal) wiringNotes.push(stepsNoteFinal);
   const triggerNote = settleTrigger(spec, job.requirement, requirement.trigger);
   if (triggerNote) wiringNotes.push(triggerNote);
   const finalErrors = validateSpec(spec, manifest);
@@ -1657,6 +1685,7 @@ function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<str
     // the reviewer would judge a record-processing agent on its root
     // prompt alone and report the whole procedure as missing.
     ...(spec.flow?.length ? { automationSteps: describeFlow(spec.flow) } : {}),
+    ...(spec.flow?.length && repeatedBranchTails(spec.flow).length ? { structureNotes: repeatedBranchTails(spec.flow) } : {}),
     wiring: spec.edges.map(e => ({
       from: byId.get(e.from)?.label ?? e.from,
       to: byId.get(e.to)?.label ?? e.to,

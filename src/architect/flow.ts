@@ -23,7 +23,7 @@
  * wait or approval inside a loop, one condition per if, and every
  * {!name.field} must name something defined earlier.
  */
-import type { SpecError } from './spec';
+import type { AgentSpec, SpecError } from './spec';
 import { conditionProblems, tokenPaths } from '../orchestrator/expressions';
 import { parseFieldSpec, type OutputField } from '../orchestrator/structured-output';
 
@@ -426,6 +426,95 @@ export const FLOW_INSTRUCTION =
   '"{!deal.CloseDate} < {!TODAY} AND {!deal.StageName} != \'Closed Lost\'" or "{!DAYS_BETWEEN(deal.LastActivityDate, TODAY)} >= 14 OR {!deal.LastActivityDate} is blank".\n' +
   'DUPLICATES: when the requirement says a re-run must not create something twice, query for it first (query_records with the exact name or subject) ' +
   'and put the create inside an if on {!found.count} == 0.\n' +
+  'SHARED STEPS: a step that happens whatever rule matched ("in every case", "whatever happens", "always") goes ONCE, after the if — steps after an ' +
+  'if run after either branch. Never copy it into each branch: the path where no rule matches would miss it.\n' +
+  'ONLY WHAT IS ASKED: add no step the requirement does not need. Salesforce fills defaults itself (a Task\'s Status, a record\'s Owner); never add a ' +
+  'schema lookup, a query or an AI step just to choose a default value.\n' +
   'RULES: no loop inside a loop. {!recordId} is the record the run started on; get_record it to use its fields. Every {!name...} must be ' +
   'a name an EARLIER step set with `as` (or `name`); {!record.x} is only the raw trigger payload — do not rely on it. The root agent ' +
   'still exists in `nodes`; its instructions say what it decides or writes when an agent step runs.';
+
+/** Whether any step, in any branch, runs the root agent. */
+export function flowUsesAgent(flow: unknown): boolean {
+  if (!Array.isArray(flow)) return false;
+  return (flow as Array<Record<string, unknown>>).some(s =>
+    s?.step === 'agent' || ['then', 'else', 'body', 'approved', 'rejected'].some(k => flowUsesAgent(s?.[k])));
+}
+
+/**
+ * THE SAME STEP COPIED INTO SEVERAL BRANCHES OF ONE RULE CHAIN.
+ *
+ * "Whatever rule matched, set NextStep" came out as the update inside each
+ * rule's branch — three copies, and none on the path where no rule matches,
+ * so those records were never updated. A step that belongs to every outcome
+ * goes once, after the if. This finds the copies (identical last step of
+ * two or more branches of an if / else-if chain) and whether the no-match
+ * path lacks it, for the reviewer to judge against the requirement.
+ */
+export function repeatedBranchTails(flow: unknown, path = 'flow'): string[] {
+  const notes: string[] = [];
+  if (!Array.isArray(flow)) return notes;
+  (flow as Array<Record<string, unknown>>).forEach((s, i) => {
+    const here = `${path}[${i}]`;
+    if (s?.step === 'if') {
+      // Walk the chain: then-branches of each if, and the final else.
+      const branches: unknown[][] = [];
+      let cur: Record<string, unknown> | undefined = s;
+      let finalElse: unknown[] | null = null;
+      while (cur) {
+        branches.push(Array.isArray(cur.then) ? (cur.then as unknown[]) : []);
+        const els: Array<Record<string, unknown>> = Array.isArray(cur.else) ? (cur.else as Array<Record<string, unknown>>) : [];
+        if (els.length === 1 && els[0]?.step === 'if') { cur = els[0]; continue; }
+        finalElse = els.length ? els : null;
+        cur = undefined;
+      }
+      if (finalElse) branches.push(finalElse);
+      // Inside the branches, look for chains of their own; the chain's own
+      // else-ifs are part of this one and are not reported again.
+      branches.forEach((b, bi) => notes.push(...repeatedBranchTails(b, `${here}.branch${bi + 1}`)));
+      const tails = branches.map(b => (b.length ? JSON.stringify(b[b.length - 1]) : null));
+      const counts = new Map<string, number>();
+      for (const t of tails) if (t) counts.set(t, (counts.get(t) ?? 0) + 1);
+      for (const [t, n] of counts) {
+        if (n < 2) continue;
+        const step = JSON.parse(t) as Record<string, unknown>;
+        const what = `${String(step.step)}${step.object ? ` ${String(step.object)}` : ''}`;
+        notes.push(`${here}: the same ${what} step ends ${n} of the ${branches.length} branches of this rule chain` +
+          (finalElse ? '' : ', and the path where no rule matches does not have it') +
+          ' — if it must happen whatever the outcome, it belongs once after the if.');
+      }
+      return;
+    }
+    for (const k of ['body', 'approved', 'rejected']) notes.push(...repeatedBranchTails(s?.[k], `${here}.${k}`));
+  });
+  return notes;
+}
+
+/** The agent node of an automation that runs only as steps. */
+export const STEPS_ONLY_ROOT =
+  'This automation runs as the steps on its canvas. This agent node is its identity for the Flow action and the setup list; none of the steps calls it.';
+
+/**
+ * AN AUTOMATION MADE ONLY OF STEPS DOES NOT NEED AN AGENT WITH TOOLS.
+ *
+ * The designer still drew the root agent with a full tool set and a nine-
+ * thousand-character prompt, none of it reachable from the trigger: the
+ * canvas showed an agent wired to nothing, every build paid to write its
+ * instructions, and a disabled Gmail tool hung off it. When no step runs
+ * the agent, it keeps only its node (the Flow action and the setup list
+ * need one) with a fixed line saying so.
+ */
+export function pruneForSteps(spec: AgentSpec, agentType: string | undefined): string | null {
+  if (agentType !== 'automation' || !Array.isArray(spec?.flow) || spec.flow.length === 0 || flowUsesAgent(spec.flow)) return null;
+  const root = spec.nodes.find(n => n.type === 'agent');
+  if (!root) return null;
+  const dropped = spec.nodes.filter(n => n.type !== 'agent').length;
+  if (dropped === 0 && root.instructions === STEPS_ONLY_ROOT) return null;
+  spec.nodes = [root];
+  spec.edges = [];
+  root.instructions = STEPS_ONLY_ROOT;
+  if (spec.architecture) spec.architecture = { ...spec.architecture, subAgentCount: 0 };
+  return dropped > 0
+    ? `This automation runs entirely as steps, so its agent node carries no tools or helpers (${dropped} left out).`
+    : null;
+}
