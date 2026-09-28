@@ -29,6 +29,7 @@ import type { ExecutionContext } from '../orchestrator/context';
 import { runChatTurn } from './chat-engine';
 import { buildConnectorInputsFromAgent } from './adapters/connectors-from-agent';
 import type { ChatTurnRequest, ChatTurnResult } from './adapters/types';
+import { outputInstruction, type OutputField } from '../orchestrator/structured-output';
 
 const SCORE_TAIL_INSTRUCTION =
   '\n\nWhen you are done, end your reply with exactly one JSON line (no code fence) summarizing the outcome:\n' +
@@ -37,6 +38,9 @@ const SCORE_TAIL_INSTRUCTION =
 export async function runHeadlessAiStep(
   ctx: ExecutionContext,
   aiNode: AgentNode,
+  /** Declared outputs (an AI step): the reply is those fields as JSON, not
+   *  the score tail. `repair` says what the previous answer got wrong. */
+  structured?: { outputs: OutputField[]; repair?: string },
 ): Promise<ChatTurnResult> {
   const connectors = await buildConnectorInputsFromAgent(ctx.agent, aiNode, ctx.conn);
 
@@ -47,7 +51,9 @@ export async function runHeadlessAiStep(
     (instruction
       ? `${instruction}\n\nContext:\n${contextBlock}`
       : `Decide what to do based on the context.\n\nContext:\n${contextBlock}`) +
-    SCORE_TAIL_INSTRUCTION;
+    (structured?.outputs.length
+      ? outputInstruction(structured.outputs) + (structured.repair ? `\n\nYOUR PREVIOUS ANSWER DID NOT FIT: ${structured.repair}. Answer again with only the JSON object.` : '')
+      : SCORE_TAIL_INSTRUCTION);
 
   const req: ChatTurnRequest = {
     agent: ctx.agent,

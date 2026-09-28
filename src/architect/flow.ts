@@ -25,9 +25,12 @@
  */
 import type { SpecError } from './spec';
 import { conditionProblems, tokenPaths } from '../orchestrator/expressions';
+import { parseFieldSpec, type OutputField } from '../orchestrator/structured-output';
 
 export type FlowStep =
   | { step: 'agent' }
+  /** An AI step: its own prompt, and named outputs later steps read as {!as.field}. */
+  | { step: 'ai'; as: string; prompt: string; outputs: Record<string, string>; tier?: 'small' | 'medium' | 'large' }
   | { step: 'query_records'; soql: string; as?: string }
   | { step: 'get_record'; object: string; id?: string; fields?: string; as?: string }
   | { step: 'create_record'; object: string; fields: Record<string, string>; as?: string }
@@ -42,7 +45,7 @@ export type FlowStep =
   | { step: 'loop'; over: string; as?: string; max?: number; body: FlowStep[] };
 
 export const FLOW_STEP_KINDS = [
-  'agent', 'query_records', 'get_record', 'create_record', 'update_record', 'create_task',
+  'agent', 'ai', 'query_records', 'get_record', 'create_record', 'update_record', 'create_task',
   'post_chatter', 'call_tool', 'set_variable', 'wait', 'approval', 'if', 'loop',
 ] as const;
 
@@ -67,10 +70,17 @@ function tokenRoots(text: string): string[] {
   return out;
 }
 
+/** Every full path (root.field) a string's {! … } tokens read. */
+function tokenFullPaths(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(TOKEN_RE)) out.push(...tokenPaths(m[1]));
+  return out;
+}
+
 /** Every text value a step reads, for the reference check. */
 function textsOf(s: Record<string, unknown>): string[] {
   const out: string[] = [];
-  for (const k of ['soql', 'subject', 'message', 'value', 'comments', 'condition', 'over', 'id']) if (typeof s[k] === 'string') out.push(s[k] as string);
+  for (const k of ['soql', 'subject', 'message', 'value', 'comments', 'condition', 'over', 'id', 'prompt']) if (typeof s[k] === 'string') out.push(s[k] as string);
   for (const k of ['fields', 'params']) {
     const m = s[k];
     if (m && typeof m === 'object' && !Array.isArray(m)) for (const v of Object.values(m)) if (typeof v === 'string') out.push(v);
@@ -92,6 +102,8 @@ export function validateFlow(flow: unknown, hasConnector?: (connector: string, t
   let agentSteps = 0;
   // Names defined so far, in order: a step may only read what ran before it.
   const defined = new Set<string>(BUILT_IN_ROOTS);
+  // An AI step's name → the outputs it declared.
+  const fieldsOf = new Map<string, Set<string>>();
   // The ai alias exists once the agent step has run.
   const err = (path: string, message: string) => errors.push({ path, message });
 
@@ -109,7 +121,8 @@ export function validateFlow(flow: unknown, hasConnector?: (connector: string, t
         return;
       }
 
-      // References: only to names defined earlier in this path.
+      // References: only to names defined earlier in this path — and to an
+      // AI step, only to the outputs it declared.
       for (const t of textsOf(s)) {
         for (const root of tokenRoots(t)) {
           if (root === 'ai' && agentSteps === 0) {
@@ -117,6 +130,11 @@ export function validateFlow(flow: unknown, hasConnector?: (connector: string, t
           } else if (root !== 'ai' && !scope.has(root)) {
             err(p, `{!${root}...} does not name anything defined earlier — name the step that produces it with \`as\` (or \`name\` for set_variable), or use {!recordId}`);
           }
+        }
+        for (const path of tokenFullPaths(t)) {
+          const [root, field] = path.split('.');
+          const known = fieldsOf.get(root);
+          if (known && field && !known.has(field)) err(p, `{!${root}.${field}} — the AI step "${root}" has no output "${field}"; its outputs are ${[...known].filter(f => f !== 'finalText').join(', ')}`);
         }
       }
 
@@ -138,6 +156,19 @@ export function validateFlow(flow: unknown, hasConnector?: (connector: string, t
       };
 
       switch (kind) {
+        case 'ai': {
+          need('prompt', 'a prompt: what to read (with {! } values) and what to decide or write');
+          nameIt('as', true);
+          const outs = s.outputs && typeof s.outputs === 'object' && !Array.isArray(s.outputs) ? Object.entries(s.outputs as Record<string, unknown>) : [];
+          if (outs.length === 0) err(`${p}/outputs`, 'an AI step needs `outputs`: each field it returns, e.g. {"mood":"choice: interested | cooling off | blocked","reason":"text: one sentence"}');
+          const names = new Set<string>(['finalText']);
+          for (const [k, v] of outs) {
+            const f = parseFieldSpec(k, String(v ?? ''));
+            if (typeof f === 'string') err(`${p}/outputs/${k}`, f); else names.add(f.name);
+          }
+          if (str(s.as)) fieldsOf.set(str(s.as), names);
+          break;
+        }
         case 'agent':
           agentSteps++;
           if (agentSteps > 1) err(p, 'the agent step can appear only once — it is the one AI node');
@@ -229,7 +260,7 @@ export function validateFlow(flow: unknown, hasConnector?: (connector: string, t
 
 export interface FlowNodeOut {
   name: string;
-  nodeType: 'logic' | 'action';
+  nodeType: 'logic' | 'action' | 'ai';
   nodeSubType: string;
   config: Record<string, unknown>;
   x: number;
@@ -251,6 +282,13 @@ function nodeFor(s: FlowStep): Omit<FlowNodeOut, 'x' | 'y'> | null {
   const label = (fallback: string) => ('label' in s && s.label ? s.label : fallback);
   switch (s.step) {
     case 'agent': return null;
+    case 'ai': {
+      const outputs: OutputField[] = [];
+      for (const [k, v] of Object.entries(s.outputs ?? {})) { const f = parseFieldSpec(k, String(v)); if (typeof f !== 'string') outputs.push(f); }
+      // The compiler fills in the engine and model; a step is marked so the
+      // canvas draws it as a step, not as the agent's root.
+      return { name: `AI: ${s.as}`, nodeType: 'ai', nodeSubType: 'gpt4', config: { step: true, instruction: s.prompt, outputs, outputVariable: s.as, tier: s.tier ?? 'medium' } };
+    }
     case 'query_records': return { name: as ? `Query ${as}` : LABELS.query_records, nodeType: 'action', nodeSubType: 'query_records', config: { soql: s.soql, outputVariable: as } };
     case 'get_record': return { name: `Get ${s.object}`, nodeType: 'action', nodeSubType: 'get_record', config: { objectType: s.object, ...(s.id ? { recordId: s.id } : {}), fields: s.fields || 'Id,Name', outputVariable: as } };
     case 'create_record': return { name: `Create ${s.object}`, nodeType: 'action', nodeSubType: 'create_record', config: { objectType: s.object, fieldMappings: JSON.stringify(s.fields, null, 2), outputVariable: as } };
@@ -330,6 +368,7 @@ export function describeFlow(flow: FlowStep[] | undefined, depth = 0): string[] 
   for (const s of flow ?? []) {
     switch (s.step) {
       case 'agent': out.push(`${pad}- AI agent step (its answer is {!ai.finalText})`); break;
+      case 'ai': out.push(`${pad}- AI step → ${s.as} {${Object.entries(s.outputs ?? {}).map(([k, v]) => `${k}: ${v}`).join('; ')}}: ${s.prompt}`); break;
       case 'query_records': out.push(`${pad}- Query → ${s.as}: ${s.soql}`); break;
       case 'get_record': out.push(`${pad}- Get ${s.object} (${s.fields || 'Id,Name'}) → ${s.as}`); break;
       case 'create_record': out.push(`${pad}- Create ${s.object} ${JSON.stringify(s.fields)}`); break;
@@ -358,9 +397,11 @@ export const FLOW_INSTRUCTION =
   'THIS IS AN AUTOMATION AGENT, AND ITS WORK GOES ON THE CANVAS AS STEPS. Something fires it and a fixed sequence follows. Put that ' +
   'sequence in `flow` (top level, beside nodes and edges): an ordered list of steps, each {"step": kind, ...}, with the branches of ' +
   'if / loop / approval nested inside them. EVERY read, loop, rule, branch, calculation, record write, post and email the requirement ' +
-  'states is a step — the person reviews and edits them on the canvas, and the engine runs them the same way every time. The agent step ' +
-  'is ONLY for what needs judgement or free writing (a score, a suggestion, an email body in its own words); leave it out when the work ' +
-  'is pure data handling. A design whose logic lives in the agent\'s instructions instead of steps is wrong for an automation agent.\n' +
+  'states is a step — the person reviews and edits them on the canvas, and the engine runs them the same way every time. ' +
+  'WHERE JUDGEMENT OR WRITING IS NEEDED (classify, score, read a thread and decide, extract facts, draft an email body), use an AI STEP with ' +
+  'named outputs, then branch on those outputs with an if — exactly like an LLM node with a structured output parser followed by an If node. ' +
+  'Use as many AI steps as the work needs, each with one clear job. A design whose logic lives in an agent\'s instructions instead of ' +
+  'steps is wrong for an automation agent.\n' +
   'STEPS\n' +
   '  {"step":"get_record","object":"Account","id":"{!opp.AccountId}","fields":"Id,Name,OwnerId,Type","as":"acct"} — reads one record; without "id" it reads the record the run started on.\n' +
   '  {"step":"query_records","soql":"SELECT Id, Name, Amount, CloseDate, OwnerId, Owner.Email FROM Opportunity WHERE AccountId = \'{!recordId}\' AND IsClosed = false","as":"deals"} — {!deals.records} is the list, {!deals.count} how many.\n' +
@@ -370,7 +411,12 @@ export const FLOW_INSTRUCTION =
   '  {"step":"update_record","object":"Account","id":"{!acct.Id}","fields":{"Rating":"Hot"}} — updates that record; without "id", the record the run started on.\n' +
   '  {"step":"call_tool","connector":"<key from available.mcp>","tool":"<tool name from available.mcp>","params":{"to":"{!deal.Owner.Email}","subject":"...","body":"..."}} — email and any other connector tool. A connector marked connected:false can still be used: the step is skipped with a note until someone connects it, and a setup item says so.\n' +
   '  {"step":"set_variable","name":"summary","value":"..."} — read later as {!summary.value}.\n' +
-  '  {"step":"agent"} — runs the root agent once; later steps read its answer as {!ai.finalText}.\n' +
+  '  {"step":"ai","as":"judge","prompt":"Deal {!deal.Name}, stage {!deal.StageName}, last activity {!deal.LastActivityDate}. Latest customer email: {!thread.result}. Decide how the customer feels about the deal.",' +
+  '"outputs":{"mood":"choice: interested | cooling off | blocked | no reply","reason":"text: one sentence naming the facts used","risk":"number: 0-100"},"tier":"medium"} ' +
+  '— its own prompt (every value it needs goes in with {! }), and named outputs later steps read as {!judge.mood}, {!judge.reason}, {!judge.risk}. ' +
+  'Output types: text, number, boolean, date, choice: a | b | c (add " — meaning" to explain). Branch on them: {"step":"if","condition":"{!judge.mood} == \'blocked\' OR {!judge.risk} >= 70",...}. ' +
+  'For an email body the AI writes, give it an output like "body":"text: the email body, plain, under 120 words" and use {!writer.body}. tier: small for simple classification, medium by default, large for careful writing or hard judgement.\n' +
+  '  {"step":"agent"} — runs the root agent (with its tools) once; later steps read its answer as {!ai.finalText}. Only for work where the model must choose tools itself.\n' +
   '  {"step":"wait","amount":2,"unit":"days"} and {"step":"approval","comments":"...","approved":[...],"rejected":[...]} — never inside a loop; steps after an approval run only when approved. Use approval only when the requirement asks for one.\n' +
   'VALUES inside {! }: a path (deal.CloseDate, recordId, deals.count) or a function — TODAY, ADD_DAYS(date, n), ADD_BUSINESS_DAYS(date, n), ' +
   'ADD_MONTHS(date, n), DAYS_BETWEEN(from, to), YEAR(date), FORMAT_NUMBER(n) (thousands separators, no decimals), COUNT(list), ' +

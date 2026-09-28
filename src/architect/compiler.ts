@@ -38,6 +38,12 @@ import {
 } from './spec';
 import { compileFlow } from './flow';
 
+/** What every AI step in an automation is told, whatever its task. */
+export const AI_STEP_SYSTEM_PROMPT =
+  'You are one step in an unattended Salesforce automation. Do exactly the task in the message, using only the data it gives you. ' +
+  'Never ask a question, never add commentary, and never invent a fact that is not in the data — when the data does not say, pick the answer ' +
+  'the task defines for that case, or the most cautious one.';
+
 // ── Model tier resolution (same classification the UI pickers use) ───
 const FAST_RE = /mini|nano|lite|flash|haiku|small/i;
 const BEST_RE = /opus|ultra|(^|[^a-z])o[134]([^a-z]|$)|gpt-5|-pro($|[^a-z])/i;
@@ -498,9 +504,19 @@ export async function compileSpec(
       // that is pure data handling pays for no model call at all.
       const compiled = compileFlow(spec.flow, [{ from: 'start', port: 'out' }], { x: rootNode.x, y: rootNode.y + 240 });
       const base = platformNodes.length;
-      compiled.nodes.forEach((f, i) => platformNodes.push({
-        specId: `__flow_${i}__`, name: f.name, nodeType: f.nodeType, nodeSubType: f.nodeSubType, config: f.config, x: f.x, y: f.y, enabled: true,
-      }));
+      compiled.nodes.forEach((f, i) => {
+        // An AI step runs on one of the org's own models, at the tier the
+        // design asked for, as one unattended step with named outputs.
+        if (f.nodeType === 'ai') {
+          const tier = (f.config.tier as 'small' | 'medium' | 'large' | undefined) ?? 'medium';
+          const { modelId, provider } = resolveModel({ tier } as SpecNode['model'], org, notes, f.name);
+          f.nodeSubType = provider;
+          f.config = { ...f.config, model: modelId, systemPrompt: AI_STEP_SYSTEM_PROMPT };
+        }
+        platformNodes.push({
+          specId: `__flow_${i}__`, name: f.name, nodeType: f.nodeType, nodeSubType: f.nodeSubType, config: f.config, x: f.x, y: f.y, enabled: true,
+        });
+      });
       const at = (ref: number | 'agent' | 'start'): number => (ref === 'start' ? triggerIndex : ref === 'agent' ? rootIndex : base + ref);
       for (const e of compiled.edges) {
         const from = at(e.from);
