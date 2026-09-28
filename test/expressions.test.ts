@@ -37,6 +37,13 @@ describe('values', () => {
     expect(interpolateText('Missing: [{!lead.Email}]', resolve)).toBe('Missing: []');
   });
 
+  it('puts a list or record into text as JSON, without Salesforce attributes', () => {
+    const r = (p: string) => (p === 'tasks.records'
+      ? [{ attributes: { type: 'Task' }, Subject: 'Call', ActivityDate: '2026-09-20' }, { attributes: { type: 'Task' }, Subject: 'Demo' }]
+      : undefined);
+    expect(interpolateText('Activity: {!tasks.records}', r)).toBe('Activity: [{"Subject":"Call","ActivityDate":"2026-09-20"},{"Subject":"Demo"}]');
+  });
+
   it('names only the paths a token reads', () => {
     expect(tokenPaths("DAYS_BETWEEN(deal.CloseDate, TODAY)")).toEqual(['deal.CloseDate']);
     expect(tokenPaths("SUM(deals.records, 'Amount')")).toEqual(['deals.records']);

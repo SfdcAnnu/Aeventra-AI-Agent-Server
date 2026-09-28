@@ -120,13 +120,22 @@ export function evaluateToken(expr: string, resolve: Resolve): unknown {
   return null;
 }
 
+/** A record or a list as compact JSON for a prompt or a field: Salesforce's
+ *  `attributes` blocks dropped, and long lists clipped with a note. A list
+ *  used to become "[object Object],[object Object]", so an AI step asked
+ *  to read a deal's recent activity saw none of it. */
+const MAX_JSON_CHARS = 12_000;
+function asText(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v !== 'object') return String(v);
+  const clean = JSON.stringify(v, (k, val) => (k === 'attributes' ? undefined : val));
+  return clean.length > MAX_JSON_CHARS ? `${clean.slice(0, MAX_JSON_CHARS)}… (clipped)` : clean;
+}
+
 /** Text with every {! … } token filled in; an empty value becomes ''. */
 export function interpolateText(template: string, resolve: Resolve): string {
   if (!template) return template;
-  return template.replace(/\{!((?:[^{}]|\{[^{}]*\})+)\}/g, (_m, inner: string) => {
-    const v = evaluateToken(inner, resolve);
-    return v == null ? '' : String(v);
-  });
+  return template.replace(/\{!((?:[^{}]|\{[^{}]*\})+)\}/g, (_m, inner: string) => asText(evaluateToken(inner, resolve)));
 }
 
 /** The paths a token reads (for "is this defined earlier" checks), function names and literals left out. */
