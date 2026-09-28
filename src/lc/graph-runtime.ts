@@ -403,6 +403,18 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
     if (!routerBase.bindTools) throw new Error(`Model for ${aiNode.nodeSubType} does not support tool binding.`);
     const routerModel = routerBase.bindTools([...allRouterTools, ...handoffLcTools]);
+    // An unattended run's first step must be a tool call (req.mustReadFirst):
+    // the same tools, with the provider's own "call one of these" choice.
+    // Chat turns never take this path.
+    let readFirstModel: typeof routerModel | null = null;
+    if (req.mustReadFirst && allRouterTools.length > 0) {
+      const choice = /claude|gemini/i.test(modelName) ? 'any' : 'required';
+      try {
+        readFirstModel = routerBase.bindTools([...allRouterTools, ...handoffLcTools], { tool_choice: choice } as never);
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : err, modelName }, 'lc_read_first_unsupported');
+      }
+    }
     const handoffByName = new Map(handoffTools.map(h => [h.name, h]));
 
     // ── Router node: answer → END; handoff → mark + END (the subagent turn
@@ -434,10 +446,24 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       }
       budget.steps += 1;
 
-      const response = await callModel(routerModel, [
-        systemMessage,
-        ...state.messages,
-      ], emitText);
+      const firstModel = readFirstModel;
+      readFirstModel = null;
+      let response: Awaited<ReturnType<typeof callModel>>;
+      try {
+        response = await callModel(firstModel ?? routerModel, [
+          systemMessage,
+          ...state.messages,
+        ], emitText);
+      } catch (err) {
+        // A provider that refuses the forced choice must not cost the run:
+        // fall back to the ordinary call, once.
+        if (!firstModel) throw err;
+        logger.warn({ err: err instanceof Error ? err.message : err, modelName }, 'lc_read_first_fallback');
+        response = await callModel(routerModel, [
+          systemMessage,
+          ...state.messages,
+        ], emitText);
+      }
       noteUsage(budget, response, 'router', modelName);
 
       const calls = response.tool_calls ?? [];

@@ -108,6 +108,10 @@ export interface ChatTurnRequest {
   /** Live narration of this turn, for a caller that can deliver it. Only
    *  the websocket path supplies one, and only when the browser asked. */
   onEvent?: TurnSink | null;
+  /** An unattended run: the model's FIRST step must be a tool call, so it
+   *  reads live data before deciding anything. Set by the automation
+   *  step (headless.ts) only; chat turns never set it. */
+  mustReadFirst?: boolean;
   context: {
     orgId: string;
     userId: string;

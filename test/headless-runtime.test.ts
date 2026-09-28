@@ -69,6 +69,18 @@ describe('a flow AI step runs on the chat runtime', () => {
     expect(runChatTurn.mock.calls[0][0].newUserMessage).toContain('"score"');
   });
 
+  it('asks for a tool call first only when the run has tools', async () => {
+    // With tools, an unattended run must read live data before it decides —
+    // a re-run once trusted its own old summary and skipped every check.
+    const { buildConnectorInputsFromAgent } = await import('../src/chat/adapters/connectors-from-agent');
+    (buildConnectorInputsFromAgent as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ provider: 'salesforce_mcp', mcpServerUrl: 'x', allowedTools: [] }]);
+    await runHeadlessAiStep(ctx([node('n1', 'gpt4')]), node('n1', 'gpt4') as never);
+    expect(runChatTurn.mock.calls[0][0].mustReadFirst).toBe(true);
+    runChatTurn.mockClear();
+    await runHeadlessAiStep(ctx([node('n1', 'gpt4')]), node('n1', 'gpt4') as never);
+    expect(runChatTurn.mock.calls[0][0].mustReadFirst).toBe(false);
+  });
+
   it('carries the trigger record through as the turn context', async () => {
     await runHeadlessAiStep(ctx([node('n1', 'claude')]), node('n1', 'claude') as never);
     expect(runChatTurn.mock.calls[0][0].context.recordContextId).toBe('00Qxxx');

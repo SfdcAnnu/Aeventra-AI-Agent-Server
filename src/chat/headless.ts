@@ -59,6 +59,12 @@ export async function runHeadlessAiStep(
     newUserMessage,
     engineOverride: ctx.engineOverride,
     connectors,
+    // READ BEFORE DECIDING. Measured: a re-run of a Flow-started agent was
+    // handed the record's own Description, found its earlier summary there,
+    // and declared the work done in one call with no query — three re-runs
+    // in a row, instructions or not; a Task someone had deleted was never
+    // recreated. An unattended run with tools now has to look first.
+    mustReadFirst: connectors.length > 0,
     context: {
       orgId: ctx.orgId,
       userId: ctx.userId,
