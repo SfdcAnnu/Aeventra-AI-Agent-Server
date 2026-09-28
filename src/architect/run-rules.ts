@@ -25,8 +25,8 @@ export const AUTOMATION_RUN_RULES =
   'may have been deleted or changed since. A re-run makes every check again and creates only what is actually missing.\n' +
   '2. COUNT AFTER YOU WRITE. Every number you report — in a post, a message, a field or a summary — is counted from the records as they ' +
   'stand after this run\'s writes (query them again if you need to), never from what you planned to write.\n' +
-  '3. USE THE REQUIREMENT\'S WORDS. Where these instructions give the words for an outcome (for example "already open", "not a new ' +
-  'customer", "no assets"), write exactly those words, not your own phrasing.\n' +
+  '3. USE THE REQUIREMENT\'S WORDS. Where these instructions give the words for an outcome (whatever they say for created, skipped, ' +
+  'already there or not needed), write exactly those words, not your own phrasing.\n' +
   '4. WRITE THE SUMMARY LAST, from what the records show after every other step, so it never claims something the org does not have.';
 
 /** The root agent's instructions with the run rules added once. */

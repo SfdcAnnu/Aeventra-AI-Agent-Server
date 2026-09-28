@@ -736,7 +736,7 @@ const VERBATIM_RULE =
   'Carry every concrete detail in originalRequirement into the design and the agent\'s instructions EXACTLY as written: each rule and the order rules are tried in, ' +
   'every condition and threshold, every field and the value to set, every record name, subject and message template with its placeholders, ' +
   'every date calculation, every format for numbers and dates, every duplicate check, every summary layout with the exact words it gives for each outcome ' +
-  '("already open", "not a new customer"), and every "never" rule. ' +
+  '(whatever words it gives for created, skipped, already there or not needed), and every "never" rule. ' +
   'Do not paraphrase them, merge them, or replace them with "as specified", "per the requirements" or "the configured rules" — ' +
   'at run time the agent sees only its own instructions, never the requirement.';
 
