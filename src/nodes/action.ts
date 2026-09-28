@@ -51,6 +51,16 @@ function outputAlias(node: { config: Record<string, unknown> }): string | undefi
   return name || undefined;
 }
 
+/** Which record a get/update step acts on: `config.recordId` (a {! } token or an
+ *  Id — the related Account, the loop's current record) or, when it is not set,
+ *  the record the run started on, as these steps always did. */
+function targetRecordId(node: { config: Record<string, unknown> }, ctx: { recordId: string; interpolate: (t: string) => string }): string | null {
+  const raw = typeof node.config.recordId === 'string' ? node.config.recordId.trim() : '';
+  if (!raw) return ctx.recordId;
+  const id = ctx.interpolate(raw).trim();
+  return /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(id) ? id : null;
+}
+
 const getRecord: NodeExecutor = async (node, ctx) => {
   const objectType = String(node.config.objectType ?? '');
   const fields = String(node.config.fields ?? 'Id,Name')
@@ -58,8 +68,10 @@ const getRecord: NodeExecutor = async (node, ctx) => {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const id = targetRecordId(node, ctx);
+  if (!id) return { nodeId: node.id, nodeSubType: 'get_record', success: false, error: `recordId ${String(node.config.recordId)} did not resolve to a record Id` };
   try {
-    const rec = await ctx.conn.sobject(objectType).retrieve(ctx.recordId, fields as never);
+    const rec = await ctx.conn.sobject(objectType).retrieve(id, fields as never);
     return {
       nodeId: node.id,
       nodeSubType: 'get_record',
@@ -84,9 +96,11 @@ const updateRecord: NodeExecutor = async (node, ctx) => {
     return { nodeId: node.id, nodeSubType: 'update_record', success: false, error: 'fieldMappings is not valid JSON' };
   }
 
+  const id = targetRecordId(node, ctx);
+  if (!id) return { nodeId: node.id, nodeSubType: 'update_record', success: false, error: `recordId ${String(node.config.recordId)} did not resolve to a record Id` };
   try {
-    const res = await ctx.conn.sobject(objectType).update({ Id: ctx.recordId, ...mappings } as never);
-    logger.info({ objectType, orgId: ctx.orgId, id: ctx.recordId }, 'sf_update_org_scoped');
+    const res = await ctx.conn.sobject(objectType).update({ Id: id, ...mappings } as never);
+    logger.info({ objectType, orgId: ctx.orgId, id }, 'sf_update_org_scoped');
     return {
       nodeId: node.id,
       nodeSubType: 'update_record',

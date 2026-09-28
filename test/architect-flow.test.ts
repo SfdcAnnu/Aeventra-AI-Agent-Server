@@ -25,20 +25,20 @@ describe('validateFlow', () => {
     expect(validateFlow(dealSweep)).toEqual([]);
   });
 
-  it('refuses what the engine refuses: nested loops, waits in loops, compound conditions', () => {
+  it('refuses what the engine refuses: nested loops, waits in loops, a clause with no comparison', () => {
     const errs = validateFlow([
       { step: 'query_records', soql: 'SELECT Id FROM Account', as: 'rows' },
       {
         step: 'loop', over: '{!rows.records}', body: [
           { step: 'loop', over: '{!rows.records}', body: [{ step: 'post_chatter', message: 'x' }] },
           { step: 'wait', amount: 1, unit: 'hours' },
-          { step: 'if', condition: '{!item.A} > 1 and {!item.B} > 2', then: [{ step: 'post_chatter', message: 'y' }] },
+          { step: 'if', condition: '{!item.A} AND {!item.B} > 2', then: [{ step: 'post_chatter', message: 'y' }] },
         ],
       },
     ]).map(e => e.message);
     expect(errs.some(m => m.includes('inside another loop'))).toBe(true);
     expect(errs.some(m => m.includes('wait cannot run inside a loop'))).toBe(true);
-    expect(errs.some(m => m.includes('one comparison per if'))).toBe(true);
+    expect(errs.some(m => m.includes('has no comparison'))).toBe(true);
   });
 
   it('catches a reference to a name nothing defined, and {!ai} before the agent step', () => {

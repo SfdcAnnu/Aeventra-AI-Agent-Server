@@ -28,6 +28,22 @@ interface CallToolConfig {
   outputVariable?: string;
 }
 
+/**
+ * A step for a connector that is not set up yet is SKIPPED, not a failed
+ * run. An agent can be designed with an email step before anyone has
+ * signed in to Gmail or Outlook; until they do, the rest of the run still
+ * does its work and the step says plainly why it did nothing. A tool that
+ * fails on a connected account is still a failure.
+ */
+function skipped(nodeId: string, provider: string, toolName: string, reason: string) {
+  logger.warn({ nodeId, provider, toolName, reason }, 'call_tool_skipped_not_connected');
+  return {
+    nodeId, nodeSubType: 'call_tool', success: true,
+    output: { skipped: true, reason: `Skipped: ${reason}.`, toolName },
+    toolsUsed: [`${provider}:${toolName}(skipped)`],
+  };
+}
+
 const callToolExec: NodeExecutor = async (node, ctx) => {
   const config = (node.config as CallToolConfig) || {};
   const provider = config.provider;
@@ -76,9 +92,7 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
       `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
     );
     const baseUrl = urlRes.records[0]?.McpServerUrl__c;
-    if (!baseUrl) {
-      return { nodeId: node.id, nodeSubType: 'call_tool', success: false, error: `No McpServerUrl__c configured for provider "${provider}".` };
-    }
+    if (!baseUrl) return skipped(node.id, provider, toolName, `the ${provider} connector has no server yet`);
 
     const install = await InstallsRepo.findByOrgId(ctx.orgId);
     const token = await resolveProviderToken({
@@ -86,9 +100,7 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
       connectorId: config.connectorId, accessMode: ctx.agent.accessMode,
       sfAccessToken: install?.sfAccessToken ?? null,
     });
-    if (!token) {
-      return { nodeId: node.id, nodeSubType: 'call_tool', success: false, error: `No connected account for provider "${provider}" — connect it on the Auth tab first.` };
-    }
+    if (!token) return skipped(node.id, provider, toolName, `the ${provider} connector is not connected yet — connect it on the Connectors page`);
 
     const result = await callMcpTool(safeBaseUrl(baseUrl), token, toolName, inputs);
     logger.info({ nodeId: node.id, provider, toolName, orgId: ctx.orgId }, 'call_tool_executed');
