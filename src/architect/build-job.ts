@@ -54,6 +54,7 @@ import { repairNames, suggestNames, type AvailableNames } from './name-repair';
 import { applyPromptMap, applySpecPatch, isSpecPatch } from './spec-merge';
 import { inventoryFromGather } from './survey-inventory';
 import { mentionedObjects, verifyPrerequisites, settleTrigger } from './org-facts';
+import { connectorOffers } from './connector-tools';
 import { compileSpec, CompileError } from './compiler';
 
 // ── Job model ────────────────────────────────────────────────────────
@@ -741,6 +742,33 @@ const VERBATIM_RULE =
   'at run time the agent sees only its own instructions, never the requirement.';
 
 /** What the Analyst summarised, plus the person's own words (with any answers they gave). */
+/** An automation agent's work belongs on the canvas as steps. A design with
+ *  none put every rule in one model's prompt — twice in live builds — which
+ *  the person cannot see, edit or trust to run the same way twice. */
+function automationShapeErrors(spec: AgentSpec, agentType: AgentKind | undefined): SpecError[] {
+  if (agentType !== 'automation') return [];
+  if (Array.isArray(spec?.flow) && spec.flow.length > 0) return [];
+  return [{
+    path: '/flow',
+    message: 'this is an automation agent: its reads, loops, rules, record writes, posts and emails go in `flow` as steps ' +
+      '(query_records, loop, if, create_record, update_record, call_tool, …), not in the agent\'s instructions. Use an agent step only for judgement or free writing.',
+  }];
+}
+
+/** Connector keys a flow's call_tool steps use, anywhere in it. */
+function connectorsUsedBy(flow: AgentSpec['flow']): string[] {
+  const out = new Set<string>();
+  const walk = (steps: unknown) => {
+    if (!Array.isArray(steps)) return;
+    for (const s of steps as Array<Record<string, unknown>>) {
+      if (s?.step === 'call_tool' && typeof s.connector === 'string') out.add(s.connector);
+      for (const k of ['then', 'else', 'body', 'approved', 'rejected']) walk(s?.[k]);
+    }
+  };
+  walk(flow);
+  return [...out];
+}
+
 /** What the Flow Designer is told on a full emit. */
 const DESIGN_INSTRUCTION =
             'Emit ONE complete AgentSpec JSON object (specVersion 1.0) and nothing else. Sub-agents need a ' +
@@ -949,9 +977,11 @@ async function runBuild(job: BuildJob): Promise<void> {
   // `getObjectSchema`. Three attempts, three rejections, and a build that
   // had already been paid for. The names go in front of it now, from the
   // same read the manifest itself is built from.
-  const mcpToolsByServer = mcp
-    .filter(m => m.tools.length > 0)
-    .map(m => ({ connector: m.provider, tools: m.tools.map(t => t.name) }));
+  // Connected connectors with their live tools, and catalogued ones that
+  // are not connected yet with their known tools (connector-tools.ts): an
+  // email step can be designed before anyone signs in to Gmail.
+  const mcpToolsByServer = connectorOffers(mcp);
+  const notConnected = new Set(mcpToolsByServer.filter(o => !o.connected).map(o => o.connector));
   // EVERY OBJECT THE REQUIREMENT NAMES IS SURVEYED, whatever it is. The list
   // was custom objects plus a fixed core set, so a standard object outside
   // it (Asset, WorkOrder, Entitlement…) was invisible to every stage after
@@ -1042,7 +1072,7 @@ async function runBuild(job: BuildJob): Promise<void> {
   // the saved spec no longer passes, the stage that owns the problem is
   // re-run instead of reused; the retry rounds and the Prompt Engineer then
   // get a chance to repair it.
-  const checkpointErrors = cp.spec ? validateSpec(cp.spec, manifest) : [];
+  const checkpointErrors = cp.spec ? [...validateSpec(cp.spec, manifest), ...automationShapeErrors(cp.spec, requirement.agentType)] : [];
   if (cp.spec && checkpointErrors.length > 0) {
     logger.info(
       { jobId: job.id, errors: checkpointErrors.slice(0, 5).map(e => `${e.path}: ${e.message}`) },
@@ -1091,9 +1121,13 @@ async function runBuild(job: BuildJob): Promise<void> {
         available,
         // An automation agent is told how to lay out its fixed sequence;
         // a chat agent never sees the step vocabulary it cannot use.
-        instruction: requirement.agentType === 'automation' || requirement.agentType === 'both'
-          ? `${DESIGN_INSTRUCTION}\n\n${FLOW_INSTRUCTION}\n\n${VERBATIM_RULE}`
-          : `${DESIGN_INSTRUCTION}\n\n${VERBATIM_RULE}`,
+        // An automation agent is designed as steps first: its designer reads
+        // the step vocabulary before the agent/tool rules, not after them.
+        instruction: requirement.agentType === 'automation'
+          ? `${FLOW_INSTRUCTION}\n\n${DESIGN_INSTRUCTION}\n\n${VERBATIM_RULE}`
+          : requirement.agentType === 'both'
+            ? `${DESIGN_INSTRUCTION}\n\n${FLOW_INSTRUCTION}\n\n${VERBATIM_RULE}`
+            : `${DESIGN_INSTRUCTION}\n\n${VERBATIM_RULE}`,
         ...(feedback ? { previousAttemptErrors: feedback } : {}),
       }, { rawJson: true, maxOutputTokens: 8000 });
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1117,7 +1151,7 @@ async function runBuild(job: BuildJob): Promise<void> {
         // spelling of a name the Surveyor already reported (repairNames).
         wiringNotes.push(...attachOrphansToRoot(draft));
         wiringNotes.push(...repairNames(draft, available));
-        const errors = validateSpec(draft, manifest);
+        const errors = [...validateSpec(draft, manifest), ...automationShapeErrors(draft, requirement.agentType)];
         if (errors.length > 0) {
           feedback = withSuggestions(errors, available).join('\n');
           lastDraft = draft;
@@ -1456,6 +1490,24 @@ async function runBuild(job: BuildJob): Promise<void> {
       );
     }
   }
+  // A CONNECTOR THE STEPS USE BUT NOBODY HAS CONNECTED gets a setup item —
+  // not blocking: the rest of the run works and that step is skipped with a
+  // note until someone signs in.
+  for (const connector of connectorsUsedBy(spec.flow).filter(c => notConnected.has(c))) {
+    if (prerequisites.some(p => p.kind === 'connector' && new RegExp(`\\b${connector}\\b`, 'i').test(`${p.title} ${p.why}`))) continue;
+    prerequisites.push({
+      id: `PRE-${String(prerequisites.length + 1).padStart(3, '0')}`,
+      kind: 'connector',
+      title: `Connect ${connector} — its steps are skipped until then`,
+      why: `The automation has ${connector} steps. Until a ${connector} account is connected they are skipped with a note and the rest of the run carries on.`,
+      steps: [`Open Connectors, find ${connector}, press Authorise and sign in.`],
+      assignee: 'integration_owner',
+      blocking: false,
+      status: 'pending',
+      estimatedEffort: 'minutes',
+    });
+  }
+
   // A SETUP ITEM THE ORG CONTRADICTS IS CLOSED, with the check that settled
   // it. "Asset is not queryable" and "Account.Description must exist" were
   // raised as blocking, and the compiler switched off the tools that needed

@@ -12,17 +12,18 @@
  */
 import type { BuildJob } from './build-job';
 import type { AgentSpec, SpecNode, SpecPrerequisite } from './spec';
+import { compileFlow } from './flow';
 
 export interface PreviewNode {
   id: string;
   name: string;
-  nodeType: 'ai' | 'subagent' | 'tool' | 'catalog';
+  nodeType: 'ai' | 'subagent' | 'tool' | 'catalog' | 'trigger' | 'logic' | 'action';
   nodeSubType: string;
   config: Record<string, unknown>;
   positionX: number;
   positionY: number;
 }
-export interface PreviewConnection { id: string; fromNodeId: string; fromPort: 'tool'; toNodeId: string; toPort: 'in' }
+export interface PreviewConnection { id: string; fromNodeId: string; fromPort: string; toNodeId: string; toPort: 'in' }
 
 /** The design as the builder will draw it. Positions come from the spec
  *  when the designer gave them; otherwise a layered layout — root left,
@@ -71,6 +72,20 @@ export function previewSpec(spec: AgentSpec): { nodes: PreviewNode[]; connection
   const connections: PreviewConnection[] = spec.edges
     .filter(e => ids.has(e.from) && ids.has(e.to))
     .map(e => ({ id: `e${e.from}:tool-${e.to}:in`, fromNodeId: e.from, fromPort: 'tool', toNodeId: e.to, toPort: 'in' }));
+
+  // AN AUTOMATION'S STEPS ARE THE DESIGN — drawn the way the compiler will
+  // save them: a trigger, then each step on the port the engine follows.
+  // The preview used to stop at the agent and its tools, so a multi-step
+  // automation looked like a single node until after it was saved.
+  if (Array.isArray(spec.flow) && spec.flow.length > 0 && root) {
+    const rootPos = pos.get(root.id) ?? { x: COL[0], y: 40 };
+    const flow = compileFlow(spec.flow, [{ from: 'start', port: 'out' }], { x: rootPos.x + 260, y: rootPos.y + 240 });
+    const trig = { id: '__trigger__', name: spec.trigger?.type === 'webhook' ? 'Webhook' : 'Run from Flow or Apex', nodeType: 'trigger' as const, nodeSubType: spec.trigger?.type === 'webhook' ? 'webhook' : 'record', config: {}, positionX: rootPos.x, positionY: rootPos.y + 240 };
+    nodes.push(trig);
+    flow.nodes.forEach((f, i) => nodes.push({ id: `__step_${i}__`, name: f.name, nodeType: f.nodeType, nodeSubType: f.nodeSubType, config: { ...f.config, preview: true }, positionX: f.x, positionY: f.y }));
+    const idOf = (ref: number | 'agent' | 'start') => (ref === 'start' ? trig.id : ref === 'agent' ? root.id : `__step_${ref}__`);
+    flow.edges.forEach((e, i) => connections.push({ id: `f${i}:${e.port}`, fromNodeId: idOf(e.from), fromPort: e.port, toNodeId: idOf(e.to), toPort: 'in' }));
+  }
   return { nodes, connections };
 }
 
@@ -113,6 +128,17 @@ function gapOf(item: Record<string, unknown>, state: 'partial' | 'missing'): Rec
   };
 }
 
+/** How many automation steps a flow has, branches included. */
+function countSteps(flow: unknown): number {
+  if (!Array.isArray(flow)) return 0;
+  let n = 0;
+  for (const s of flow as Array<Record<string, unknown>>) {
+    if (s?.step !== 'agent') n++;
+    for (const k of ['then', 'else', 'body', 'approved', 'rejected']) n += countSteps(s?.[k]);
+  }
+  return n;
+}
+
 export function buildDetail(job: BuildJob): Record<string, unknown> {
   const cp = job.checkpoint ?? {};
   const req = cp.requirement as { goal?: string; capabilities?: string[]; openQuestions?: string[]; successCriteria?: string[]; riskLevel?: string; trigger?: string; agentType?: string; clarifications?: string[] } | undefined;
@@ -151,6 +177,7 @@ export function buildDetail(job: BuildJob): Record<string, unknown> {
         specialists: spec.nodes.filter(n => n.type === 'subagent').length,
         tools: spec.nodes.filter(n => n.type === 'tool' || n.type === 'tool_catalog').length,
         approvals: spec.nodes.filter(n => n.type === 'tool' && n.approval?.required).length,
+        steps: countSteps(spec.flow),
       },
       instructions: spec.nodes.filter(n => n.type === 'agent' || n.type === 'subagent').map(n => ({ id: n.id, label: n.label, role: n.type, text: asStr(n.instructions, 6000) })),
       guardrails: spec.guardrails ?? [],

@@ -1,6 +1,7 @@
 import { register } from './registry';
 import type { NodeExecutor } from './registry';
 import type { ExecutionContext } from '../orchestrator/context';
+import { evaluateCondition, tokenPaths } from '../orchestrator/expressions';
 
 /**
  * If/else node — evaluates `config.condition` against current context state.
@@ -14,8 +15,10 @@ import type { ExecutionContext } from '../orchestrator/context';
 const ifElseExec: NodeExecutor = async (node, ctx) => {
   const raw = String(node.config.condition ?? '').trim();
   const unresolved = findUnresolvedTokens(raw, ctx);
+  // Evaluated on the raw condition, clause by clause: dates compare as
+  // dates, AND/OR combine, functions compute (orchestrator/expressions.ts).
   const condition = ctx.interpolate(raw);
-  const result = evalCondition(condition);
+  const result = evaluateCondition(raw, (p) => ctx.resolve(p));
 
   const output: Record<string, unknown> = { condition, result };
   if (unresolved.length > 0) {
@@ -39,11 +42,12 @@ const ifElseExec: NodeExecutor = async (node, ctx) => {
 
 /** Which `{!...}` tokens in the raw condition resolve to null/undefined. */
 function findUnresolvedTokens(raw: string, ctx: ExecutionContext): string[] {
-  const tokens = raw.match(/\{!([^}]+)\}/g) ?? [];
+  const tokens = raw.match(/\{!((?:[^{}]|\{[^{}]*\})+)\}/g) ?? [];
   const missing: string[] = [];
   for (const t of tokens) {
-    const path = t.slice(2, -1).trim();
-    if (ctx.resolve(path) == null) missing.push(t);
+    for (const path of tokenPaths(t.slice(2, -1))) {
+      if (ctx.resolve(path) == null) missing.push(`{!${path}}`);
+    }
   }
   return missing;
 }
@@ -187,36 +191,3 @@ const approvalExec: NodeExecutor = async (node, ctx) => {
 };
 
 register('approval', approvalExec);
-
-function evalCondition(expr: string): boolean {
-  // Very narrow evaluator — supports `<lhs> <op> <rhs>` only.
-  // We intentionally avoid `eval()` / `Function()` for security.
-  const match = expr.match(/^\s*(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$/);
-  if (!match) return Boolean(expr);
-  const [, lhs, op, rhs] = match;
-  const a = coerce(stripQuotes(lhs));
-  const b = coerce(stripQuotes(rhs));
-  switch (op) {
-    case '==': return a === b;
-    case '!=': return a !== b;
-    case '>':  return Number(a) > Number(b);
-    case '<':  return Number(a) < Number(b);
-    case '>=': return Number(a) >= Number(b);
-    case '<=': return Number(a) <= Number(b);
-    default:   return false;
-  }
-}
-
-function stripQuotes(s: string): string {
-  if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"'))) {
-    return s.slice(1, -1);
-  }
-  return s;
-}
-
-function coerce(s: string): string | number | boolean {
-  if (s === 'true') return true;
-  if (s === 'false') return false;
-  const n = Number(s);
-  return Number.isFinite(n) && s.trim() !== '' ? n : s;
-}

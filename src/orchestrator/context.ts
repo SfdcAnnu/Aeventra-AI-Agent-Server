@@ -1,3 +1,4 @@
+import { interpolateText } from './expressions';
 import type { Connection } from 'jsforce';
 import type { AgentDefinition, AgentNode, EngineOverrideInput, NodeResult } from '../types';
 import type { GraphAdjacency } from './graph';
@@ -151,12 +152,10 @@ export class ExecutionContext {
    * Interpolate `{!path.to.value}` placeholders in a template string.
    * Used by nodes that render dynamic config (e.g. email body, SOQL where clause).
    */
+  /** Text with every {! … } filled in — a path, or a function such as
+   *  DAYS_BETWEEN(deal.CloseDate, TODAY) (orchestrator/expressions.ts). */
   interpolate(template: string): string {
-    if (!template) return template;
-    return template.replace(/\{!([^}]+)\}/g, (_match, path: string) => {
-      const v = this.resolve(path.trim());
-      return v == null ? '' : String(v);
-    });
+    return interpolateText(template, (p) => this.resolve(p));
   }
 
   // ── Durable-run (de)serialization ────────────────────────────────
