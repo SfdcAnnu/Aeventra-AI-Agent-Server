@@ -26,6 +26,7 @@
 import type { Connection } from 'jsforce';
 import { pkgConn } from '../salesforce/namespace';
 import { fitToLengths } from './org-facts';
+import { withRunRules } from './run-rules';
 import { logger } from '../logger';
 import {
   validateSpec,
@@ -290,7 +291,10 @@ export async function compileSpec(
         nodeSubType: provider,
         config: {
           model: modelId,
-          systemPrompt: n.instructions ?? '',
+          // An automation agent runs unattended, more than once, and reports
+          // what it did: it carries the run rules (run-rules.ts) whatever
+          // its own instructions say.
+          systemPrompt: opts.executeType === 'Trigger' || opts.executeType === 'Both' ? withRunRules(n.instructions ?? '') : (n.instructions ?? ''),
           answerStyle: n.model?.style ?? 'balanced',
           thinkingEffort: n.model?.effort ?? 'standard',
           maxReplyTokens: n.model?.maxOutputTokens,

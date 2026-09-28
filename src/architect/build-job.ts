@@ -735,7 +735,8 @@ const VERBATIM_RULE =
   'originalRequirement is the person\'s own words and the source of truth; `requirement` is only a summary of it. ' +
   'Carry every concrete detail in originalRequirement into the design and the agent\'s instructions EXACTLY as written: each rule and the order rules are tried in, ' +
   'every condition and threshold, every field and the value to set, every record name, subject and message template with its placeholders, ' +
-  'every date calculation, every format for numbers and dates, every duplicate check, every summary layout, and every "never" rule. ' +
+  'every date calculation, every format for numbers and dates, every duplicate check, every summary layout with the exact words it gives for each outcome ' +
+  '(whatever words it gives for created, skipped, already there or not needed), and every "never" rule. ' +
   'Do not paraphrase them, merge them, or replace them with "as specified", "per the requirements" or "the configured rules" — ' +
   'at run time the agent sees only its own instructions, never the requirement.';
 
@@ -1272,6 +1273,9 @@ async function runBuild(job: BuildJob): Promise<void> {
             'Judge against originalRequirement, the person\'s own words, not only the summary. Every concrete value, template, threshold, ' +
             'format, order and "never" rule it states must appear in the design or an agent\'s instructions EXACTLY; one that is missing, ' +
             'generalised ("as specified", "the configured rules") or reworded is uncovered — quote it. ' +
+            'For an agent that writes records, check too that its instructions re-check live records before skipping a step (never trusting an earlier summary), ' +
+            'count what they report after writing, and use the requirement\'s own words for each outcome; the platform adds run rules for these to automation agents, ' +
+            'so judge only whether the instructions CONTRADICT them. ' +
             'Judge this DESIGN against the requirement. For every capability, successCriteria entry and ' +
             'explicit rule in the requirement, decide whether some node, edge, tool or approval setting ' +
             'actually delivers it — AND READ EACH AGENT\'S `instructions` TEXT: a calculation, a scoring rule, an order of steps or a wording rule ' +
