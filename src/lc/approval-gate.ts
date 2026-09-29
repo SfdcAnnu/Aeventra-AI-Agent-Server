@@ -41,10 +41,14 @@ export function approvalRequiredNames(actions: AgentAction[]): Set<string> {
   return names;
 }
 
+// The approval card sits in the conversation itself, under the reply; a
+// reply that sends the person to "the Approvals page" makes them leave the
+// chat for something that is already in front of them.
 const suspendedMessage = (id: string): string =>
-  `PENDING_APPROVAL: this action requires human approval and was NOT executed. Approval request ${id} was created ` +
-  'for the team. Tell the user the action is awaiting approval and will be completed once approved — do NOT say or ' +
-  'imply it is already done.';
+  `PENDING_APPROVAL: this action requires human approval and was NOT executed. Approval request ${id} was created. ` +
+  'Tell the user the action is waiting for their approval right here in this conversation — an approval card with ' +
+  'Approve and Reject appears under your reply and shows what the action will do — and that it runs the moment they ' +
+  'approve. Do NOT send them to another page, and do NOT say or imply it is already done.';
 
 /** How long a rejection keeps the same call from being re-submitted. */
 const REJECTION_HOLD_MS = 30 * 60 * 1000;
