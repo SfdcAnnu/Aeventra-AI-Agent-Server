@@ -353,7 +353,10 @@ export async function compileSpec(
       if (a.kind === 'mcp') {
         actionType = 'MCP';
         toolName = a.toolName ?? '';
-        mcpToolNames.push(toolName);
+        // Only the Salesforce server's own tools belong in its catalog: a
+        // Gmail sendEmail listed there was offered to the model on the wrong server.
+        const server = (a.connector ?? '').trim();
+        if (!server || server === 'salesforce_mcp' || server === 'Salesforce Platform') mcpToolNames.push(toolName);
       } else if (a.kind === 'apex_invocable') {
         actionType = 'Apex';
         toolName = a.toolName ?? '';
