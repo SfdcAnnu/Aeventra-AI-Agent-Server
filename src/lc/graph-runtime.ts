@@ -42,7 +42,7 @@ import {
 } from '@langchain/core/messages';
 import { z } from 'zod';
 import { logger } from '../logger';
-import { rememberScratch, recallScratch, clearScratch, withScratch } from './specialist-scratch';
+import { rememberScratch, recallScratch, clearScratch, withScratch, collectFindings, withFindings } from './specialist-scratch';
 import { InstallsCache } from '../db/installs-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
@@ -344,6 +344,10 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       if (policy === 'windowed') return [...baseMessages.slice(-6), taskMsg];
       return [taskMsg]; // isolated — the default, and the cheapest
     };
+    // Earlier specialist and deploy results, from the saved history; this
+    // turn's finished calls are added as they return.
+    const specialistToolNames = new Set(callAgents.map(c => c.name));
+    const findings = collectFindings(baseMessages.slice(0, turnStart) as never, specialistToolNames);
     const callAgentTools = callAgents.map(c => {
       const subagentNode = req.agent.nodes.find(n => n.id === c.subagentNodeId);
       return tool(
@@ -358,7 +362,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
             const policy = (subagentNode.config as { contextPolicy?: string })?.contextPolicy;
             // A specialist stopped earlier in this conversation continues
             // from what it found, rather than reading the org again.
-            const briefed = withScratch(task, recallScratch(req.sessionId, subagentNode.id));
+            const briefed = withFindings(withScratch(task, recallScratch(req.sessionId, subagentNode.id)), findings);
             const out = await runSubagentTurn(
               req, aiNode, subagentNode, graph, install.sfAccessToken, assembled,
               buildCallContext(policy, briefed), budget,
@@ -373,6 +377,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
               if (full) rememberScratch(req.sessionId, subagentNode.id, full);
             } else {
               clearScratch(req.sessionId, subagentNode.id);
+              findings.push(...collectFindings([{ name: c.name, content: text, _getType: () => 'tool' }], specialistToolNames));
             }
             return spillIfLarge(c.name, text);
           } catch (err) {
