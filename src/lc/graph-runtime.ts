@@ -49,6 +49,7 @@ import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connect
 import { approvalOutcomeMessage, isApprovalOutcome } from '../chat/approval-outcome';
 import { augmentConnectorsWithToolNodes } from '../chat/tool-node-connectors';
 import type { AgentDefinition, AgentNode, AgentAction } from '../types';
+import type { NeedsConnection, RanAs } from '../chat/adapters/types';
 import { buildGraph } from '../orchestrator/graph';
 import {
   resolveTopLevelToolsAndSubagents,
@@ -259,7 +260,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const topConnectors = mergeActionsIntoConnectors(req.connectors, topLevelActions.filter(a => a.actionType !== 'Prebuilt'));
   mark('setup');
   const serverTiming: Record<string, number> = {};
-  const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken, serverTiming);
+  // Connectors the person has no identity for, from the root and every
+  // specialist this turn; the reply gets a connect card per entry.
+  const identityNotes: NeedsConnection[] = req.identityNotes ?? (req.identityNotes = []);
+  const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken, serverTiming, identityNotes);
+  const ranAsByServer = new Map(servers.filter(s => s.ranAs).map(s => [s.name, s.ranAs!]));
   mark('resolveServers');
   for (const [k, v] of Object.entries(serverTiming)) phase[`servers.${k}`] = v;
   const loaded = await loadMcpTools(servers, { deadlineAt: budget.deadlineAt });
@@ -308,12 +313,23 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // identity tool had silently vanished from the list. Volatile by
     // nature (it is about right now), so it sits below the cache
     // breakpoint with the other per-turn facts.
-    const connectorNotice = loaded.unavailable.length > 0
+    const unavailableNotice = loaded.unavailable.length > 0
       ? `TOOLS UNAVAILABLE RIGHT NOW: ${loaded.unavailable.join(', ')}. Any tool from ` +
         'these is not callable this turn. If the user asks for something that needs one, say plainly that ' +
         'you cannot reach it at the moment and ask them to try again shortly. Do NOT answer from memory, ' +
         'guess, or substitute a different tool or specialist for the one you are missing.'
       : null;
+    // A connector that runs as the person, which they have not connected:
+    // the tools are absent this turn and a connect card sits under the
+    // reply. The agent says so instead of improvising around the gap.
+    const needsNotice = identityNotes.length > 0
+      ? `CONNECTION NEEDED: ${[...new Set(identityNotes.map(n => n.provider))].join(', ')}. This agent uses ` +
+        'these as the person\'s own account and they have not connected it (or it expired), so their tools are not ' +
+        'available this turn. If the request needs one, say in one sentence that they need to connect it — a ' +
+        'connect button appears right under your reply — and do what you can without it. Never substitute ' +
+        'another tool or a shared account for it.'
+      : null;
+    const connectorNotice = [unavailableNotice, needsNotice].filter(Boolean).join('\n') || null;
 
     const promptParts = await buildSystemPromptParts(
       req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
@@ -686,7 +702,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     }
 
     const { tokensIn, tokensOut } = sumUsage(state.messages.slice(turnStart));
-    const toolCalls = extractToolCalls(state.messages.slice(turnStart), loaded, nestedCalls);
+    const toolCalls = extractToolCalls(state.messages.slice(turnStart), loaded, nestedCalls, ranAsByServer);
 
     if (req.debugMode) {
       debugResponse.push({
@@ -741,6 +757,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       // The per-model split of the same totals. `modelUsed` alone cannot
       // describe a turn that routed on one model and answered on another.
       usage: usageByModel(budget),
+      ...(identityNotes.length > 0 ? { needsConnection: identityNotes } : {}),
       latencyMs: Date.now() - t0,
       turnMs: Date.now() - turnClockStart,
       phaseMs: { ...phase, modelLoop: Date.now() - t0 },
@@ -833,7 +850,8 @@ async function runSubagentTurn(
   const synthetic = toSyntheticAiNode(subagentNode, topAiNode);
   const subActions = resolveSubagentActions(graph, subagentNode);
   const subConnectors = mergeActionsIntoConnectors(req.connectors, subActions.filter(a => a.actionType !== 'Prebuilt'));
-  const servers = await resolveMcpServers({ ...req, connectors: subConnectors }, synthetic, sfAccessToken);
+  const servers = await resolveMcpServers({ ...req, connectors: subConnectors }, synthetic, sfAccessToken, undefined, req.identityNotes);
+  const subRanAs = new Map(servers.filter(s => s.ranAs).map(s => [s.name, s.ranAs!]));
   const loaded = await loadMcpTools(servers, { deadlineAt: budget.deadlineAt });
   // Phase 7 — the same approval gate as the router, over THIS subagent's
   // resolved actions.
@@ -927,7 +945,7 @@ async function runSubagentTurn(
       },
     );
     const turnMessages = out.messages.slice(baseMessages.length);
-    return { messages: turnMessages, modelName, toolNames: subTools.map(t => t.name), toolCalls: extractToolCalls(turnMessages, loaded) };
+    return { messages: turnMessages, modelName, toolNames: subTools.map(t => t.name), toolCalls: extractToolCalls(turnMessages, loaded, [], subRanAs) };
   } finally {
     await loaded.close();
   }
@@ -1155,6 +1173,8 @@ export function extractToolCalls(
   messages: BaseMessage[],
   loaded: LoadedMcpTools,
   nested: Array<{ callId: string | undefined; name: string; calls: ToolCallSummary[] }> = [],
+  /** Whose account each server's calls ran with, by server name. */
+  ranAsByServer?: Map<string, RanAs>,
 ): ToolCallSummary[] {
   const resultsByCallId = new Map<string, ToolMessage>();
   // Attach by call id when the runtime handed the handler one; otherwise
@@ -1181,13 +1201,16 @@ export function extractToolCalls(
       const output = result
         ? (typeof result.content === 'string' ? result.content : JSON.stringify(result.content))
         : undefined;
+      const serverName = loaded.serverByTool.get(call.name);
+      const ranAs = serverName ? ranAsByServer?.get(serverName) : undefined;
       out.push({
         id: call.id ?? '',
         name: call.name,
         input: (call.args as Record<string, unknown>) ?? {},
         output,
         isError: result?.status === 'error',
-        serverName: loaded.serverByTool.get(call.name),
+        serverName,
+        ...(ranAs ? { ranAs } : {}),
         ...(call.name.startsWith('ask_') ? { nested: takeNested(call.id ?? '', call.name) } : {}),
       });
     }

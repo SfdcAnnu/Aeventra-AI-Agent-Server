@@ -13,7 +13,11 @@
 import { register } from './registry';
 import type { NodeExecutor } from './registry';
 import { InstallsRepo } from '../db/installs.repo';
-import { resolveProviderToken } from '../chat/adapters/shared';
+import '../chat/adapters/shared';   // registers the token freshener the resolver uses
+import { resolveIdentity } from '../identity/resolver';
+import { identityInputFromConfig, policyFor } from '../identity/policy';
+import { OrgIdentityPolicyRepo, ServerOverrideRepo } from '../db/identity.repo';
+import { SALESFORCE_TOKEN_PROVIDERS } from '../chat/connector-scope';
 import { callMcpTool, safeBaseUrl } from '../mcp/mcp-client';
 import { logger } from '../logger';
 import { pkgConn } from '../salesforce/namespace';
@@ -91,16 +95,32 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
     const urlRes = await pkgConn(ctx.conn).query<{ McpServerUrl__c?: string }>(
       `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
     );
-    const baseUrl = urlRes.records[0]?.McpServerUrl__c;
+    const override = await ServerOverrideRepo.get(ctx.orgId, provider).catch(() => null);
+    const baseUrl = override?.mcpServerUrl ?? urlRes.records[0]?.McpServerUrl__c;
     if (!baseUrl) return skipped(node.id, provider, toolName, `the ${provider} connector has no server yet`);
 
+    // WHOSE ACCOUNT. The agent's connector node for this provider says
+    // whether an unattended run acts as the triggering user, and a person
+    // who has not connected is a failed run with the reason — never a
+    // silent switch to the shared account.
     const install = await InstallsRepo.findByOrgId(ctx.orgId);
-    const token = await resolveProviderToken({
-      orgId: ctx.orgId, userId: ctx.userId, provider,
-      connectorId: config.connectorId, accessMode: ctx.agent.accessMode,
-      sfAccessToken: install?.sfAccessToken ?? null,
+    const catalogNode = ctx.agent.nodes.find(n => n.nodeType === 'catalog' && (n.config as { provider?: string })?.provider === provider);
+    const orgPolicy = await OrgIdentityPolicyRepo.get(ctx.orgId);
+    const policy = policyFor(identityInputFromConfig(catalogNode?.config ?? null), SALESFORCE_TOKEN_PROVIDERS.has(provider) ? ctx.agent.accessMode : null, orgPolicy, 'automation');
+    const identity = await resolveIdentity({
+      orgId: ctx.orgId, userId: ctx.userId, provider, policy, kind: 'automation',
+      explicitConnectorId: config.connectorId, sfAccessToken: install?.sfAccessToken ?? null, orgPolicy,
     });
-    if (!token) return skipped(node.id, provider, toolName, `the ${provider} connector is not connected yet — connect it on the Connectors page`);
+    if (!identity.ok) {
+      if (identity.wanted === 'org') return skipped(node.id, provider, toolName, `the ${provider} connector is not connected yet — connect it on the Connectors page`);
+      logger.warn({ nodeId: node.id, provider, userId: ctx.userId, reason: identity.reason }, 'call_tool_no_identity_for_user');
+      return {
+        nodeId: node.id, nodeSubType: 'call_tool', success: false,
+        error: `NEEDS_CONNECTION:${provider}:${ctx.userId} — No ${provider} identity for this user (runs as ${identity.wanted}, ${policy.fallback === 'org' ? 'org fallback failed' : 'no org fallback'}). ${identity.message}`,
+      };
+    }
+    const token = identity.token;
+    ctx.toolsUsed.add(`${provider}:${toolName}@${identity.principal.type}${identity.principal.subjectLabel ? `(${identity.principal.subjectLabel})` : ''}`);
 
     const result = await callMcpTool(safeBaseUrl(baseUrl), token, toolName, inputs);
     logger.info({ nodeId: node.id, provider, toolName, orgId: ctx.orgId }, 'call_tool_executed');

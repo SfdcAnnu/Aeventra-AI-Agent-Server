@@ -17,6 +17,8 @@ import type { ConnectorInput } from './types';
  * point of the per-node tool-scoping feature). Aggregating agent-wide would
  * silently union every node's tools into every other node's call.
  */
+import { identityInputFromConfig } from '../../identity/policy';
+
 export async function buildConnectorInputsFromAgent(
   agent: AgentDefinition,
   aiNode: AgentNode,
@@ -73,6 +75,7 @@ export async function buildConnectorInputsFromAgent(
       connectorId: (cfg.connectorId as string) || null,
       accessMode: provider === 'salesforce_mcp' ? (agent.accessMode ?? 'Org') : null,
       customTools: customToolsRaw.length > 0 ? customToolsRaw : null,
+      identity: identityInputFromConfig(cfg),
     });
   }
   return out;

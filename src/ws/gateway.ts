@@ -150,6 +150,13 @@ const turnMessageSchema = z.object({
       name:  z.string().min(1),
       label: z.string().nullish(),
     })).nullish(),
+    identity: z.object({
+      runAs: z.string().nullish(),
+      fallback: z.string().nullish(),
+      required: z.boolean().nullish(),
+      automationRunAs: z.string().nullish(),
+      allowedDomain: z.string().nullish(),
+    }).nullish(),
   })).optional(),
   debugMode: z.boolean().optional(),
   // Opt-in live narration. A browser running an older bundle never sets

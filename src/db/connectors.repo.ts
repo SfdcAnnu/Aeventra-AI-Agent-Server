@@ -13,6 +13,11 @@ export interface ConnectorInput {
   displayName: string;
   authType?: string;
   configuredBy?: string | null;
+  /** Whose connection: 'org' (default), 'group' or 'user'. */
+  principalType?: 'org' | 'group' | 'user';
+  subjectType?: string | null;
+  subjectKey?: string | null;
+  subjectLabel?: string | null;
 }
 
 /**
@@ -66,7 +71,8 @@ export const ConnectorsRepo = {
   /** The chatting user's own connection for a provider (Connected only). */
   async getByOrgProviderAndUser(orgId: string, providerKey: string, userId: string): Promise<Connector | null> {
     return openConnector(await prisma.connector.findFirst({
-      where: { orgId, providerKey, configuredBy: userId, status: 'Connected' },
+      where: { orgId, providerKey, principalType: 'user', subjectKey: userId, status: 'Connected' },
+      orderBy: { lastConnectedAt: 'desc' },
     }));
   },
 
@@ -81,18 +87,25 @@ export const ConnectorsRepo = {
 
   /** Upsert a Pending row before the OAuth round-trip starts.
    *  Connections are PER USER (configuredBy) per provider per org. */
+  /**
+   * The row an OAuth round-trip lands on. A principal is one row: the org's
+   * connection, one per group subject, one per user. Re-authorising finds
+   * the same row and sets it Pending again.
+   */
   async upsertPending(input: ConnectorInput): Promise<Connector> {
+    const principalType = input.principalType ?? 'org';
+    const subjectKey = principalType === 'user' ? (input.subjectKey ?? input.configuredBy ?? null) : principalType === 'group' ? (input.subjectKey ?? null) : null;
+    const subjectType = principalType === 'user' ? 'user' : principalType === 'group' ? (input.subjectType ?? null) : null;
     const existing = await prisma.connector.findFirst({
-      where: {
-        orgId:        input.orgId,
-        providerKey:  input.providerKey,
-        configuredBy: input.configuredBy ?? null,
-      },
+      where: principalType === 'org'
+        ? { orgId: input.orgId, providerKey: input.providerKey, principalType: 'org' }
+        : { orgId: input.orgId, providerKey: input.providerKey, principalType, subjectKey },
+      orderBy: { updatedAt: 'desc' },
     });
     if (existing) {
       return openConnector(await prisma.connector.update({
         where: { id: existing.id },
-        data: { displayName: input.displayName, status: 'Pending' },
+        data: { displayName: input.displayName, status: 'Pending', configuredBy: input.configuredBy ?? existing.configuredBy, subjectType, subjectKey, subjectLabel: input.subjectLabel ?? existing.subjectLabel },
       }));
     }
     return prisma.connector.create({
@@ -103,8 +116,44 @@ export const ConnectorsRepo = {
         status:       'Pending',
         authType:     input.authType ?? 'OAuth2',
         configuredBy: input.configuredBy ?? null,
+        principalType,
+        subjectType,
+        subjectKey,
+        subjectLabel: input.subjectLabel ?? null,
       },
     });
+  },
+
+  /** The org's shared connection for a provider — the newest Connected one. */
+  async getOrgConnection(orgId: string, providerKey: string): Promise<Connector | null> {
+    return openConnector(await prisma.connector.findFirst({
+      where: { orgId, providerKey, principalType: 'org', status: 'Connected' },
+      orderBy: { lastConnectedAt: 'desc' },
+    }));
+  },
+
+  /** Every group connection for a provider, Connected or not. */
+  async listGroupConnections(orgId: string, providerKey: string): Promise<Connector[]> {
+    return openAll(await prisma.connector.findMany({
+      where: { orgId, providerKey, principalType: 'group' },
+      orderBy: { subjectLabel: 'asc' },
+    }));
+  },
+
+  /** Every row for a provider — the detail page's three lists. */
+  async listPrincipals(orgId: string, providerKey: string): Promise<Connector[]> {
+    return openAll(await prisma.connector.findMany({
+      where: { orgId, providerKey },
+      orderBy: [{ principalType: 'asc' }, { lastConnectedAt: 'desc' }],
+    }));
+  },
+
+  /** A person's own row for a provider, whatever its status. */
+  async getUserRow(orgId: string, providerKey: string, userId: string): Promise<Connector | null> {
+    return openConnector(await prisma.connector.findFirst({
+      where: { orgId, providerKey, principalType: 'user', subjectKey: userId },
+      orderBy: { updatedAt: 'desc' },
+    }));
   },
 
   async markConnected(id: string, patch: {
