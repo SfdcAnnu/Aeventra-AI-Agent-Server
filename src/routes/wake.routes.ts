@@ -23,6 +23,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { logger } from '../logger';
 import { sessionAuth } from '../auth/session';
+import { isHostedEndpoint } from '../mcp/endpoint';
 
 export const wakeRouter = Router();
 
@@ -74,6 +75,12 @@ export async function probe(
 ): Promise<ProbeResult> {
   const url = target.url.trim().replace(/\/+$/, '');
   const started = Date.now();
+  // A provider-hosted endpoint (Google's drivemcp.googleapis.com/mcp/v1) is
+  // catalogued by its full path. Nothing of ours sleeps there; the provider
+  // keeps it up, and its root answers nothing useful to a probe.
+  if (isHostedEndpoint(url) && /^https:\/\//.test(url)) {
+    return { ...target, url, status: 'online', ms: 0, message: 'Hosted by the provider — always on.' };
+  }
   if (!ORIGIN_RE.test(url) && !LOCALHOST_RE.test(url)) {
     return { ...target, url, status: 'unreachable', ms: 0, message: 'URL must be an https origin (no path).' };
   }

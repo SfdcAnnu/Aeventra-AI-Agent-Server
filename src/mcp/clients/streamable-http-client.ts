@@ -6,6 +6,7 @@
  * OpenAI talk to the MCP server directly via their Managed MCP features.
  */
 import { logger } from '../../logger';
+import { mcpEndpoint } from '../endpoint';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const CLIENT_INFO      = { name: 'archon-portal', version: '0.1.0' };
@@ -27,7 +28,7 @@ export async function mcpListTools(opts: {
   remoteUrl:   string;
   accessToken: string;
 }): Promise<RemoteTool[]> {
-  const url = `${opts.remoteUrl.replace(/\/+$/, '')}/mcp`;
+  const url = mcpEndpoint(opts.remoteUrl);
   const auth = { Authorization: `Bearer ${opts.accessToken}` };
 
   // 1. Initialize

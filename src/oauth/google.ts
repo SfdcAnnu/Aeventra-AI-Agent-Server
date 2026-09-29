@@ -17,7 +17,20 @@ import { config } from '../config';
 
 const GOOGLE_AUTHORIZE = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN     = 'https://oauth2.googleapis.com/token';
-const GMAIL_SCOPES     = ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.modify'];
+
+/**
+ * One Google OAuth client, one connection per Google product. Each
+ * connector asks only for what its server needs: Gmail on Archon's own
+ * server (gmail.modify); Drive on Google's hosted Drive MCP server, which
+ * requires drive.readonly and drive.file.
+ */
+export const GOOGLE_SCOPES: Record<'gmail' | 'gdrive', string[]> = {
+  gmail:  ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.modify'],
+  gdrive: ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file'],
+};
+
+/** Connectors whose tokens come from Google and refresh at Google. */
+export const GOOGLE_PROVIDERS = new Set(Object.keys(GOOGLE_SCOPES));
 
 export function googleRedirectUri(): string {
   return `${config.serverPublicUrl.replace(/\/+$/, '')}/api/connectors/oauth/callback`;
@@ -27,15 +40,15 @@ export function googleConfigured(): boolean {
   return !!(config.google.clientId && config.google.clientSecret);
 }
 
-export function buildGoogleAuthorizeUrl(state: string): string {
+export function buildGoogleAuthorizeUrl(state: string, scopes: string[] = GOOGLE_SCOPES.gmail): string {
   if (!googleConfigured()) {
-    throw new Error('Gmail OAuth is not configured on the server — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in server/.env');
+    throw new Error('Google OAuth is not configured on the server — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in server/.env');
   }
   const params = new URLSearchParams({
     response_type: 'code',
     client_id:     config.google.clientId,
     redirect_uri:  googleRedirectUri(),
-    scope:         GMAIL_SCOPES.join(' '),
+    scope:         scopes.join(' '),
     state,
     access_type:   'offline',
     prompt:        'consent',

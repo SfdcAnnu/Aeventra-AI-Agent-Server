@@ -11,6 +11,7 @@
  * duplicate that here.
  */
 import { logger } from '../logger';
+import { mcpEndpoint } from './endpoint';
 
 interface JsonRpcResponse<T> {
   jsonrpc: '2.0';
@@ -34,7 +35,7 @@ async function rpc<T>(
   };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
-  const res = await fetch(`${baseUrl}/mcp`, { method: 'POST', headers, body: JSON.stringify(body) });
+  const res = await fetch(mcpEndpoint(baseUrl), { method: 'POST', headers, body: JSON.stringify(body) });
   const newSessionId = res.headers.get('mcp-session-id') ?? sessionId;
   const contentType = res.headers.get('content-type') ?? '';
 
@@ -74,7 +75,7 @@ async function initSession(baseUrl: string, token: string, extraHeaders: Record<
     params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'archon-server', version: '1.0' } },
   }, extraHeaders);
   if (!sessionId) return undefined;
-  await fetch(`${baseUrl}/mcp`, {
+  await fetch(mcpEndpoint(baseUrl), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`, 'Content-Type': 'application/json',
