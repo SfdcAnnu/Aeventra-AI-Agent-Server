@@ -187,9 +187,12 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
   }
 
   try {
+    // A personal row is the caller's own unless an admin named the person
+    // (signing in beside them): then it is that person's.
     const connector = await ConnectorsRepo.upsertPending({
       orgId, providerKey, displayName, authType: 'OAuth2', configuredBy: userId,
-      principalType, subjectType, subjectKey: principalType === 'user' ? userId : subjectKey, subjectLabel,
+      principalType, subjectType: principalType === 'user' ? 'user' : subjectType,
+      subjectKey: principalType === 'user' ? (subjectKey || userId) : subjectKey, subjectLabel,
     });
     ConnectorsCache.invalidateOrg(orgId);
     forgetGroupConnections(orgId);
