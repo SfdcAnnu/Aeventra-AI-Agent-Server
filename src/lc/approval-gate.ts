@@ -12,6 +12,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { logger } from '../logger';
 import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
 import type { AgentAction } from '../types';
+import type { ChatApproval } from '@prisma/client';
 
 export interface ApprovalMeta {
   orgId: string;
@@ -45,11 +46,58 @@ const suspendedMessage = (id: string): string =>
   'for the team. Tell the user the action is awaiting approval and will be completed once approved — do NOT say or ' +
   'imply it is already done.';
 
+/** How long a rejection keeps the same call from being re-submitted. */
+const REJECTION_HOLD_MS = 30 * 60 * 1000;
+
+const when = (d: Date | null | undefined): string => (d ? d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'earlier');
+
+/**
+ * THE SAME CALL IS ONE REQUEST, NOT ONE PER TURN.
+ *
+ * Every gated call used to open a new approval row. A person approved a
+ * deploy, it ran, and the agent — told "it's approved, check" — called
+ * deploy again and opened another request, nine turns running. The
+ * newest request for exactly this call answers instead: pending says so,
+ * executed hands back the result, rejected holds for a while. Null means
+ * a fresh request is right (nothing prior, failed, expired, or an old
+ * rejection).
+ */
+function priorVerdict(prior: ChatApproval): string | null {
+  const by = prior.decidedBy ? ' by a person' : '';
+  switch (prior.status) {
+    case 'Pending':
+    case 'Approved':
+      return `PENDING_APPROVAL: this exact action is already awaiting approval as request ${prior.id} (created ${when(prior.createdAt)}). ` +
+        'No new request was created and nothing ran. Tell the user it is still waiting for their approval; when they approve it, ' +
+        'its outcome appears in this conversation as an approval outcome — do not call this tool again for it.';
+    case 'Executed':
+      return `ALREADY_EXECUTED: this exact action was approved${by} and ran at ${when(prior.decidedAt)}; it was NOT run again. ` +
+        `Its result: ${(prior.resultText ?? '(no output)').slice(0, 4000)}`;
+    case 'Rejected':
+      if (prior.decidedAt && Date.now() - prior.decidedAt.getTime() < REJECTION_HOLD_MS) {
+        return `REJECTED: a person rejected this exact action at ${when(prior.decidedAt)}. It was not submitted again — ` +
+          'ask what they want changed instead of resubmitting it.';
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
 export function approvalGate(meta: ApprovalMeta): (t: StructuredToolInterface) => StructuredToolInterface {
   return (t: StructuredToolInterface) =>
     tool(
       async (args: unknown) => {
         try {
+          const prior = await ChatApprovalsRepo.findLatestForCall(meta.orgId, meta.sessionId, t.name, args).catch(() => null);
+          const verdict = prior ? priorVerdict(prior) : null;
+          if (verdict) {
+            logger.info(
+              { orgId: meta.orgId, sessionId: meta.sessionId, tool: t.name, approvalId: prior!.id, status: prior!.status },
+              'lc_chat_approval_repeated_call',
+            );
+            return verdict;
+          }
           const row = await ChatApprovalsRepo.create({ ...meta, toolName: t.name, argsJson: args });
           logger.info(
             { orgId: meta.orgId, agentApiName: meta.agentApiName, sessionId: meta.sessionId, tool: t.name, approvalId: row.id },

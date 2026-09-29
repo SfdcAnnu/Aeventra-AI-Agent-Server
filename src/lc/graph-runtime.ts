@@ -46,6 +46,7 @@ import { rememberScratch, recallScratch, clearScratch, withScratch, collectFindi
 import { InstallsCache } from '../db/installs-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
+import { approvalOutcomeMessage, isApprovalOutcome } from '../chat/approval-outcome';
 import { augmentConnectorsWithToolNodes } from '../chat/tool-node-connectors';
 import type { AgentDefinition, AgentNode, AgentAction } from '../types';
 import { buildGraph } from '../orchestrator/graph';
@@ -1018,7 +1019,16 @@ export function toLangchainMessages(
 
   for (let i = 0; i < history.length; i++) {
     const m = history[i];
-    if (m.role === 'system') continue;
+    if (m.role === 'system') {
+      // The one System row a turn must see: what a person decided about an
+      // action this conversation parked for approval, and how it went
+      // (approval-outcome.ts). The rest of the System rows are screen chrome.
+      if (isApprovalOutcome(m.content)) {
+        flushTools();
+        out.push(new HumanMessage(approvalOutcomeMessage(m.content)));
+      }
+      continue;
+    }
     if (m.role === 'tool') {
       const parsed = parsedByIndex.get(i);
       if (parsed) pending.push(parsed);

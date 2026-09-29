@@ -271,3 +271,86 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
   logger.info({ orgId, apiName: spec.apiName, agentId, nodes: nodes.length, created, engine: engine.engineType }, 'system_agent_synced');
   return { agentId: agentId!, apiName: spec.apiName, nodes: nodes.length, created, written: true, engine: engine.engineType, model: modelForTier(engine, spec.root.tier) };
 }
+
+export interface RefreshResult {
+  agentId: string;
+  apiName: string;
+  /** Nodes whose wording was rewritten from the spec. */
+  updated: number;
+  /** Spec nodes with no record to refresh — the org removed or renamed them. */
+  missing: string[];
+}
+
+/**
+ * THE WORDING OF AN ORG-OWNED AGENT, BROUGHT UP TO THE SPEC.
+ *
+ * An unmanaged agent is the org's after it is seeded: its wiring, tools
+ * and models are theirs to change, so a sync leaves it alone. Its
+ * instructions still come from this spec, and every improvement to them
+ * used to need a hand-written patch script per org. This rewrites only
+ * the words — the root's and each specialist's instructions, each tool's
+ * description — matched by spec key and tool name, and touches nothing
+ * else the org may have changed.
+ */
+export async function refreshSystemAgentInstructions(conn: Connection, orgId: string, spec: SystemAgentSpec): Promise<RefreshResult> {
+  const pc = pkgConn(conn);
+  const agent = await pc.query<{ Id: string }>(
+    `SELECT Id FROM AgentDefinition__c WHERE ApiName__c = '${spec.apiName.replace(/'/g, "\\'")}' LIMIT 1`,
+  );
+  const agentId = agent.records[0]?.Id;
+  if (!agentId) throw new Error(`${spec.apiName} is not in this org — sync it first.`);
+  const rows = await pc.query<{ Id: string; Name: string; NodeType__c: string; ConfigJson__c: string | null }>(
+    `SELECT Id, Name, NodeType__c, ConfigJson__c FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`,
+  );
+  const parse = (s: string | null): Record<string, unknown> => { try { return s ? JSON.parse(s) as Record<string, unknown> : {}; } catch { return {}; } };
+  const updates: Array<{ Id: string; ConfigJson__c: string }> = [];
+  const seen = new Set<string>();
+  const toolByName = new Map(spec.root.tools.map(t => [t.toolName, t]));
+  for (const s of spec.subagents) for (const t of s.tools) if (!toolByName.has(t.toolName)) toolByName.set(t.toolName, t);
+  const subByKey = new Map(spec.subagents.map(s => [s.key, s]));
+
+  for (const n of rows.records) {
+    const cfg = parse(n.ConfigJson__c);
+    let next: Record<string, unknown> | null = null;
+    if (n.NodeType__c === 'ai' && !seen.has('root')) {
+      seen.add('root');
+      next = {
+        ...cfg,
+        systemPrompt: spec.root.instructions,
+        ...(spec.root.maxReplyTokens ? { maxReplyTokens: spec.root.maxReplyTokens } : {}),
+        specVersion: spec.version,
+      };
+    } else if (n.NodeType__c === 'subagent') {
+      const s = typeof cfg.specKey === 'string' ? subByKey.get(cfg.specKey) : undefined;
+      if (s) {
+        seen.add(`sub:${s.key}`);
+        next = {
+          ...cfg,
+          systemPrompt: s.instructions,
+          routingDescription: s.routingDescription,
+          ...(s.maxReplyTokens ? { maxReplyTokens: s.maxReplyTokens } : {}),
+        };
+      }
+    } else if (n.NodeType__c === 'tool') {
+      const t = typeof cfg.toolName === 'string' ? toolByName.get(cfg.toolName) : undefined;
+      if (t) {
+        seen.add(`tool:${t.toolName}`);
+        next = { ...cfg, description: t.description };
+      }
+    }
+    if (next && JSON.stringify(next) !== JSON.stringify(cfg)) updates.push({ Id: n.Id, ConfigJson__c: JSON.stringify(next) });
+  }
+  if (updates.length > 0) {
+    const res = await pc.sobject('AgentNode__c').update(updates);
+    const failed = (Array.isArray(res) ? res : [res]).filter(r => !r.success);
+    if (failed.length > 0) throw new Error(`Could not refresh ${failed.length} node record(s) of ${spec.apiName}.`);
+  }
+  const missing = [
+    ...(seen.has('root') ? [] : ['root']),
+    ...spec.subagents.filter(s => !seen.has(`sub:${s.key}`)).map(s => s.name),
+    ...[...toolByName.keys()].filter(k => !seen.has(`tool:${k}`)),
+  ];
+  AgentCache.invalidate(orgId, spec.apiName);
+  logger.info({ orgId, apiName: spec.apiName, agentId, updated: updates.length, missing }, 'system_agent_instructions_refreshed');
+  return { agentId, apiName: spec.apiName, updated: updates.length, missing };
+}

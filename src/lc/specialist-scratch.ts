@@ -12,6 +12,8 @@
  *
  * In-process and bounded, like the tool-result cache; a restart forgets.
  */
+import { APPROVAL_OUTCOME_LABEL } from '../chat/approval-outcome';
+
 const TTL_MS = 15 * 60 * 1000;
 const MAX_ENTRIES = 300;
 const store = new Map<string, { report: string; at: number }>();
@@ -69,6 +71,12 @@ export function collectFindings(
 ): string[] {
   const out: string[] = [];
   for (const m of messages) {
+    // What a person decided about a parked action, and how it went — the
+    // deploy a specialist must not prepare again.
+    if (m?._getType?.() === 'human' && typeof m.content === 'string' && m.content.startsWith(APPROVAL_OUTCOME_LABEL)) {
+      out.push(m.content.slice(0, FINDING_CHARS));
+      continue;
+    }
     if (m?._getType?.() !== 'tool' || !m.name) continue;
     if (!specialistTools.has(m.name) && !/^(deploy|get_deploy_status|activate_flow|rollback)$/.test(m.name)) continue;
     const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '');
