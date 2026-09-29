@@ -18,6 +18,7 @@ import { runChatTurn } from '../chat/chat-engine';
 import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
 import { recordApprovalDecision, userDisplayNames } from '../salesforce/approval-audit';
 import { executeApprovedAction } from '../chat/approval-executor';
+import { invalidateSession } from '../lc/tool-result-cache';
 
 export const chatRouter = Router();
 
@@ -193,6 +194,9 @@ chatRouter.post('/api/chat/approvals/decide', sessionAuth, async (req, res) => {
     }
     try {
       const resultText = await executeApprovedAction(row);
+      // The org changed under the conversation: a describe or list this
+      // session cached before the write would now be stale.
+      invalidateSession(row.sessionId);
       await ChatApprovalsRepo.recordExecution(approvalId, true, resultText);
       void recordApprovalDecision(row, 'approved', deciderUserId, { status: 'Executed', resultText });
       res.json({ status: 'Executed', resultText: resultText.slice(0, 2000) });

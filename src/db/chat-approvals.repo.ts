@@ -69,6 +69,23 @@ export const ChatApprovalsRepo = {
     return r.count === 1;
   },
 
+  /**
+   * The newest request in this conversation for exactly this call — the
+   * same tool with the same arguments. The gate reads it before opening
+   * another: an approved deploy called again is answered with its result,
+   * a pending one with its request id, never with a second request.
+   */
+  async findLatestForCall(orgId: string, sessionId: string, toolName: string, argsJson: unknown): Promise<ChatApproval | null> {
+    await expireStale(orgId);
+    const rows = await prisma.chatApproval.findMany({
+      where: { orgId, sessionId, toolName },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    const wanted = stableJson(argsJson ?? {});
+    return rows.find(r => stableJson(r.argsJson) === wanted) ?? null;
+  },
+
   async recordExecution(id: string, ok: boolean, resultText: string): Promise<void> {
     await prisma.chatApproval.update({
       where: { id },
@@ -76,6 +93,15 @@ export const ChatApprovalsRepo = {
     });
   },
 };
+
+/** JSON with keys in one order, so equal arguments compare equal. */
+export function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map(k => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
 
 async function expireStale(orgId: string): Promise<void> {
   await prisma.chatApproval.updateMany({

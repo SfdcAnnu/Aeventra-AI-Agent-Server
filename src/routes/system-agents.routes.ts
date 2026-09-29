@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
 import { getOrgConnection } from '../salesforce/per-org-connection';
-import { syncSystemAgent } from '../platform/system-agents';
+import { refreshSystemAgentInstructions, syncSystemAgent } from '../platform/system-agents';
 import { SYSTEM_AGENTS } from '../platform/agents/registry';
 
 export const systemAgentsRouter = Router();
@@ -18,7 +18,10 @@ systemAgentsRouter.get('/api/system-agents', sessionAuth, (_req, res) => {
   res.json({ agents: Object.values(SYSTEM_AGENTS).map(s => ({ apiName: s.apiName, name: s.name, version: s.version, managed: s.managed !== false })) });
 });
 
-const syncSchema = z.object({ apiName: z.string().min(1).max(120) });
+// refreshInstructions: rewrite only the wording of an agent the org owns
+// (instructions and tool descriptions) from the shipped spec; a managed
+// agent is synced whole either way.
+const syncSchema = z.object({ apiName: z.string().min(1).max(120), refreshInstructions: z.boolean().optional() });
 
 systemAgentsRouter.post('/api/system-agents/sync', sessionAuth, async (req, res) => {
   const orgId = req.orgId!;
@@ -34,7 +37,9 @@ systemAgentsRouter.post('/api/system-agents/sync', sessionAuth, async (req, res)
   }
   try {
     const conn = await getOrgConnection(orgId);
-    const result = await syncSystemAgent(conn, orgId, spec);
+    const result = parsed.data.refreshInstructions && spec.managed === false
+      ? await refreshSystemAgentInstructions(conn, orgId, spec)
+      : await syncSystemAgent(conn, orgId, spec);
     res.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

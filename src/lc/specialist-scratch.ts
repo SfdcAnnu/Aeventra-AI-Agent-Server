@@ -12,6 +12,8 @@
  *
  * In-process and bounded, like the tool-result cache; a restart forgets.
  */
+import { APPROVAL_OUTCOME_LABEL } from '../chat/approval-outcome';
+
 const TTL_MS = 15 * 60 * 1000;
 const MAX_ENTRIES = 300;
 const store = new Map<string, { report: string; at: number }>();
@@ -43,4 +45,58 @@ export function clearScratch(sessionId: string | null | undefined, nodeId: strin
 export function withScratch(task: string, prior: string | null): string {
   if (!prior) return task;
   return `${task}\n\nYOUR PREVIOUS ATTEMPT IN THIS CONVERSATION was stopped by the turn budget after the tool results below. Continue from them: do not repeat these reads, fix what they show, and finish with your report.\n${prior}`;
+}
+
+/**
+ * WHAT THE CONVERSATION ALREADY ESTABLISHED.
+ *
+ * A finished specialist call clears its scratch, and the next call — next
+ * turn, or another specialist this turn — saw only its brief. A Metadata
+ * Expert conversation that had just created an object and its fields then
+ * asked for a layout, and the specialist described that object field by
+ * field again: 101 tool calls and a token-budget stop, for facts the chat
+ * already held. The earlier specialist results and deploy results are in
+ * the conversation as tool messages; this hands the newest of them to the
+ * specialist with its brief. Taken from the saved history, so a restart
+ * does not forget them.
+ */
+const FINDING_CHARS = 2500;
+const FINDINGS_CHARS = 9000;
+
+/** Tool results worth carrying: the named specialist calls, and what a
+ *  deploy or activation reported. */
+export function collectFindings(
+  messages: Array<{ name?: string; content?: unknown; _getType?: () => string }>,
+  specialistTools: Set<string>,
+): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    // What a person decided about a parked action, and how it went — the
+    // deploy a specialist must not prepare again.
+    if (m?._getType?.() === 'human' && typeof m.content === 'string' && m.content.startsWith(APPROVAL_OUTCOME_LABEL)) {
+      out.push(m.content.slice(0, FINDING_CHARS));
+      continue;
+    }
+    if (m?._getType?.() !== 'tool' || !m.name) continue;
+    if (!specialistTools.has(m.name) && !/^(deploy|get_deploy_status|activate_flow|rollback)$/.test(m.name)) continue;
+    const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '');
+    if (!text.trim() || /^Specialist failed|^Budget exhausted|^Parallel specialist limit/.test(text)) continue;
+    out.push(`${m.name}: ${text.length > FINDING_CHARS ? `${text.slice(0, FINDING_CHARS)} …(cut)` : text}`);
+  }
+  return out;
+}
+
+/** The brief with what is already known, newest last, under one cap. */
+export function withFindings(task: string, findings: string[]): string {
+  if (findings.length === 0) return task;
+  const kept: string[] = [];
+  let size = 0;
+  for (let i = findings.length - 1; i >= 0; i--) {
+    if (size + findings[i].length > FINDINGS_CHARS && kept.length > 0) break;
+    kept.unshift(findings[i]);
+    size += findings[i].length;
+  }
+  return `${task}\n\nALREADY ESTABLISHED IN THIS CONVERSATION (earlier specialist results and deploys, newest last). ` +
+    'What these name exists as they describe — use those API names, fields and values as given. Do not describe, list or retrieve ' +
+    `them again to confirm; read the org only for what is not here, or retrieve one you are about to modify.\n${kept.join('\n')}`;
 }
