@@ -19,6 +19,7 @@ import { logger } from '../logger';
 import type { AgentDefinition } from '../types';
 import type { ConnectorInput } from './adapters/types';
 import { METADATA_PROVIDER, PLATFORM_PROVIDER, SALESFORCE_TOKEN_PROVIDERS, providerOfAction } from './connector-scope';
+import { identityInputFromConfig } from '../identity/policy';
 
 /** The Archon server's own tool endpoint. In-process client, so loopback
  *  unless an operator points it elsewhere (a multi-instance deployment). */
@@ -106,6 +107,10 @@ export async function augmentConnectorsWithToolNodes(
       logger.warn({ agent: agent.apiName, provider }, 'tool_node_provider_not_registered');
       continue;
     }
+    // A tool node names a provider without a catalog node; the identity
+    // policy comes from a catalog node for that provider elsewhere on the
+    // canvas when there is one, else the org's connection as before.
+    const catalogCfg = agent.nodes.find(n => n.nodeType === 'catalog' && (n.config as { provider?: string })?.provider === provider)?.config;
     out.push({
       provider,
       mcpServerUrl: url,
@@ -115,6 +120,7 @@ export async function augmentConnectorsWithToolNodes(
       customTools: null,
       scope: 'nodes',
       headers: provider === METADATA_PROVIDER && sfInstanceUrl ? { [INSTANCE_URL_HEADER]: sfInstanceUrl } : null,
+      identity: identityInputFromConfig(catalogCfg as Record<string, unknown> | undefined),
     });
   }
   return out;

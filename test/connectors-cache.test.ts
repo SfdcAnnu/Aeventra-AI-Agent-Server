@@ -21,7 +21,7 @@ vi.mock('../src/db/connectors.repo', () => ({
 const { ConnectorsCache } = await import('../src/db/connectors-cache');
 
 const row = (over: Record<string, unknown> = {}) => ({
-  id: 'c1', orgId: 'org', providerKey: 'salesforce_mcp', configuredBy: 'user1',
+  id: 'c1', orgId: 'org', providerKey: 'salesforce_mcp', configuredBy: 'user1', principalType: 'user', subjectType: 'user', subjectKey: 'user1',
   status: 'Connected', accessToken: 'tok', refreshToken: 'r', tokenExpiresAt: null,
   updatedAt: new Date(), ...over,
 }) as never;

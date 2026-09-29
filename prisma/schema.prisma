@@ -44,11 +44,68 @@ model Connector {
   lastErrorMessage    String?
   configJson          String?   // free-form provider extras
 
+  // WHOSE connection this is. 'org': one shared account for everyone (the
+  // only kind that existed before); 'group': a department's shared account,
+  // bound to a Permission Set, Public Group or Department value; 'user':
+  // one person's own account (subjectKey = their SF user id).
+  principalType       String    @default("org")
+  subjectType         String?   // 'user' | 'permissionSet' | 'publicGroup' | 'department'
+  subjectKey          String?   // SF user id · PermissionSet/Group Id · Department value
+  subjectLabel        String?
+
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  @@unique([orgId, providerKey, configuredBy])
   @@index([orgId])
+  @@index([orgId, providerKey, principalType, subjectKey])
+}
+
+// The org-wide identity policy: what a new agent's connectors default to,
+// whether chat agents may fall back to the org's shared connection, how
+// group connections are scoped, and whether Salesforce identities are
+// minted for people without a click (JWT bearer through the ECA).
+model OrgIdentityPolicy {
+  orgId                   String   @id
+  defaultRunAs            String   @default("user")    // user | group | org
+  defaultFallback         String   @default("none")    // none | org
+  blockOrgFallbackForChat Boolean  @default(true)
+  groupKeyType            String   @default("permissionSet") // permissionSet | publicGroup | department
+  sfJwtEnabled            Boolean  @default(false)
+  allowedDomainsJson      String?  // JSON string[] of sign-in domains
+  reminderEveryDays       Int      @default(3)
+  reminderMax             Int      @default(3)
+  updatedAt               DateTime @updatedAt
+}
+
+// An admin's override of where a connector's MCP server is and how it
+// authenticates. The shipped default lives in ConnectorCatalog__mdt.
+model ConnectorServerOverride {
+  id           String   @id @default(uuid())
+  orgId        String
+  providerKey  String
+  mcpServerUrl String
+  authStyle    String   @default("provider-token") // provider-token | mcp-oauth | api-key | salesforce-session | none
+  apiKey       String?  // sealed
+  updatedBy    String?
+  updatedAt    DateTime @updatedAt
+
+  @@unique([orgId, providerKey])
+}
+
+// Reminders sent to a person to connect their own account for a provider —
+// one row per (org, provider, user), counting sends.
+model ConnectionReminder {
+  id           String   @id @default(uuid())
+  orgId        String
+  providerKey  String
+  userId       String
+  agentApiName String?
+  channel      String   @default("email")
+  count        Int      @default(1)
+  firstSentAt  DateTime @default(now())
+  lastSentAt   DateTime @default(now())
+
+  @@unique([orgId, providerKey, userId])
 }
 
 // Short-lived rows that anchor an OAuth round-trip. State (a UUID) is the

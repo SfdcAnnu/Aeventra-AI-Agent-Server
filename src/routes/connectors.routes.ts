@@ -36,6 +36,7 @@ import {
   fetchMicrosoftUserInfo,
 } from '../oauth/microsoft';
 import type { OrgInstall } from '@prisma/client';
+import { forgetGroupConnections } from '../identity/resolver';
 
 export const connectorsRouter = Router();
 
@@ -148,8 +149,27 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
   const providerKey = String(req.body?.providerKey ?? '');
   const displayName = String(req.body?.displayName ?? providerKey);
   const returnUrl   = String(req.body?.returnUrl ?? '');
-  // The SF user starting the flow — connections are PER USER.
+  // The SF user starting the flow. WHOSE connection this becomes is the
+  // principal: 'user' (their own), 'group' (a department's shared account,
+  // bound to a subject) or 'org' (the one shared account). A caller that
+  // says nothing gets what it always got: a personal row for Salesforce,
+  // the org row for everything else.
   const userId      = String(req.body?.userId ?? '') || null;
+  const principalRaw = String(req.body?.principalType ?? '');
+  const principalType: 'org' | 'group' | 'user' =
+    principalRaw === 'user' || principalRaw === 'group' || principalRaw === 'org' ? principalRaw
+    : providerKey === 'salesforce_mcp' ? 'user' : 'org';
+  const subjectType  = req.body?.subjectType ? String(req.body.subjectType) : null;
+  const subjectKey   = req.body?.subjectKey ? String(req.body.subjectKey) : null;
+  const subjectLabel = req.body?.subjectLabel ? String(req.body.subjectLabel) : null;
+  if (principalType === 'group' && (!subjectType || !subjectKey)) {
+    res.status(400).json({ error: 'missing_subject', message: 'A group connection needs subjectType and subjectKey.' });
+    return;
+  }
+  if (principalType === 'user' && !userId) {
+    res.status(400).json({ error: 'missing_user', message: 'A personal connection needs userId.' });
+    return;
+  }
 
   const provider = OAUTH_PROVIDERS[providerKey];
   if (!provider) {
@@ -169,8 +189,10 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
   try {
     const connector = await ConnectorsRepo.upsertPending({
       orgId, providerKey, displayName, authType: 'OAuth2', configuredBy: userId,
+      principalType, subjectType, subjectKey: principalType === 'user' ? userId : subjectKey, subjectLabel,
     });
     ConnectorsCache.invalidateOrg(orgId);
+    forgetGroupConnections(orgId);
     const state = crypto.randomUUID();
     const pkce = provider.pkce ? createPkcePair() : null;
     await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id, codeVerifier: pkce?.verifier ?? null });
@@ -238,6 +260,8 @@ connectorsRouter.get('/api/connectors/oauth/callback', async (req, res) => {
     logger.info({ providerKey: pending.providerKey }, 'connector_oauth_exchanging_code');
     const result = await provider.finish(code, pending.codeVerifier);
     await ConnectorsRepo.markConnected(pending.connectorId, result);
+    ConnectorsCache.invalidateOrg(pending.orgId);
+    forgetGroupConnections(pending.orgId);
     logger.info({
       orgId: pending.orgId,
       providerKey: pending.providerKey,

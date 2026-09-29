@@ -90,6 +90,15 @@ export const config = {
     remoteMcpUrl: optional('SF_REMOTE_MCP_URL'),
   },
 
+  // Salesforce JWT bearer: the External Client App's consumer key and the
+  // private key of the certificate uploaded to it. Lets the server act as
+  // any pre-authorised user without a sign-in click (oauth/salesforce-jwt.ts).
+  sfJwt: {
+    clientId:   optional('SF_JWT_CLIENT_ID'),
+    privateKey: optional('SF_JWT_PRIVATE_KEY'),
+    loginUrl:   optional('SF_JWT_LOGIN_URL', 'https://login.salesforce.com'),
+  },
+
   // Public-facing base URL of THIS server. Used to build the OAuth
   // redirect_uri the External Client App / Auth Provider sends users back to.
   // Example: https://archon.example.com  (or ngrok URL for dev)

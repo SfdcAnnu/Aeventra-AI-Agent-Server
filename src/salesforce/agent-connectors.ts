@@ -27,6 +27,7 @@ import { logger } from '../logger';
 import type { AgentDefinition } from '../types';
 import type { ConnectorInput } from '../chat/adapters/types';
 import { providerUrls } from '../chat/tool-node-connectors';
+import { identityInputFromConfig } from '../identity/policy';
 
 interface CatalogConfig {
   provider?: unknown;
@@ -89,6 +90,7 @@ export async function connectorsForAgent(
         // refuses to fall back to the org token on a PerUser agent.
         accessMode: provider === 'salesforce_mcp' ? (agent.accessMode ?? 'Org') : null,
         customTools,
+        identity: identityInputFromConfig(cfg as Record<string, unknown>),
       });
     }
     return out;

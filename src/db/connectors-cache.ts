@@ -59,8 +59,10 @@ export const ConnectorsCache = {
   /** After a token refresh writes back: the next turn must see the new
    *  tokenExpiresAt, or freshConnectorToken refreshes again. */
   put(row: Connector): void {
-    if (!row.configuredBy) return;   // org-level rows are not looked up here
-    cache.set(key(row.orgId, row.providerKey, row.configuredBy), { data: row, expiresAt: Date.now() + TTL_MS });
+    // Only a person's own row is looked up here; org and group rows have
+    // their own paths.
+    if (row.principalType !== 'user' || !row.subjectKey) return;
+    cache.set(key(row.orgId, row.providerKey, row.subjectKey), { data: row, expiresAt: Date.now() + TTL_MS });
   },
 
   /** Connect / reconnect / disconnect: rare, and the safe move is to

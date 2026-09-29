@@ -31,6 +31,32 @@ export interface ConnectorInput {
   scope?: 'catalog' | 'nodes' | null;
   /** Extra request headers for this server (the metadata server's instance-URL hint). */
   headers?: Record<string, string> | null;
+  /** Whose account this connector runs as — the node's identity policy
+   *  (identity/policy.ts). Absent = the org's connection, as before. */
+  identity?: {
+    runAs?: string | null;
+    fallback?: string | null;
+    required?: boolean | null;
+    automationRunAs?: string | null;
+    allowedDomain?: string | null;
+  } | null;
+}
+
+/** Who a tool call ran as. */
+export interface RanAs {
+  type: 'user' | 'group' | 'org';
+  subjectKey?: string | null;
+  subjectLabel?: string | null;
+  accountEmail?: string | null;
+  via?: 'connection' | 'jwt' | 'setup' | 'platform';
+}
+
+/** A connector the turn could not use because the person has no identity for it. */
+export interface NeedsConnection {
+  provider: string;
+  reason: 'needs_connection' | 'needs_group_connection' | 'wrong_account' | 'expired';
+  wanted: 'user' | 'group' | 'org';
+  message: string;
 }
 
 export interface EngineOverrideInput {
@@ -88,6 +114,11 @@ export interface ChatTurnRequest {
   attachments?: AttachmentInput[];
   engineOverride?: EngineOverrideInput;
   connectors?: ConnectorInput[];
+  /** 'chat' (default) or 'automation' — decides whose identity a connector
+   *  runs with (identity/policy.ts). */
+  runKind?: 'chat' | 'automation';
+  /** Filled during the turn: connectors the person has no identity for. */
+  identityNotes?: NeedsConnection[];
   /** AgentDefinition__c.DebugMode__c — when true, adapters capture the raw
    *  request/response JSON for every provider call this turn (see
    *  ChatTurnResult.debugRequest/debugResponse). Off by default; storing
@@ -154,6 +185,8 @@ export interface ToolCallSummary {
   output?: unknown;
   isError?: boolean;
   serverName?: string; // which connector/MCP server this call went through
+  /** Whose account the call ran with. */
+  ranAs?: RanAs;
   /** For a call into a specialist (ask_*): the tool calls the specialist
    *  made in its own turn, so a client can show the work, not only the
    *  hand-off. One level — specialists have no specialists. */
@@ -212,4 +245,7 @@ export interface ChatTurnResult {
    *  round) — Apex stores these verbatim on the assistant ChatMessage__c. */
   debugRequest?: unknown[];
   debugResponse?: unknown[];
+  /** Connectors this turn could not use for want of the person's own
+   *  identity — the chat shows a connect card for each. */
+  needsConnection?: NeedsConnection[];
 }

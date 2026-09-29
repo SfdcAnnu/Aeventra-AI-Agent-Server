@@ -16,6 +16,10 @@ import { ConnectorsRepo } from '../../db/connectors.repo';
 import { ConnectorsCache } from '../../db/connectors-cache';
 import { refreshGoogleToken, GOOGLE_PROVIDERS } from '../../oauth/google';
 import { isHostedEndpoint, mcpEndpoint } from '../../mcp/endpoint';
+import { resolveIdentity, useTokenFreshener } from '../../identity/resolver';
+import { policyFor, type RunKind } from '../../identity/policy';
+import { OrgIdentityPolicyRepo, ServerOverrideRepo } from '../../db/identity.repo';
+import type { NeedsConnection, RanAs } from './types';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
 import { hasReadyKbDocumentsCached, retrieveKb, formatKbContext } from '../../kb/retriever';
@@ -103,7 +107,13 @@ export interface ResolvedMcpServer {
   token:        string;      // bearer for that MCP server
   allowedTools: string[];    // empty = expose all tools
   headers?:     Record<string, string>; // extra request headers (instance-URL hint)
+  /** Whose account the token belongs to — stamped on every tool call. */
+  ranAs?:       RanAs;
 }
+
+// The identity resolver refreshes tokens through this file's freshener
+// (it cannot import it: shared.ts imports the resolver).
+useTokenFreshener(row => freshConnectorToken(row));
 
 // ── allowedTools sanitization ───────────────────────────────────────
 // Agents saved before the live-catalog change carry STALE tool names
@@ -262,8 +272,13 @@ export async function resolveMcpServers(
    *  hit, and nothing readable in it accounts for that; the marks say
    *  which part rather than leaving it to be guessed at. */
   timing?: Record<string, number>,
+  /** Filled with every connector the person has no identity for (the chat
+   *  shows a connect card per entry). */
+  notes?: NeedsConnection[],
 ): Promise<ResolvedMcpServer[]> {
   const out: ResolvedMcpServer[] = [];
+  const orgPolicy = await OrgIdentityPolicyRepo.get(req.context.orgId);
+  const runKind: RunKind = req.runKind ?? (req.mustReadFirst ? 'automation' : 'chat');
   // Connectors resolve in parallel, so per stage the slowest one is the
   // turn's cost, not the sum.
   const mark = (k: string, t0: number) => {
@@ -333,18 +348,27 @@ export async function resolveMcpServers(
     // A rejection still propagates: resolveProviderToken's PerUser
     // hard-fail must reach the caller, and Promise.all rejects on the
     // first one exactly as the loop's rethrow did.
-    const resolved = await Promise.all(planned.map(async ({ c, name, base }) => {
+    const resolved = await Promise.all(planned.map(async ({ c, name, base: catalogBase }) => {
       const tTok = Date.now();
-      const token = await resolveProviderToken({
-        orgId: req.context.orgId, userId: req.context.userId,
-        provider: c.provider, connectorId: c.connectorId, accessMode: c.accessMode, sfAccessToken,
-        sessionId: req.sessionId, agentApiName: req.agent.apiName,
+      // WHOSE ACCOUNT. The node's policy (or the legacy access mode) says
+      // user, group or org; the resolver answers with a token and the
+      // principal, or with what the person still has to connect.
+      const policy = policyFor(c.identity, c.accessMode, orgPolicy, runKind);
+      const identity = await resolveIdentity({
+        orgId: req.context.orgId, userId: req.context.userId, provider: c.provider, policy, kind: runKind,
+        explicitConnectorId: c.connectorId, sfAccessToken,
+        sessionId: req.sessionId, agentApiName: req.agent.apiName, orgPolicy,
       });
-      if (!token) {
-        logger.warn({ provider: c.provider, orgId: req.context.orgId },
-          'mcp_connector_skipped_no_token');
+      if (!identity.ok) {
+        logger.warn({ provider: c.provider, orgId: req.context.orgId, reason: identity.reason, wanted: identity.wanted },
+          'mcp_connector_skipped_no_identity');
+        notes?.push({ provider: c.provider, reason: identity.reason, wanted: identity.wanted, message: identity.message });
         return null;
       }
+      const token = identity.token;
+      // An admin may have pointed this connector at another server.
+      const override = await ServerOverrideRepo.get(req.context.orgId, c.provider).catch(() => null);
+      const base = override?.mcpServerUrl ? override.mcpServerUrl.replace(/\/+$/, '') : catalogBase;
       mark('token', tTok);
       // A provider-hosted endpoint (Google's Drive server) is always up and
       // has no public catalog: nothing to wake, nothing to check names against.
@@ -388,7 +412,11 @@ export async function resolveMcpServers(
       if (c.provider === 'salesforce_metadata' && sfInstanceUrl && !headers['X-Salesforce-Instance-Url']) {
         headers['X-Salesforce-Instance-Url'] = sfInstanceUrl;
       }
-      return { name, url, token, allowedTools, headers: Object.keys(headers).length ? headers : undefined };
+      const ranAs: RanAs = {
+        type: identity.principal.type, subjectKey: identity.principal.subjectKey, subjectLabel: identity.principal.subjectLabel,
+        accountEmail: identity.principal.accountEmail ?? null, via: identity.principal.via,
+      };
+      return { name, url, token, allowedTools, headers: Object.keys(headers).length ? headers : undefined, ranAs };
     }));
 
     for (const r of resolved) if (r) out.push(r);

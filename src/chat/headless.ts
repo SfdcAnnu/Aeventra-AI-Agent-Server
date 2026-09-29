@@ -71,6 +71,9 @@ export async function runHeadlessAiStep(
     // in a row, instructions or not; a Task someone had deleted was never
     // recreated. An unattended run with tools now has to look first.
     mustReadFirst: connectors.length > 0,
+    // An unattended run: connectors resolve their identity for the
+    // triggering user, never with a chat's connect card.
+    runKind: 'automation',
     context: {
       orgId: ctx.orgId,
       userId: ctx.userId,
