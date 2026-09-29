@@ -37,6 +37,9 @@ import {
 } from '../oauth/microsoft';
 import type { OrgInstall } from '@prisma/client';
 import { forgetGroupConnections } from '../identity/resolver';
+import { accountMatchesDomains } from '../identity/policy';
+import { OrgIdentityPolicyRepo } from '../db/identity.repo';
+import { SALESFORCE_TOKEN_PROVIDERS } from '../chat/connector-scope';
 
 export const connectorsRouter = Router();
 
@@ -262,6 +265,21 @@ connectorsRouter.get('/api/connectors/oauth/callback', async (req, res) => {
   try {
     logger.info({ providerKey: pending.providerKey }, 'connector_oauth_exchanging_code');
     const result = await provider.finish(code, pending.codeVerifier);
+    // A person's (or a team's) account must be on the org's allowed
+    // domains, if it set any — a personal mailbox signed in against a
+    // corporate agent is refused here, before it is ever used.
+    const row = await ConnectorsRepo.getById(pending.orgId, pending.connectorId).catch(() => null);
+    if (row && row.principalType !== 'org' && !SALESFORCE_TOKEN_PROVIDERS.has(pending.providerKey)) {
+      const domains = (await OrgIdentityPolicyRepo.get(pending.orgId)).allowedDomains;
+      if (domains.length && !accountMatchesDomains(result.accountEmail ?? null, domains)) {
+        const message = `${result.accountEmail ?? 'That account'} is outside the allowed sign-in domain${domains.length === 1 ? '' : 's'} (${domains.join(', ')}). Sign in again with a work account.`;
+        logger.warn({ orgId: pending.orgId, providerKey: pending.providerKey, accountEmail: result.accountEmail, domains }, 'connector_oauth_wrong_domain');
+        await ConnectorsRepo.markError(pending.connectorId, message).catch(() => null);
+        ConnectorsCache.invalidateOrg(pending.orgId);
+        bounce(false);
+        return;
+      }
+    }
     await ConnectorsRepo.markConnected(pending.connectorId, result);
     ConnectorsCache.invalidateOrg(pending.orgId);
     forgetGroupConnections(pending.orgId);
