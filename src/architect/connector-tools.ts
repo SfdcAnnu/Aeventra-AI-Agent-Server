@@ -14,9 +14,13 @@
  */
 const MAIL_TOOLS = ['sendEmail', 'createDraft', 'replyEmail', 'searchEmails', 'listEmails', 'readEmail', 'markEmail', 'moveEmail', 'getAttachments', 'getProfile'];
 
+/** Google's hosted Drive MCP server (drivemcp.googleapis.com), as documented. */
+const DRIVE_TOOLS = ['search_files', 'list_recent_files', 'get_file_metadata', 'read_file_content', 'download_file_content', 'create_file', 'copy_file', 'get_file_permissions'];
+
 export const KNOWN_CONNECTOR_TOOLS: Record<string, string[]> = {
   gmail: [...MAIL_TOOLS, 'listLabels'],
   outlook: [...MAIL_TOOLS, 'listFolders'],
+  gdrive: DRIVE_TOOLS,
 };
 
 export interface ConnectorOffer { connector: string; tools: string[]; connected: boolean }

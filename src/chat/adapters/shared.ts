@@ -14,7 +14,8 @@ import { mintPlatformToken } from '../../platform/token';
 import { logger } from '../../logger';
 import { ConnectorsRepo } from '../../db/connectors.repo';
 import { ConnectorsCache } from '../../db/connectors-cache';
-import { refreshGoogleToken } from '../../oauth/google';
+import { refreshGoogleToken, GOOGLE_PROVIDERS } from '../../oauth/google';
+import { isHostedEndpoint, mcpEndpoint } from '../../mcp/endpoint';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
 import { hasReadyKbDocumentsCached, retrieveKb, formatKbContext } from '../../kb/retriever';
@@ -45,7 +46,7 @@ export async function freshConnectorToken(row: Connector): Promise<string | null
   if (!stale || !row.refreshToken) return row.accessToken ?? null;
 
   try {
-    if (row.providerKey === 'gmail') {
+    if (GOOGLE_PROVIDERS.has(row.providerKey)) {
       const tok = await refreshGoogleToken(row.refreshToken);
       const updated = await ConnectorsRepo.updateTokens(row.id, {
         accessToken:    tok.access_token,
@@ -345,11 +346,14 @@ export async function resolveMcpServers(
         return null;
       }
       mark('token', tTok);
+      // A provider-hosted endpoint (Google's Drive server) is always up and
+      // has no public catalog: nothing to wake, nothing to check names against.
+      const hosted = isHostedEndpoint(base);
       const tAwake = Date.now();
-      await ensureMcpServerAwake(base);
+      if (!hosted) await ensureMcpServerAwake(base);
       mark('awake', tAwake);
       const tCat = Date.now();
-      const checked = await sanitizeAllowedTools(base, c.allowedTools ?? []);
+      const checked = hosted ? (c.allowedTools ?? []) : await sanitizeAllowedTools(base, c.allowedTools ?? []);
       mark('catalog', tCat);
       if (checked === null) return null;   // every saved name is stale — fail closed
       let allowedTools = checked;
@@ -358,8 +362,8 @@ export async function resolveMcpServers(
       // registers them dynamically from the ?custom= query param and names
       // them {type}__{safeName}. Their names must ride along in
       // allowed_tools when a restriction list is active.
-      let url = `${base}/mcp`;
-      const custom = (c.customTools ?? []).filter(t =>
+      let url = mcpEndpoint(base);
+      const custom = hosted ? [] : (c.customTools ?? []).filter(t =>
         (t.type === 'apex' || t.type === 'flow') && /^[a-zA-Z0-9_.]{1,255}$/.test(t.name));
       if (custom.length > 0) {
         url += `?custom=${encodeURIComponent(custom.map(t => `${t.type}:${t.name}`).join(','))}`;

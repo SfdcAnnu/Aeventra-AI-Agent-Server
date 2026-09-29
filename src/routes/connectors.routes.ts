@@ -27,6 +27,7 @@ import {
   buildGoogleAuthorizeUrl,
   exchangeGoogleCode,
   fetchGoogleUserInfo,
+  GOOGLE_SCOPES,
 } from '../oauth/google';
 import {
   microsoftConfigured,
@@ -111,10 +112,18 @@ const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
       };
     },
   },
-  gmail: {
+  // The same Google OAuth client, one connection per product with its own
+  // scopes: Gmail runs on Archon's server, Drive on Google's hosted MCP
+  // server (ConnectorCatalog__mdt.gdrive.McpServerUrl__c points at it).
+  gmail:  googleProvider('gmail'),
+  gdrive: googleProvider('gdrive'),
+};
+
+function googleProvider(key: 'gmail' | 'gdrive'): OAuthProvider {
+  return {
     configured: googleConfigured,
-    notConfiguredHint: 'Gmail OAuth is not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in server/.env and register the callback URL on the Google OAuth client.',
-    authorizeUrl: buildGoogleAuthorizeUrl,
+    notConfiguredHint: `${key === 'gmail' ? 'Gmail' : 'Google Drive'} OAuth is not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in server/.env and register the callback URL on the Google OAuth client.`,
+    authorizeUrl: (state) => buildGoogleAuthorizeUrl(state, GOOGLE_SCOPES[key]),
     finish: async (code) => {
       const tok = await exchangeGoogleCode(code);
       const who = await fetchGoogleUserInfo(tok.access_token);
@@ -127,8 +136,8 @@ const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
         externalAccountId: who.id ?? null,
       };
     },
-  },
-};
+  };
+}
 
 // ── POST /api/connectors/oauth/start ─────────────────────────────────
 // Called by Apex when a user hits Connect. Returns the provider's
