@@ -31,10 +31,18 @@ can, and the Architect owns the rest.
 8. **Context policy defaults to isolated.** A child that needs a parent's
    value gets it named in carryFields, not a wider policy. isolated vs full
    is up to 18x on child calls.
-9. **Every write is gated unless the client explicitly said otherwise.**
-   approval.required compiles to the runtime's approval-as-suspension: the
-   call parks for a human decision, the customer is told it is awaiting
-   approval, and the claim guard forbids pretending it ran.
+9. **Approval on writes follows the audience.** approval.required compiles
+   to the runtime's approval-as-suspension: the call parks for a human
+   decision and the claim guard forbids pretending it ran.
+   - audience "internal" (employees read the replies): gate every write
+     unless the client said otherwise.
+   - audience "customer" (WhatsApp, a public web chat): do NOT gate the
+     creates and updates the requirement asks the agent to make. The
+     customer cannot approve anything; a gate there leaves them waiting on
+     an approver they never see. Gate only what the requirement says needs
+     a human check.
+   - A delete, or anything irreversible, is always gated, whatever the
+     audience (the compiler enforces this for deletes).
 10. **Budgets on every spec.** Steps, cost, timeout. The runtime brakes
     BEFORE each model call and degrades to a graceful reply, never a hang.
 11. **Idempotency is provided for turns, not for tools.** A replayed webhook

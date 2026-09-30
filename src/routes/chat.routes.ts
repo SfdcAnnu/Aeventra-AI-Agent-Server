@@ -131,7 +131,9 @@ chatRouter.post('/api/chat/turn', sessionAuth, async (req, res) => {
     });
     res.json({
       ...result,
-      phaseMs: { preTurn: preTurnMs, ...(result.phaseMs ?? {}), route: Date.now() - routeT0 },
+      // Apex stores phaseMs whole as PhaseMsJson__c, so the turn's warnings
+      // ride along and reach the record without an Apex change.
+      phaseMs: { preTurn: preTurnMs, ...(result.phaseMs ?? {}), route: Date.now() - routeT0, ...(result.warnings?.length ? { warnings: result.warnings } : {}) },
     });
   } catch (err) {
     logger.error({ err, orgId, agentApiName: parsed.data.agentApiName }, 'chat_turn_failed');

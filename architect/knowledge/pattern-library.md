@@ -56,13 +56,18 @@ true with the arithmetic ("300 items × 8,100 tokens > 0.6 × window").
 
 ## 6 · Approval-gated write
 
-**When:** any write that is costly, irreversible, or customer-visible.
+**When:** any write by an agent whose replies employees read (audience
+"internal"); any delete or irreversible action, for every audience; and a
+write the requirement explicitly says needs a human check. NOT the ordinary
+creates and updates of a customer-facing agent — the customer cannot
+approve, so the gate would only leave them waiting.
 **Shape:** the write tool with `approval: { required: true }` — no separate
 approval node.
-**Spec:** at runtime the call suspends as a pending approval; the customer
-is told it awaits approval; approvers decide from the conversation or the
-Approvals page. The agent's instructions never promise completion —
-the claim guard enforces that too.
+**Spec:** at runtime the call suspends as a pending approval; an employee is
+told it awaits their approval on the card; a customer is told the team is
+confirming it. Approvers decide from the conversation or the Approvals
+page. The agent's instructions never promise completion — the claim guard
+enforces that too.
 
 ## 7 · Knowledge-grounded answers
 

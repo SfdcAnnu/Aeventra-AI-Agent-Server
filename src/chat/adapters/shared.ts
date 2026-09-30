@@ -712,6 +712,18 @@ export async function buildSystemPromptParts(
     'the conversation calls for it — never invent a value a tool can fetch. When several tool calls are ' +
     'independent of each other, make them in ONE response — they execute in parallel.',
   );
+  // Three rules every conversation needs, whatever the agent does. Each
+  // was broken live in the 30 Sep 2026 agent test run: a failed price
+  // query told a customer the product did not exist; a Hindi question
+  // left every later English reply in Hindi; an email the visitor had just
+  // typed was asked for again.
+  stableParts.push(
+    'A tool result that starts with "Error", or says a lookup or action failed, is an ERROR, not an answer: ' +
+    'never tell the person that something does not exist, is not available or was not found because a tool ' +
+    'failed — say you could not check it right now. ' +
+    'Reply in the language of the person\'s LATEST message, even if earlier messages used another language. ' +
+    'Never ask again for something the person already told you in this conversation — use what they gave.',
+  );
   stableParts.push(
     'CRITICAL — never end your turn on a narration-only sentence. ' +
     'A phrase like "let me check that," "let me get that updated," or "let me look that up" is a placeholder, ' +
