@@ -58,9 +58,13 @@ export interface FieldSummary {
   required: boolean;
   updateable: boolean;
   picklistValues?: string[];
+  /** Only with `{ access: true }` -- the field check needs them, the
+   *  model-facing callers do not (they would only lengthen prompts). */
+  filterable?: boolean;
+  createable?: boolean;
 }
 
-export async function describeObjectCompact(orgId: string, objectName: string, maxFields = 80): Promise<{
+export async function describeObjectCompact(orgId: string, objectName: string, maxFields = 80, opts: { access?: boolean } = {}): Promise<{
   name: string;
   fields: FieldSummary[];
   totalFields: number;
@@ -75,6 +79,8 @@ export async function describeObjectCompact(orgId: string, objectName: string, m
         type: string;
         nillable: boolean;
         updateable: boolean;
+        filterable: boolean;
+        createable: boolean;
         picklistValues?: Array<{ value: string; active: boolean }>;
       }>;
     }>;
@@ -88,6 +94,7 @@ export async function describeObjectCompact(orgId: string, objectName: string, m
       type: f.type,
       required: !f.nillable,
       updateable: f.updateable,
+      ...(opts.access ? { filterable: f.filterable, createable: f.createable } : {}),
       ...(f.picklistValues?.length
         ? { picklistValues: f.picklistValues.filter(v => v.active).slice(0, 15).map(v => v.value) }
         : {}),

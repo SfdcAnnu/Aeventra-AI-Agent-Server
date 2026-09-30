@@ -54,6 +54,7 @@ import { repairNames, suggestNames, type AvailableNames } from './name-repair';
 import { applyPromptMap, applySpecPatch, isSpecPatch } from './spec-merge';
 import { inventoryFromGather } from './survey-inventory';
 import { mentionedObjects, verifyPrerequisites, settleTrigger } from './org-facts';
+import { collectFieldRefs, fieldProblems, type DescribeFields, type FieldFacts } from './field-check';
 import { connectorOffers } from './connector-tools';
 import { compileSpec, CompileError } from './compiler';
 
@@ -138,7 +139,17 @@ export interface ReviewResult {
   fixes?: Array<Record<string, unknown>>;
   /** True when a repair round ran and the verdict below is the re-check. */
   repaired?: boolean;
+  /** True when the repair round ran out of REVIEW_REPAIR_MS: the design
+   *  that passed validation before it is the one saved, with the open
+   *  findings kept as notes. */
+  repairTimedOut?: boolean;
 }
+
+/** The longest a review's repair round may take. It is a patch, prompts for
+ *  what the patch touched, and a re-judge -- a few minutes when healthy.
+ *  Without a ceiling a build sat in "repairing the design" for 54 minutes
+ *  (30 Sep 2026) until a redeploy killed it, and saved nothing. */
+const REVIEW_REPAIR_MS = Number(process.env.ARCHITECT_REVIEW_REPAIR_MS ?? 6 * 60 * 1000);
 
 export interface BuildJob {
   id: string;
@@ -273,6 +284,36 @@ function fromRow(row: {
     startedAt: row.startedAt.getTime(),
     finishedAt: row.finishedAt?.getTime(),
   };
+}
+
+/**
+ * BUILDS ORPHANED BY A RESTART ARE MARKED FAILED AT STARTUP.
+ *
+ * A build runs in this process's memory. When the host restarts or
+ * redeploys mid-build, the row stays "running" forever: polling shows a
+ * build that never moves, and no resume path accepts a running build. Live
+ * (30 Sep 2026) a redeploy did exactly that. At startup nothing in THIS
+ * process is building yet, so every running/queued row is an orphan. It
+ * becomes failed, which the resume path accepts when a design was
+ * checkpointed -- the person continues from the last finished stage
+ * instead of paying for the whole build again.
+ */
+export async function failOrphanedBuilds(): Promise<number> {
+  try {
+    const { count } = await prisma.architectBuild.updateMany({
+      where: { status: { in: ['running', 'queued'] } },
+      data: {
+        status: 'failed',
+        error: 'The server restarted while this build was running. Continue it to pick up from the last finished stage.',
+        finishedAt: new Date(),
+      },
+    });
+    if (count > 0) logger.warn({ count }, 'architect_orphaned_builds_failed');
+    return count;
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, 'architect_orphan_sweep_failed');
+    return 0;
+  }
 }
 
 /** In-memory first (a running build's live state), then the table. */
@@ -723,6 +764,26 @@ interface MatchResult {
   coverage?: number;
 }
 
+/** HOW A CONVERSATION AGENT'S INSTRUCTIONS HANDLE THE PERSON AND THE DATA.
+ *
+ * Each line is a failure seen in the 30 Sep 2026 agent test run: a support
+ * agent that should identify the customer first opened with "How can I
+ * assist you today?"; agents asked "shall I open a case?" for exactly what
+ * the person had asked for, and then the write needed approval as well;
+ * a price query used PricebookEntry.CurrencyIsoCode, which a single-
+ * currency org does not have; a duplicate check filtered on
+ * Task.Description, a long-text field SOQL cannot filter. */
+const CONVERSATION_RULES =
+  'For every agent that talks with a person, the instructions also say: (1) when the requirement says to identify ' +
+  'the person first (by email, phone, account), the FIRST reply asks for exactly that before anything else; ' +
+  '(2) when the person clearly asks for an action the agent is allowed to take, it takes it -- it does not ask ' +
+  '"shall I?" first; it asks only when a detail it needs is missing or the request is ambiguous; ' +
+  '(3) it never asks again for something the person already gave in the conversation. ' +
+  'In any SOQL you write into instructions: use only fields you know exist on that object (standard fields, or ' +
+  'fields named in the requirement or in `available`) -- never CurrencyIsoCode unless the requirement mentions ' +
+  'currencies -- and never filter (WHERE / LIKE) on long-text fields such as Description; match those by Subject, ' +
+  'a related record Id or a date instead.';
+
 /** THE PERSON'S OWN WORDS ARE THE SOURCE OF TRUTH.
  *
  * The Analyst's `requirement` is a summary, and summaries drop exactly the
@@ -793,7 +854,10 @@ const DESIGN_INSTRUCTION =
             'operations permitted on it. A name that is not in there was not found, and a tool that was ' +
             'not found cannot be used — so do not reshape a name into the casing or the underscores you ' +
             'would expect it to have.\n\n' +
-            'When the requirement says an action needs human approval, set approval.required on THAT tool node.\n\n' +
+            'Approval on writes follows the audience: for audience "internal", put approval.required on every write ' +
+            'unless the requirement says otherwise; for audience "customer", do NOT gate the creates and updates the ' +
+            'requirement asks the agent to make (the person cannot approve anything and would wait on no one) and gate ' +
+            'only what the requirement says needs a human check. A delete, or anything irreversible, is always gated.\n\n' +
             'Set `audience`: "customer" if the replies are read by someone outside the business, "internal" if ' +
             'they are read by an employee. Decide it from the requirement, never from the channel — a web chat ' +
             'can be a public widget or a staff tool, and the two need opposite handling.';
@@ -1060,6 +1124,28 @@ async function runBuild(job: BuildJob): Promise<void> {
   // Wiring the compiler had to repair. Surfaced in the result rather than
   // applied silently — a graph the customer did not draw must be visible.
   const wiringNotes: string[] = [];
+  // Field facts for the field check (field-check.ts): one describe per
+  // object the design names, for the whole build. Salesforce API calls,
+  // no model tokens.
+  const fieldFacts = new Map<string, Promise<FieldFacts | null>>();
+  const describeFields: DescribeFields = object => {
+    const key = object.toLowerCase();
+    if (!fieldFacts.has(key)) {
+      fieldFacts.set(key, describeObjectCompact(job.orgId, object, 5000, { access: true })
+        .then(d => ({
+          fields: new Map(d.fields.map(f => [f.name.toLowerCase(), {
+            name: f.name, filterable: f.filterable !== false, createable: f.createable !== false, updateable: f.updateable,
+          }])),
+        }))
+        .catch(() => null));
+    }
+    return fieldFacts.get(key)!;
+  };
+  // What is still wrong after the last attempt becomes a note on the
+  // agent, never a failed build: the check reads SOQL out of prose, and a
+  // misread must not cost the person a build that is otherwise good.
+  const fieldNotes = (errors: SpecError[]): string[] =>
+    errors.map(e => `Check this before relying on it: ${e.message} (${e.path})`);
   // A checkpointed spec that already has instructions belongs to the
   // prompts stage, not this one — only an un-prompted draft short-circuits
   // the design. `promptsDone` is what distinguishes them.
@@ -1159,6 +1245,19 @@ async function runBuild(job: BuildJob): Promise<void> {
           if (attempt === 3) throw new Error('The design would not validate after 3 attempts:\n' + feedback);
           continue;
         }
+        // Fields the flow's queries and writes name, against the org. The
+        // instructions are not written yet; the prompts stage checks those.
+        narrate(job, 'design', `Checking the fields attempt ${attempt} uses…`);
+        const fieldErrors = await fieldProblems(collectFieldRefs(draft, { instructions: false }), describeFields);
+        if (fieldErrors.length > 0) {
+          if (attempt < 3) {
+            feedback = fieldErrors.map(e => `${e.path}: ${e.message}`).join('\n');
+            lastDraft = draft;
+            lastErrors = fieldErrors;
+            continue;
+          }
+          wiringNotes.push(...fieldNotes(fieldErrors));
+        }
         // BUDGET IS ADVICE; CORRECTNESS IS NOT.
         //
         // A validation error means the design is wrong, and gets all three
@@ -1223,18 +1322,27 @@ async function runBuild(job: BuildJob): Promise<void> {
           'Return ONE JSON object and nothing else: {"instructions": {"<nodeId>": "<text>"}, "descriptions": {"<nodeId>": "<text>"}}. ' +
           'instructions has one entry for every agent and sub-agent node in writeFor; descriptions has one entry for every ' +
           'tool node in writeFor. Node ids exactly as in draftSpec. Do not return the spec itself.\n\n' +
-          VERBATIM_RULE + ' The instructions must be complete on their own: write each rule out in full in the agent\'s instructions.',
+          VERBATIM_RULE + ' The instructions must be complete on their own: write each rule out in full in the agent\'s instructions.\n\n' +
+          CONVERSATION_RULES,
         ...(promptFeedback ? { previousAttemptErrors: promptFeedback } : {}),
       }, { rawJson: true, maxOutputTokens: 8_000 });
       const merged = applyPromptMap(target, answer);
       const stillMissing = merged.missing.filter(m => !onlyIds || onlyIds.includes(m.split(' ')[0]));
       const errors = validateSpec(target, manifest);
-      if (errors.length === 0 && (stillMissing.length === 0 || attempt === 3)) {
+      // The SOQL the instructions now carry, against the org's fields. Sent
+      // back for another attempt; whatever is left after the last one is a
+      // note on the agent, not a failed build.
+      const fieldErrors = errors.length === 0
+        ? await fieldProblems(collectFieldRefs(target, { instructions: true }), describeFields)
+        : [];
+      if (errors.length === 0 && (stillMissing.length === 0 || attempt === 3) && (fieldErrors.length === 0 || attempt === 3)) {
         if (stillMissing.length > 0) logger.warn({ jobId: job.id, stillMissing }, 'architect_prompts_incomplete');
+        if (fieldErrors.length > 0) wiringNotes.push(...fieldNotes(fieldErrors));
         return;
       }
       promptFeedback = [
         ...errors.map(e => `${e.path}: ${e.message}`),
+        ...fieldErrors.map(e => `${e.path}: ${e.message}`),
         ...(stillMissing.length ? [`No text was written for: ${stillMissing.join(', ')}`] : []),
         ...(merged.unknownIds.length ? [`These ids are not in draftSpec: ${merged.unknownIds.join(', ')}`] : []),
       ].join('\n');
@@ -1325,7 +1433,10 @@ async function runBuild(job: BuildJob): Promise<void> {
             'written there IS covered. Something the agent cannot do because no tool exists for it (web search, an external API) is uncovered; say which tool is missing. ' +
             'List anything the design does NOT deliver in `uncovered`, quoting the ' +
             'requirement\'s own words. Treat a stated approval or permission rule with no corresponding ' +
-            'approval setting as uncovered.\n' +
+            'approval setting as uncovered. When `audience` is "customer", creates and updates WITHOUT an approval ' +
+            'setting are correct unless the requirement asks for a human check -- the customer could not approve them. ' +
+            'Judge only the tools listed in `tools` (and `toolsReachableViaCatalog` when present): nothing else is ' +
+            'reachable, so never report that the agent can reach a tool that is not listed.\n' +
             'IF THE REQUIREMENT IS A SCRIPT — numbered steps, example wording, a table of statuses — the right tools are not enough. Read the agent\'s own instructions and check they carry the order, what makes each answer valid, what happens when it is not, which field each step writes, and EVERY status transition the client named. A design with the correct tools and no script does not deliver a scripted requirement: report each missing step as uncovered.\n' +
             'Check too that options the client said come from configured data are READ at runtime rather than written into the prompt, and that a dependent picklist is read as a pair.\n' +
             'THE PLATFORM ALREADY DOES THESE, so never report them as uncovered: receiving and sending messages on the ' +
@@ -1362,6 +1473,11 @@ async function runBuild(job: BuildJob): Promise<void> {
       // re-prompted for a fix the Evaluator had already named.
       const findings = (first.uncovered?.length ?? 0) + (first.fixes?.length ?? 0);
       narrate(job, 'review', `The reviewer found ${findings} thing${findings === 1 ? '' : 's'} missing — repairing the design (gpt-5.5)…`);
+      // Raced against REVIEW_REPAIR_MS. A repair that loses the race is
+      // abandoned: `abandoned` stops it from swapping its design in later,
+      // so the build carries on with the validated design it already has.
+      let abandoned = false;
+      const repair = async (): Promise<ReviewResult> => {
       const answer = await specialist<unknown>(job, engine, 'design_flow', {
         requirement,
         originalRequirement: job.requirement,
@@ -1370,7 +1486,9 @@ async function runBuild(job: BuildJob): Promise<void> {
         previousAttemptErrors: brief,
         instruction:
           DESIGN_PATCH_INSTRUCTION +
-          ' Keep everything that already works. Set approval.required on any tool the requirement says needs human approval.\n\n' + VERBATIM_RULE,
+          ' Keep everything that already works. Set approval.required the same way as in the design: every write for ' +
+          'audience "internal"; for audience "customer" only what the requirement says needs a human check; every ' +
+          'delete always.\n\n' + VERBATIM_RULE,
       }, { rawJson: true, maxOutputTokens: 6000 });
       if (!isSpecPatch(answer)) return { ...first, repaired: false };
       const patched = applySpecPatch(spec, answer);
@@ -1389,11 +1507,22 @@ async function runBuild(job: BuildJob): Promise<void> {
           return { ...first, repaired: false };
         }
       }
+      if (abandoned) return { ...first, repaired: false };
       spec = patched.spec;
       cp.spec = patched.spec;
       narrate(job, 'review', 'Re-judging the repaired design (gpt-5.5)…');
       const second = await judged();
       return { ...second, repaired: true };
+      };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        repair(),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), REVIEW_REPAIR_MS); }),
+      ]).finally(() => clearTimeout(timer));
+      if (outcome) return outcome;
+      abandoned = true;
+      logger.warn({ jobId: job.id, limitMs: REVIEW_REPAIR_MS }, 'architect_review_repair_timed_out');
+      return { ...first, repaired: false, repairTimedOut: true };
     },
     r => ({
       state: r.verdict === 'pass' ? ('done' as StepState) : ('warn' as StepState),
@@ -1615,6 +1744,7 @@ async function runBuild(job: BuildJob): Promise<void> {
       ...wiringNotes,
       ...compiled.notes,
       ...(review.repaired ? ['A review found gaps against your description; the design was rebuilt once to close them.'] : []),
+      ...(review.repairTimedOut ? ['A review found gaps and the repair did not finish in time; this is the design from before the repair, and the gaps above are still open.'] : []),
     ],
     review,
     confidence: buildConfidence(requirement, match, prerequisites, review),
@@ -1637,11 +1767,10 @@ async function runBuild(job: BuildJob): Promise<void> {
 /**
  * The design as something to be judged, not as JSON to be admired.
  *
- * Deliberately omits the instructions the builders wrote: the Evaluator's
- * whole value is that it cannot be persuaded by a design that explains
- * itself well, and prose arguing why an omission was reasonable is exactly
- * what would persuade it. What it gets is the shape — who exists, what is
- * wired to what, which tools are real, and which writes are gated.
+ * What it gets is the shape -- who exists, what is wired to what, which
+ * tools are real and which writes are gated -- plus each agent's own
+ * instructions (clipped; see below), who reads the replies, and how each
+ * tool is fed. It never sees the builders' reasoning about the design.
  */
 function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<string, unknown> {
   const byId = new Map(spec.nodes.map(n => [n.id, n]));
@@ -1668,7 +1797,13 @@ function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<str
         calls: n.action?.toolName ?? `${n.action?.operation ?? '?'} ${n.action?.sobject ?? ''}`.trim(),
         // The field an unenforced approval rule hides in.
         requiresHumanApproval: n.approval?.required === true,
+        // How each input is filled -- where a "never ask twice" or "always
+        // this value" rule actually lives. Without it the reviewer charged
+        // designs with rules their mappings already enforced.
+        inputs: (n.inputs ?? []).map(i => ({ name: i.name, source: i.source, value: typeof i.value === 'string' ? i.value.slice(0, 200) : i.value })),
       })),
+    // Who reads the replies; it decides which writes should be gated.
+    audience: spec.audience ?? null,
     // The catalog's OWN tool names, not just its label. Without them the
     // reviewer cannot tell that the agent can already identify the current
     // user or describe an object, and reports capabilities as missing that
@@ -1680,7 +1815,14 @@ function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<str
     // user or describe an object, and reports capabilities as missing that
     // are sitting right there — which now costs a repair round chasing a
     // gap that does not exist.
-    toolsReachableViaCatalog: catalogTools,
+    //
+    // ONLY WHEN THE DESIGN HAS A CATALOG. The list was sent for every
+    // design, so a facts-only website bot with no tools at all was judged
+    // "fail: lookup/update/delete/deploy tools are listed as reachable" --
+    // tools it would never get. A design without a catalog node reaches
+    // exactly its tool nodes (the compiler scopes the catalog it injects to
+    // those names), and that is all the reviewer should see.
+    ...(spec.nodes.some(n => n.type === 'tool_catalog') ? { toolsReachableViaCatalog: catalogTools } : {}),
     // An automation agent's fixed sequence, one line per step. Without it
     // the reviewer would judge a record-processing agent on its root
     // prompt alone and report the whole procedure as missing.

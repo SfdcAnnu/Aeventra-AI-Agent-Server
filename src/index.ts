@@ -26,6 +26,7 @@ import { traceCaptureEnabled } from './trace/recorder';
 import { attach as attachWsGateway } from './ws/gateway';
 import { startRunPoller } from './scheduler/run-poller';
 import { warnIfUnencrypted } from './lib/secret-box';
+import { failOrphanedBuilds } from './architect/build-job';
 
 function buildApp(): express.Express {
   const app = express();
@@ -89,4 +90,6 @@ server.listen(config.port, () => {
   // not something nobody noticed.
   warnIfUnencrypted();
   startRunPoller();
+  // Builds left "running" by the previous process are orphans now.
+  void failOrphanedBuilds();
 });

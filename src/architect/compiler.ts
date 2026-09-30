@@ -184,6 +184,12 @@ interface PlatformNode {
   enabled: boolean;
 }
 
+/** A tool that removes data: by the crud operation, or by what the tool
+ *  calls itself for MCP servers and custom actions. */
+export function isDeleteAction(toolName: string | undefined, operation: string | undefined): boolean {
+  return operation === 'delete' || /delete|destroy|remove|purge/i.test(toolName ?? '');
+}
+
 function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'agent';
 }
@@ -388,7 +394,10 @@ export async function compileSpec(
           // create/update/query genuinely is the Salesforce server, so it
           // says so rather than relying on the fallback.
           connectorId: a.connector?.trim() || (a.kind === 'crud' ? 'salesforce_mcp' : ''),
-          requiresApproval: n.approval?.required === true,
+          // A delete is always gated, whatever the design said: the designer
+          // now leaves a customer-facing agent's ordinary writes ungated,
+          // and this keeps that from ever reaching a delete.
+          requiresApproval: n.approval?.required === true || isDeleteAction(toolName, a.operation),
           approvalCondition: n.approval?.condition,
           parameterMappings: n.inputs,
           onFailure: n.onFailure,

@@ -20,6 +20,7 @@ import { invalidateRecordContext } from '../chat/record-context';
 import jwt from 'jsonwebtoken';
 import { verifyPlatformToken } from '../platform/token';
 import { PLATFORM_PROVIDER } from '../chat/connector-scope';
+import { isSafeToRetry, TRANSIENT_RETRY_WAIT_MS } from './tool-failure';
 
 export interface LoadedMcpTools {
   tools: StructuredToolInterface[];
@@ -58,6 +59,13 @@ export interface LoadedMcpTools {
 // served stale.
 const FRESH_MS = 4 * 60 * 1000;
 const STALE_MS = 60 * 60 * 1000;
+/** A load where some server could not be listed is kept only this long,
+ *  and never served stale: its `unavailable` list is a fact about that
+ *  moment. Held for the full window, a server that woke a minute later
+ *  stayed "unavailable" -- and the agent kept telling people so -- for up
+ *  to an hour. Short enough to pick the server up on the next turn, long
+ *  enough that a burst of turns does not each pay a wake. */
+const PARTIAL_FRESH_MS = 30 * 1000;
 // A replaced client is not closed while a turn may still be calling its
 // tools -- closing it out from under one turns a refresh into a failed
 // tool call. Outliving any single turn is enough.
@@ -121,8 +129,14 @@ export async function loadMcpTools(
     hit = undefined;
   }
   const age = hit ? Date.now() - hit.createdAt : Infinity;
+  const partial = !!hit && hit.loaded.unavailable.length > 0;
 
-  if (hit && age < FRESH_MS) return hit.loaded;
+  if (hit && age < (partial ? PARTIAL_FRESH_MS : FRESH_MS)) return hit.loaded;
+  if (partial) {
+    toolCache.delete(key);
+    closeAfterGrace(hit!.realClose);
+    hit = undefined;
+  }
 
   if (hit && age < STALE_MS) {
     // Off the critical path: this turn answers with the tools we already
@@ -252,7 +266,20 @@ function rejectPlaceholderArgs(t: StructuredToolInterface, spillThreshold?: numb
       }
       const t0 = Date.now();
       try {
-        const result = await t.invoke(args as never);
+        let result: unknown;
+        try {
+          result = await t.invoke(args as never);
+        } catch (first) {
+          // One more try for a dropped connection -- live, an Event
+          // reschedule died on "read ECONNRESET" between the MCP server and
+          // Salesforce and the meeting stayed on the old day. Not for a
+          // create after a reset: the first one may have landed.
+          const msg = first instanceof Error ? first.message : String(first);
+          if (!isSafeToRetry(t.name, msg)) throw first;
+          logger.warn({ tool: t.name, err: msg.slice(0, 200) }, 'mcp_tool_call_retrying');
+          await new Promise(r => setTimeout(r, TRANSIENT_RETRY_WAIT_MS));
+          result = await t.invoke(args as never);
+        }
         const raw = typeof result === 'string' ? result : JSON.stringify(result);
         // Phase 3: oversized results are stored by reference — the model
         // gets a compact summary + artifact handle instead of the payload.

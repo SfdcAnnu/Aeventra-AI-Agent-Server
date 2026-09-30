@@ -119,6 +119,10 @@ export interface ChatTurnRequest {
   runKind?: 'chat' | 'automation';
   /** Filled during the turn: connectors the person has no identity for. */
   identityNotes?: NeedsConnection[];
+  /** Filled during the turn, by the root and every specialist: things that
+   *  went wrong without failing the turn (a connector's tools could not be
+   *  loaded, a specialist's tool failed). Returned as `warnings`. */
+  turnWarnings?: Set<string>;
   /** AgentDefinition__c.DebugMode__c — when true, adapters capture the raw
    *  request/response JSON for every provider call this turn (see
    *  ChatTurnResult.debugRequest/debugResponse). Off by default; storing
@@ -248,4 +252,9 @@ export interface ChatTurnResult {
   /** Connectors this turn could not use for want of the person's own
    *  identity — the chat shows a connect card for each. */
   needsConnection?: NeedsConnection[];
+  /** Things that went wrong without failing the turn -- "Tools
+   *  unavailable: salesforce_mcp", a specialist's failed tool. Stored with
+   *  the turn's phase timings (PhaseMsJson__c `warnings`) so an admin can
+   *  see why an agent said it could not reach something. */
+  warnings?: string[];
 }

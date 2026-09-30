@@ -246,7 +246,11 @@ export async function recordWsTurn(
     // copilot's turns showed a model loop and nothing else -- 61,979ms on
     // one reply, with no way to see which part was the specialist.
     PhaseMsJson__c: result.phaseMs
-      ? JSON.stringify({ ...result.phaseMs, ...(result.turnMs !== undefined ? { turnMs: result.turnMs } : {}) }).slice(0, 4096)
+      ? JSON.stringify({
+          ...result.phaseMs,
+          ...(result.turnMs !== undefined ? { turnMs: result.turnMs } : {}),
+          ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+        }).slice(0, 4096)
       : null,
     UsageJson__c: result.usage ? JSON.stringify(result.usage).slice(0, 32_768) : null,
     SequenceNumber__c: seq++,

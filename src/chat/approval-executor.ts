@@ -26,6 +26,7 @@ import { buildPrebuiltTools } from '../lc/prebuilt-tools';
 import { mergeActionsIntoConnectors } from './connector-scope';
 import { augmentConnectorsWithToolNodes } from './tool-node-connectors';
 import type { ChatTurnRequest } from './adapters/types';
+import { isToolFailure } from '../lc/tool-failure';
 
 export async function executeApprovedAction(approval: ChatApproval): Promise<string> {
   const orgId = approval.orgId;
@@ -71,8 +72,7 @@ export async function executeApprovedAction(approval: ChatApproval): Promise<str
     const local = buildPrebuiltTools(turnCtx, graph, scope.owner).find(t => t.name === approval.toolName);
     if (local) {
       logger.info({ orgId, approvalId: approval.id, tool: approval.toolName, scope: scope.owner.name }, 'chat_approval_executing');
-      const out = await local.invoke((approval.argsJson ?? {}) as never);
-      return typeof out === 'string' ? out : JSON.stringify(out);
+      return executedOrThrow(await local.invoke((approval.argsJson ?? {}) as never));
     }
 
     const connectors = mergeActionsIntoConnectors(baseConnectors, scope.actions.filter(a => a.actionType !== 'Prebuilt'));
@@ -81,9 +81,17 @@ export async function executeApprovedAction(approval: ChatApproval): Promise<str
     const t = loaded.tools.find(x => x.name === approval.toolName);
     if (t) {
       logger.info({ orgId, approvalId: approval.id, tool: approval.toolName, scope: scope.owner.name }, 'chat_approval_executing');
-      const out = await t.invoke((approval.argsJson ?? {}) as never);
-      return typeof out === 'string' ? out : JSON.stringify(out);
+      return executedOrThrow(await t.invoke((approval.argsJson ?? {}) as never));
     }
   }
   throw new Error(`Tool ${approval.toolName} is no longer connected to this agent — nothing was executed.`);
+}
+
+/** A built-in action reports failure as text ("Create failed: ...",
+ *  "Error: ...") instead of throwing. Returned as-is, the decide route
+ *  recorded it as Executed and the audit row said the write happened. */
+function executedOrThrow(out: unknown): string {
+  const text = typeof out === 'string' ? out : JSON.stringify(out);
+  if (isToolFailure(text)) throw new Error(text.slice(0, 2000));
+  return text;
 }

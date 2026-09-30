@@ -43,6 +43,7 @@ import {
 import { z } from 'zod';
 import { logger } from '../logger';
 import { rememberScratch, recallScratch, clearScratch, withScratch, collectFindings, withFindings } from './specialist-scratch';
+import { isToolFailure, specialistFailureNote, toolsUnavailableNotice } from './tool-failure';
 import { InstallsCache } from '../db/installs-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
@@ -80,7 +81,7 @@ import { StageReporter } from './stage-events';
 import { callModel } from './stream-call';
 import type { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import { persistTrace } from '../trace/writer';
-import { approvalGate, approvalRequiredNames } from './approval-gate';
+import { approvalAudience, approvalGate, approvalRequiredNames } from './approval-gate';
 import {
   createTurnBudget,
   checkBudget,
@@ -263,6 +264,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // Connectors the person has no identity for, from the root and every
   // specialist this turn; the reply gets a connect card per entry.
   const identityNotes: NeedsConnection[] = req.identityNotes ?? (req.identityNotes = []);
+  const turnWarnings: Set<string> = req.turnWarnings ?? (req.turnWarnings = new Set());
   const servers = await resolveMcpServers({ ...req, connectors: topConnectors }, aiNode, install.sfAccessToken, serverTiming, identityNotes);
   const ranAsByServer = new Map(servers.filter(s => s.ranAs).map(s => [s.name, s.ranAs!]));
   mark('resolveServers');
@@ -277,6 +279,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     orgId: req.context.orgId, agentApiName: req.agent.apiName, planVersion: req.agent.planVersion,
     sessionId: req.sessionId, userId: req.context.userId,
     recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
+    audience: approvalAudience(req.context, aiNode.config),
   });
   const approvalNames = approvalRequiredNames(topLevelActions);
   const mcpTools = loaded.tools.map(t => (approvalNames.has(t.name) ? gate(t) : t));
@@ -313,12 +316,8 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     // identity tool had silently vanished from the list. Volatile by
     // nature (it is about right now), so it sits below the cache
     // breakpoint with the other per-turn facts.
-    const unavailableNotice = loaded.unavailable.length > 0
-      ? `TOOLS UNAVAILABLE RIGHT NOW: ${loaded.unavailable.join(', ')}. Any tool from ` +
-        'these is not callable this turn. If the user asks for something that needs one, say plainly that ' +
-        'you cannot reach it at the moment and ask them to try again shortly. Do NOT answer from memory, ' +
-        'guess, or substitute a different tool or specialist for the one you are missing.'
-      : null;
+    const unavailableNotice = toolsUnavailableNotice(loaded.unavailable);
+    for (const s of loaded.unavailable) turnWarnings.add(`Tools unavailable: ${s}`);
     // A connector that runs as the person, which they have not connected:
     // the tools are absent this turn and a connect card sits under the
     // reply. The agent says so instead of improvising around the gap.
@@ -396,10 +395,16 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
               clearScratch(req.sessionId, subagentNode.id);
               findings.push(...collectFindings([{ name: c.name, content: text, _getType: () => 'tool' }], specialistToolNames));
             }
-            return spillIfLarge(c.name, text);
+            // The specialist's prose can read like an answer ("that product
+            // does not exist") when its lookup actually failed. Say so to
+            // the caller, in the result it reads.
+            const failed = (out.toolCalls ?? []).filter(tc => tc.isError);
+            for (const f of failed) turnWarnings.add(`Tool failed: ${f.name} (specialist ${subagentNode.name})`);
+            return spillIfLarge(c.name, text) + (specialistFailureNote(failed) ?? '');
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             logger.error({ orgId: req.context.orgId, specialist: subagentNode.name, err: msg }, 'lc_call_agent_failed');
+            turnWarnings.add(`Specialist failed: ${subagentNode.name}`);
             return `Specialist failed: ${msg.slice(0, 200)}. Continue without it or try another approach.`;
           } finally {
             turnFlags.activeCalls -= 1;
@@ -758,6 +763,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       // describe a turn that routed on one model and answered on another.
       usage: usageByModel(budget),
       ...(identityNotes.length > 0 ? { needsConnection: identityNotes } : {}),
+      ...(turnWarnings.size > 0 ? { warnings: [...turnWarnings] } : {}),
       latencyMs: Date.now() - t0,
       turnMs: Date.now() - turnClockStart,
       phaseMs: { ...phase, modelLoop: Date.now() - t0 },
@@ -859,6 +865,7 @@ async function runSubagentTurn(
     orgId: req.context.orgId, agentApiName: req.agent.apiName, planVersion: req.agent.planVersion,
     sessionId: req.sessionId, userId: req.context.userId,
     recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType,
+    audience: approvalAudience(req.context, topAiNode.config),
   });
   const subApprovalNames = approvalRequiredNames(subActions);
   const subMcpTools = loaded.tools.map(t => (subApprovalNames.has(t.name) ? subGate(t) : t));
@@ -872,8 +879,13 @@ async function runSubagentTurn(
       subTuning.maxTokens,
       subTuning.options,
     );
+    // A specialist whose tools did not load is told so, exactly like the
+    // root. It was not: a pricing helper with no Salesforce answered "no
+    // such product" and the root passed that on as fact.
+    for (const s of loaded.unavailable) req.turnWarnings?.add(`Tools unavailable: ${s} (specialist ${subagentNode.name})`);
     const subParts = await buildSystemPromptParts(
       req.agent, synthetic, req.context, req.newUserMessage, req.engineOverride, req.memoryPreamble ?? assembled.preamble,
+      toolsUnavailableNotice(loaded.unavailable),
     );
     const subSystem = cacheAwareSystem(synthetic.nodeSubType, subParts);
     if (!model.bindTools) throw new Error(`Model for ${synthetic.nodeSubType} does not support tool binding.`);
@@ -1125,7 +1137,10 @@ export function turnHasWrite(messages: BaseMessage[]): boolean {
   for (const m of messages) {
     if (!(m instanceof ToolMessage) || !m.tool_call_id) continue;
     const text = typeof m.content === 'string' ? m.content : '';
-    if (m.status === 'error' || /^(PENDING_APPROVAL|REJECTED|BLOCKED)\b/.test(text)) {
+    // isToolFailure also catches "Error: ..." -- the shape LangGraph gives a
+    // THROWN tool, without status 'error'. Missing it counted a failed
+    // create as a write and let the agent say it was done.
+    if (isToolFailure(text, m.status) || /^(PENDING_APPROVAL|REJECTED|BLOCKED)\b/.test(text)) {
       unexecutedCallIds.add(m.tool_call_id);
     }
   }
@@ -1208,7 +1223,7 @@ export function extractToolCalls(
         name: call.name,
         input: (call.args as Record<string, unknown>) ?? {},
         output,
-        isError: result?.status === 'error',
+        isError: result ? isToolFailure(output, result.status) : false,
         serverName,
         ...(ranAs ? { ranAs } : {}),
         ...(call.name.startsWith('ask_') ? { nested: takeNested(call.id ?? '', call.name) } : {}),
