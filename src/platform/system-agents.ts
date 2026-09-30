@@ -240,9 +240,15 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
     ...(withStreamFlag ? { StreamReplies__c: spec.streamReplies === true } : {}),
   };
   let created = false;
+  // The one thing the org owns on a built-in agent: which AI key it runs
+  // on. A version bump rewrites every node but carries that binding over.
+  let keptKey: string | null = null;
   if (agentId) {
     await pkgConn(conn).sobject('AgentDefinition__c').update({ Id: agentId, ...defFields });
-    const old = await pkgConn(conn).query<{ Id: string }>(`SELECT Id FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`);
+    const old = await pkgConn(conn).query<{ Id: string; NodeType__c: string; AiEngineConnection__c: string | null }>(
+      `SELECT Id, NodeType__c, AiEngineConnection__c FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`,
+    );
+    keptKey = old.records.find(r => r.NodeType__c === 'ai' && r.AiEngineConnection__c)?.AiEngineConnection__c ?? null;
     if (old.records.length > 0) await pkgConn(conn).sobject('AgentNode__c').destroy(old.records.map(r => r.Id));
   } else {
     // Status is the org's switch: set once on create, never on re-sync.
@@ -261,6 +267,7 @@ export async function syncSystemAgent(conn: Connection, orgId: string, spec: Sys
     PositionY__c: n.y,
     SortOrder__c: i,
     IsEnabled__c: true,
+    ...(n.nodeType === 'ai' && keptKey ? { AiEngineConnection__c: keptKey } : {}),
   }));
   const inserted = await pkgConn(conn).sobject('AgentNode__c').insert(rows);
   const failed = (Array.isArray(inserted) ? inserted : [inserted]).filter(r => !r.success);
