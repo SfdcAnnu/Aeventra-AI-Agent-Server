@@ -778,7 +778,9 @@ const CONVERSATION_RULES =
   'the person first (by email, phone, account), the FIRST reply asks for exactly that before anything else; ' +
   '(2) when the person clearly asks for an action the agent is allowed to take, it takes it -- it does not ask ' +
   '"shall I?" first; it asks only when a detail it needs is missing or the request is ambiguous; ' +
-  '(3) it never asks again for something the person already gave in the conversation. ' +
+  '(3) it never asks again for something the person already gave in the conversation -- a problem they already ' +
+  'described IS the description, so it does not ask them to summarise it; (4) repeating back what the person ' +
+  'themselves said (their own email, name, number) is always allowed, never treated as a privacy disclosure. ' +
   'In any SOQL you write into instructions: use only fields you know exist on that object (standard fields, or ' +
   'fields named in the requirement or in `available`) -- never CurrencyIsoCode unless the requirement mentions ' +
   'currencies -- and never filter (WHERE / LIKE) on long-text fields such as Description; match those by Subject, ' +
@@ -1449,7 +1451,10 @@ async function runBuild(job: BuildJob): Promise<void> {
             'THE PLATFORM ALREADY DOES THESE, so never report them as uncovered: receiving and sending messages on the ' +
             'channel (WhatsApp, SMS, web chat, email), keeping the conversation and its state across turns, identifying the ' +
             'sender and loading the record the conversation is anchored to, routing between the agent and its specialists, ' +
-            'the approval gate on writes, and choosing the model. Judge only what the agent itself must decide, ask, ' +
+            'the approval gate on writes, choosing the model, and date and time-zone arithmetic (the agent is given ' +
+            'the current UTC time every turn and converts times itself; no tool is needed for it). There is NO ' +
+            'measured test coverage at design time -- never report missing coverage data. The design\'s run ceilings ' +
+            'are in `budgets`. Judge only what the agent itself must decide, ask, ' +
             'validate or write. Measured: a design was charged with "receive and parse WhatsApp replies" and paid for a repair round to add plumbing it cannot own. ' +
             'Verdict `fail` only when something the client explicitly asked ' +
             'for is absent — not for style, naming or efficiency.',
@@ -1807,10 +1812,15 @@ function summariseForReview(spec: AgentSpec, catalogTools: string[]): Record<str
         // How each input is filled -- where a "never ask twice" or "always
         // this value" rule actually lives. Without it the reviewer charged
         // designs with rules their mappings already enforced.
-        inputs: (n.inputs ?? []).map(i => ({ name: i.name, source: i.source, value: typeof i.value === 'string' ? i.value.slice(0, 200) : i.value })),
+        // Whole values: cut at 200 characters they read as "truncated tool
+        // input" -- a false finding on every build that had a long mapping.
+        inputs: (n.inputs ?? []).map(i => ({ name: i.name, source: i.source, value: i.value })),
       })),
     // Who reads the replies; it decides which writes should be gated.
     audience: spec.audience ?? null,
+    // The run ceilings. Left out, every review reported "no step, cost or
+    // timeout budgets" as a failure on designs that all had them.
+    budgets: spec.budgets ?? null,
     // The catalog's OWN tool names, not just its label. Without them the
     // reviewer cannot tell that the agent can already identify the current
     // user or describe an object, and reports capabilities as missing that

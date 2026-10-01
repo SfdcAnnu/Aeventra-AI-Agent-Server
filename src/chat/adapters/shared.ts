@@ -732,7 +732,10 @@ export async function buildSystemPromptParts(
     'never tell the person that something does not exist, is not available or was not found because a tool ' +
     'failed — say you could not check it right now. ' +
     'Reply in the language of the person\'s LATEST message, even if earlier messages used another language. ' +
-    'Never ask again for something the person already told you in this conversation — use what they gave. ' +
+    'Never ask again for something the person already told you in this conversation — use what they gave: when ' +
+    'they have already described a problem or request, their own words ARE the description; do not ask them to ' +
+    'summarise it again. Repeating back to the person something they themselves told you in this conversation ' +
+    '(their own email, name or number) is always allowed — it is not a privacy disclosure. ' +
     // A meeting at 3 pm IST was saved as 04:00 UTC -- converted twice --
     // in one run and correctly in another (C5, 30 Sep vs 1 Oct 2026).
     'When you write a date-time field, convert the person\'s local time to UTC yourself and send it in UTC with a ' +
