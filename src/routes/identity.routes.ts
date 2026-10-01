@@ -151,10 +151,22 @@ identityRouter.post('/api/connectors/usable', sessionAuth, async (req, res) => {
   }
   const inGroup = (r: Connector) => groups.some(g => g.type === r.subjectType && g.key === r.subjectKey);
   const live = (r: Connector) => r.status !== 'Disconnected';
+  let org = rows.filter(r => r.principalType === 'org' && r.status === 'Connected').sort((a, b) => (b.lastConnectedAt?.getTime() ?? 0) - (a.lastConnectedAt?.getTime() ?? 0)).map(summarise)[0] ?? null;
+  // Salesforce's org connection is the one Setup made, not a Connector
+  // row: offer it under the id 'setup' so a node can run as the org.
+  if (!org && SALESFORCE_TOKEN_PROVIDERS.has(providerKey)) {
+    const install = await InstallsRepo.findByOrgId(orgId);
+    if (install?.sfAccessToken) {
+      org = {
+        id: 'setup', providerKey, status: 'Connected', principalType: 'org', subjectType: null, subjectKey: null, subjectLabel: 'Archon Setup connection',
+        accountEmail: install.sfUserEmail ?? null, configuredBy: install.sfUserId ?? null, lastConnectedAt: install.configuredAt, lastErrorMessage: null, tokenExpiresAt: null, hasRefreshToken: !!install.sfRefreshToken,
+      };
+    }
+  }
   res.json({
     mine: rows.filter(r => r.principalType === 'user' && r.subjectKey === userId && live(r)).map(summarise),
     team: rows.filter(r => r.principalType === 'group' && inGroup(r) && live(r)).map(summarise),
-    org: rows.filter(r => r.principalType === 'org' && r.status === 'Connected').sort((a, b) => (b.lastConnectedAt?.getTime() ?? 0) - (a.lastConnectedAt?.getTime() ?? 0)).map(summarise)[0] ?? null,
+    org,
     groups,
   });
 });
