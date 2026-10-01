@@ -51,14 +51,20 @@ describe('wake_servers', () => {
   });
 });
 
-describe('copilot version 16', () => {
+describe('copilot version 17', () => {
   it('gives the root the everyday tools, all of which the platform serves', () => {
     const names = archonCopilotAgent.root.tools.map(t => t.toolName);
     for (const t of ['open_page', 'wake_servers', 'activate_agent', 'show_on_screen', 'transfer_to_agent']) expect(names).toContain(t);
     const served = new Set(PLATFORM_TOOLS.map(t => t.name));
     for (const t of names) expect(served.has(t)).toBe(true);
     expect(served.has('return_to_previous_agent')).toBe(true);
-    expect(archonCopilotAgent.version).toBe(16);
+    expect(archonCopilotAgent.version).toBe(17);
+  });
+
+  it('owns the decision to open a view, and never opens one for small talk', () => {
+    const ins = archonCopilotAgent.root.instructions;
+    expect(ins).toMatch(/YOU decide when one answers better than words/);
+    expect(ins).toMatch(/Open nothing for a greeting, a question about what you can do/);
   });
 
   it('talks like a person and knows the screen\'s own messages', () => {
