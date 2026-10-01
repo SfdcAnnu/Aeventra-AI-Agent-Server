@@ -8,7 +8,8 @@ import { AgentCache } from '../chat/agent-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { pkgConn } from '../salesforce/namespace';
 import { logger } from '../logger';
-import { define, ok, fail } from './tool-kit';
+import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
+import { define, ok, fail, clip } from './tool-kit';
 import { homeStats } from './inspector-tools';
 
 /**
@@ -37,10 +38,13 @@ const transferToAgent = define({
 
 /**
  * A view on the screen is a RESULT the client acts on, like a transfer:
- * the Archon screen draws the named view beside the conversation from
- * live org data. For the usage and cost views the result also carries the
- * per-agent rows, so the screen and the words come from the same numbers
- * and the person never sees a table that disagrees with the reply.
+ * the model decides a view answers better than words, and the Archon
+ * screen draws it beside the conversation. The result carries the rows
+ * the view will show — usage and cost per agent, today's failed runs,
+ * the drafts, what is waiting for approval — in the shapes the screen
+ * already draws, so the screen and the words come from the same data and
+ * the person never sees a table that disagrees with the reply. The
+ * dashboard is the Home numbers; the screen reads those itself.
  */
 export const SCREEN_VIEWS = ['dashboard', 'usage', 'failures', 'drafts', 'approvals', 'cost', 'build'] as const;
 export type ScreenView = (typeof SCREEN_VIEWS)[number];
@@ -68,17 +72,81 @@ export function screenPayload(view: ScreenView, days: number | undefined, agentA
   };
 }
 
+const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+const FAILED_STATUSES = ['ERROR', 'TIMEOUT', 'FAILED'];
+
+/** Today's failed runs, in the row shape the Runs page and the screen
+ *  already draw (flat keys, as Apex returns them). Capped: the rows reach
+ *  the model too, and thirty failures is already a list to act on. */
+async function failedRunsToday(conn: ReturnType<typeof pkgConn>): Promise<Array<Record<string, unknown>>> {
+  const r = await conn.query<Record<string, unknown>>(
+    'SELECT Id, Name, AgentDefinition__r.Name, AgentDefinition__r.Department__c, RecordId__c, Status__c, AgentReason__c, ExecutionMs__c, CreatedDate ' +
+      `FROM AgentExecution__c WHERE CreatedDate = TODAY AND Status__c IN (${FAILED_STATUSES.map(s => `'${s}'`).join(',')}) ORDER BY CreatedDate DESC LIMIT 30`,
+  );
+  return r.records.map(x => {
+    const def = (x.AgentDefinition__r as { Name?: string; Department__c?: string } | null) ?? {};
+    return {
+      Id: x.Id, Name: x.Name,
+      'AgentDefinition__r.Name': def.Name ?? '', 'AgentDefinition__r.Department__c': def.Department__c ?? '',
+      CorrelationId__c: null, RecordId__c: x.RecordId__c ?? null, Status__c: x.Status__c,
+      AgentScore__c: null, AgentPriority__c: null, AgentReason__c: clip(x.AgentReason__c as string | null, 200),
+      ToolsUsed__c: null, OutputPayload__c: null, ExecutionMs__c: x.ExecutionMs__c ?? null, Department__c: null, CreatedDate: x.CreatedDate,
+    };
+  });
+}
+
+/** Agents still in Draft, in the agent-list shape. */
+async function draftAgents(conn: ReturnType<typeof pkgConn>): Promise<Array<Record<string, unknown>>> {
+  const r = await conn.query<Record<string, unknown>>(
+    'SELECT Id, Name, ApiName__c, Department__c, Description__c, Status__c, Version__c, ExecuteType__c, CreatedDate, LastModifiedDate ' +
+      "FROM AgentDefinition__c WHERE Status__c = 'Draft' ORDER BY LastModifiedDate DESC LIMIT 50",
+  );
+  return r.records
+    .filter(x => x.ApiName__c !== 'archon_copilot')
+    .map(x => ({
+      id: x.Id, name: x.Name, apiName: x.ApiName__c, department: x.Department__c ?? '', description: clip(x.Description__c as string | null, 200) ?? '',
+      status: x.Status__c, version: x.Version__c ?? null, totalExecutions: null, successRate: null, isSystem: false,
+      executeType: x.ExecuteType__c ?? 'Chat', streamReplies: false, createdDate: x.CreatedDate, lastModifiedDate: x.LastModifiedDate,
+    }));
+}
+
+/** What is waiting for a decision: chat actions the runtime suspended (this
+ *  server's own store) and run approvals (the org), each in the shape the
+ *  Approvals page draws, so the screen can decide them in place. */
+async function pendingApprovals(conn: ReturnType<typeof pkgConn>, orgId: string): Promise<{ approvals: Array<Record<string, unknown>>; chatApprovals: Array<Record<string, unknown>> }> {
+  const chat = await ChatApprovalsRepo.listForOrg(orgId, { status: 'Pending', limit: 30 }).catch(() => []);
+  let approvals: Array<Record<string, unknown>> = [];
+  try {
+    const r = await conn.query<Record<string, unknown>>(
+      "SELECT Id, Name, AgentApiName__c, NodeLabel__c, RecordId__c, Status__c, CreatedDate, TimeoutAt__c FROM AgentApproval__c WHERE Status__c = 'Pending' ORDER BY CreatedDate ASC LIMIT 30",
+    );
+    approvals = r.records.map(x => ({
+      id: x.Id, name: x.Name, agentApiName: x.AgentApiName__c ?? '', nodeLabel: x.NodeLabel__c ?? '', recordId: x.RecordId__c ?? null,
+      status: x.Status__c, createdDate: x.CreatedDate, timeoutAt: x.TimeoutAt__c ?? null,
+    }));
+  } catch (err) {
+    logger.debug({ err: (err as Error).message }, 'show_on_screen: run approvals unavailable');
+  }
+  return {
+    approvals,
+    chatApprovals: (chat as Array<Record<string, unknown>>).map(a => ({
+      id: a.id, agentApiName: a.agentApiName, sessionId: a.sessionId, userId: a.userId, toolName: a.toolName, argsJson: a.argsJson,
+      status: a.status, timeoutAt: a.timeoutAt, createdAt: a.createdAt,
+    })),
+  };
+}
+
 const showOnScreen = define({
   name: 'show_on_screen',
   title: 'Show on the screen',
   description:
-    'Put a view on the screen beside this conversation. The Archon screen draws it from live org data: ' +
+    'Put a view on the screen beside this conversation, when a view answers better than words. The views: ' +
     'dashboard (today: runs, chat turns, approvals waiting, spend, runs by hour, what happened), ' +
     'usage (turns, tokens and spend per agent over the last N days — the report of who used what), ' +
     'failures (runs that failed today), drafts (agents not yet active), approvals (waiting for a decision), ' +
     'cost (spend per agent over the last N days as a chart), build (the Architect\'s current build). ' +
-    'Call it whenever the person asks to see, show, display, visualise, report, or put something on the dashboard or screen; ' +
-    'then tell them in words what it shows. The screen changes on its own — nothing else is needed.',
+    'The result carries the rows the view shows — quote those figures in your words. ' +
+    'Do not open a view for a greeting, a question about what you can do, or anything a sentence answers. The screen changes on its own.',
   inputSchema: {
     view: z.enum(SCREEN_VIEWS).describe('Which view to show.'),
     days: z.number().int().min(1).max(31).optional().describe('For usage and cost: how many days back — today = 1, this week = 7, this month = 31. Default 31.'),
@@ -87,20 +155,24 @@ const showOnScreen = define({
   readOnly: true,
   handler: async ({ view, days, agentApiName }, p) => {
     let stats: UsageStats | null = null;
-    if (view === 'usage' || view === 'cost') {
-      try {
-        stats = await homeStats(await getOrgConnection(p.orgId), days ?? 31);
-      } catch (err) {
-        // The screen can still draw the view from the org itself; only the
-        // rows travelling with the words are lost.
-        logger.warn({ err, view }, 'show_on_screen: could not read usage rows');
-      }
+    let rows: Record<string, unknown> = {};
+    try {
+      const raw = await getOrgConnection(p.orgId);
+      if (view === 'usage' || view === 'cost') stats = await homeStats(raw, days ?? 31);
+      else if (view === 'failures') rows = { runs: await failedRunsToday(pkgConn(raw)) };
+      else if (view === 'drafts') rows = { agents: await draftAgents(pkgConn(raw)) };
+      else if (view === 'approvals') rows = await pendingApprovals(pkgConn(raw), p.orgId);
+    } catch (err) {
+      // The screen can still draw the view from the org itself; only the
+      // rows travelling with the words are lost.
+      logger.warn({ err, view }, 'show_on_screen: could not read the rows for the view');
     }
-    const payload = screenPayload(view, days ?? (stats ? stats.days : undefined), agentApiName, stats);
+    const payload = { ...screenPayload(view, days ?? (stats ? stats.days : undefined), agentApiName, stats), ...rows };
+    const count = Array.isArray(rows.runs) ? `${rows.runs.length} failed run(s) today` : Array.isArray(rows.agents) ? `${rows.agents.length} draft(s)` : Array.isArray(rows.approvals) ? `${(rows.approvals as unknown[]).length + ((rows.chatApprovals as unknown[] | undefined)?.length ?? 0)} waiting` : null;
     return ok(
       payload,
-      `${JSON.stringify(payload)}\nSHOWN: the ${view} view is on the screen beside this conversation now and the person can see it. ` +
-        'Describe what it shows in a sentence or two with the key figures. Never say you cannot display or visualise it.',
+      `${JSON.stringify(payload)}\nSHOWN: the ${view} view is on the screen beside this conversation now and the person can see it${count ? ` (${count})` : ''}. ` +
+        'Describe what it shows in a sentence or two with the key figures from the rows above. Never say you cannot display or visualise it.',
     );
   },
 });
