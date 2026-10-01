@@ -192,7 +192,10 @@ const copilotSchema = z.object({
       nodeType: z.string().max(40),
       nodeSubType: z.string().max(40),
       config: z.record(z.unknown()),
-    })).max(40),
+    // An agent whose every tool is its own node runs well past forty; the
+    // copilot only reads a few fields of each (assistant.ts), so the cost
+    // of a long list is small and the refusal was the only thing it bought.
+    })).max(200),
   }).nullish(),
   // Home screen: no open agent, but the dashboard's own numbers, and the
   // copilot may hand a requirement to the Architect (see assistant.ts).
