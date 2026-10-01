@@ -116,6 +116,25 @@ describe('resolveIdentity', () => {
     expect(r2.ok && r2.principal.via).toBe('setup');
   });
 
+  it('a node that pins a connection uses exactly that one — for everyone, in chat and automations — and nothing else', async () => {
+    const pinned = policyFor({ runAs: 'connection' }, null, ORG, 'chat');
+    expect(pinned).toMatchObject({ runAs: 'connection', fallback: 'none', required: false, automationRunAs: 'org' });
+    repo.getById.mockResolvedValue(row({ id: 'mine', principalType: 'user', subjectKey: 'builder', accountEmail: 'sales.annu@360smsapp.com', accessToken: 'pinned-tok' }));
+    repo.getByOrgProviderAndUser.mockResolvedValue(row({ id: 'own', accessToken: 'own-tok' }));
+    repo.getOrgConnection.mockResolvedValue(row({ id: 'org1', principalType: 'org', subjectKey: null, accessToken: 'org-tok' }));
+    const r = await resolveIdentity({ ...base, policy: pinned, explicitConnectorId: 'mine' });
+    expect(r.ok && r.token).toBe('pinned-tok');
+    expect(r.ok && r.principal.pinned).toBe(true);
+    expect(r.ok && r.principal.accountEmail).toBe('sales.annu@360smsapp.com');
+    const auto = await resolveIdentity({ ...base, kind: 'automation', policy: policyFor({ runAs: 'connection' }, null, ORG, 'automation'), explicitConnectorId: 'mine' });
+    expect(auto.ok && auto.token).toBe('pinned-tok');
+    // A disconnected pinned row is a failure with the reason, never a fall-through to the person's own or the org's.
+    repo.getById.mockResolvedValue(row({ id: 'mine', status: 'Disconnected', accountEmail: 'sales.annu@360smsapp.com' }));
+    const broken = await resolveIdentity({ ...base, policy: pinned, explicitConnectorId: 'mine' });
+    expect(!broken.ok && broken.wanted).toBe('connection');
+    expect(!broken.ok && broken.message).toContain('sales.annu@360smsapp.com');
+  });
+
   it('an automation for the triggering user with no identity is a failure, not a silent switch', async () => {
     repo.getByOrgProviderAndUser.mockResolvedValue(null);
     repo.getOrgConnection.mockResolvedValue(row({ id: 'org1', principalType: 'org', subjectKey: null }));

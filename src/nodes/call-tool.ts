@@ -113,6 +113,7 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
     });
     if (!identity.ok) {
       if (identity.wanted === 'org') return skipped(node.id, provider, toolName, `the ${provider} connector is not connected yet — connect it on the Connectors page`);
+      if (identity.wanted === 'connection') return skipped(node.id, provider, toolName, identity.message);
       logger.warn({ nodeId: node.id, provider, userId: ctx.userId, reason: identity.reason }, 'call_tool_no_identity_for_user');
       return {
         nodeId: node.id, nodeSubType: 'call_tool', success: false,

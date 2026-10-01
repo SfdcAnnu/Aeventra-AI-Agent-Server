@@ -35,6 +35,8 @@ export interface Principal {
   accountEmail?: string | null;
   /** How the token came to be: a stored connection, a minted JWT, the org Setup token. */
   via: 'connection' | 'jwt' | 'setup' | 'platform';
+  /** The node pinned this connection: everyone acts as it, not as themselves. */
+  pinned?: boolean;
 }
 
 export type IdentityReason = 'needs_connection' | 'needs_group_connection' | 'wrong_account' | 'expired';
@@ -49,7 +51,8 @@ export interface ResolveArgs {
   provider: string;
   policy: IdentityPolicy;
   kind: RunKind;
-  /** The connector node's explicitly chosen connection (an org connection). */
+  /** The connector node's chosen connection: the only one when the policy
+   *  runs as 'connection', else the org connection to prefer. */
   explicitConnectorId?: string | null;
   sfAccessToken?: string | null;
   sessionId?: string | null;
@@ -91,6 +94,8 @@ const ok = (token: string, principal: Principal, instanceUrl?: string | null): I
 
 /** The effective run-as for this kind of run. */
 export function effectiveRunAs(policy: IdentityPolicy, kind: RunKind): RunAs {
+  // A pinned connection is the agent's credential whatever started the run.
+  if (policy.runAs === 'connection') return 'connection';
   if (kind === 'chat') return policy.runAs;
   switch (policy.automationRunAs) {
     case 'triggeringUser': return policy.runAs === 'group' ? 'group' : 'user';
@@ -108,6 +113,22 @@ export async function resolveIdentity(args: ResolveArgs): Promise<IdentityResult
   if (provider === PLATFORM_PROVIDER) {
     const token = await mintPlatformToken({ orgId, userId, sessionId: args.sessionId ?? null, agentApiName: args.agentApiName ?? null });
     return ok(token, { type: 'org', subjectKey: null, subjectLabel: 'Archon', connectorId: null, via: 'platform' });
+  }
+
+  // 0. The node pinned one connection: that one, exactly, or nothing.
+  if (wanted === 'connection') {
+    const row = args.explicitConnectorId ? await ConnectorsRepo.getById(orgId, args.explicitConnectorId).catch(() => null) : null;
+    if (row && row.status === 'Connected') {
+      const token = await freshen(row);
+      if (token) return ok(token, { ...principalOf(row), pinned: true }, row.instanceUrl);
+    }
+    const who = row?.accountEmail ?? row?.subjectLabel ?? row?.displayName ?? null;
+    return {
+      ok: false, reason: row ? 'expired' : 'needs_connection', wanted,
+      message: row
+        ? `The ${provider} connection this agent uses${who ? ` (${who})` : ''} is disconnected — whoever connected it must reconnect it, on the agent's node or the Connectors page.`
+        : `This agent's ${provider} node points at a connection that no longer exists — pick another one on the node.`,
+    };
   }
 
   const isSf = SALESFORCE_TOKEN_PROVIDERS.has(provider);

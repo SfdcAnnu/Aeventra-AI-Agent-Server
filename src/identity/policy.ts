@@ -13,7 +13,10 @@
  * before principals existed. The org default applies to nodes the canvas
  * and the Architect create from now on, never retroactively.
  */
-export type RunAs = 'user' | 'group' | 'org';
+/** 'connection': the node pins ONE stored connection (its connectorId) and
+ *  everyone who uses the agent acts as it — a builder's own account, a
+ *  team's, or the org's, chosen on the canvas. */
+export type RunAs = 'user' | 'group' | 'org' | 'connection';
 export type Fallback = 'none' | 'org';
 export type AutomationRunAs = 'triggeringUser' | 'agentUser' | 'org';
 export type RunKind = 'chat' | 'automation';
@@ -59,7 +62,7 @@ export const DEFAULT_ORG_POLICY: OrgIdentityPolicyView = {
   reminderMax: 3,
 };
 
-const RUN_AS = new Set<RunAs>(['user', 'group', 'org']);
+const RUN_AS = new Set<RunAs>(['user', 'group', 'org', 'connection']);
 const FALLBACK = new Set<Fallback>(['none', 'org']);
 const AUTO = new Set<AutomationRunAs>(['triggeringUser', 'agentUser', 'org']);
 
@@ -77,13 +80,15 @@ export function policyFor(
   const runAsRaw = input?.runAs ?? (legacyAccessMode === 'PerUser' ? 'user' : null);
   const runAs: RunAs = RUN_AS.has(runAsRaw as RunAs) ? (runAsRaw as RunAs) : 'org';
   let fallback: Fallback = FALLBACK.has(input?.fallback as Fallback) ? (input!.fallback as Fallback) : 'none';
-  if (runAs === 'org') fallback = 'none';
+  if (runAs === 'org' || runAs === 'connection') fallback = 'none';
   // The org-wide block wins over any node in chat.
-  if (kind === 'chat' && org.blockOrgFallbackForChat && runAs !== 'org') fallback = 'none';
-  const required = input?.required != null ? !!input.required : (legacyAccessMode === 'PerUser' || (runAs !== 'org'));
+  if (kind === 'chat' && org.blockOrgFallbackForChat && runAs !== 'org' && runAs !== 'connection') fallback = 'none';
+  // A pinned connection asks nothing of the person chatting.
+  const required = runAs === 'connection' ? false
+    : input?.required != null ? !!input.required : (legacyAccessMode === 'PerUser' || (runAs !== 'org'));
   const automationRunAs: AutomationRunAs = AUTO.has(input?.automationRunAs as AutomationRunAs)
     ? (input!.automationRunAs as AutomationRunAs)
-    : runAs === 'org' ? 'org' : 'triggeringUser';
+    : runAs === 'org' || runAs === 'connection' ? 'org' : 'triggeringUser';
   const allowedDomain = (input?.allowedDomain ?? '').trim().toLowerCase() || null;
   return { runAs, fallback, required, automationRunAs, allowedDomain };
 }
