@@ -858,6 +858,11 @@ const DESIGN_INSTRUCTION =
             'unless the requirement says otherwise; for audience "customer", do NOT gate the creates and updates the ' +
             'requirement asks the agent to make (the person cannot approve anything and would wait on no one) and gate ' +
             'only what the requirement says needs a human check. A delete, or anything irreversible, is always gated.\n\n' +
+            'Add ONLY what the requirement asks for. Never add a step the person must pass that nobody asked for -- a ' +
+            'verification code, a one-time password, an extra confirmation, a terms acceptance -- and never wire in an ' +
+            'org action or flow (for example the SvcCopilotTmpl__ templates) unless the requirement asks for exactly what ' +
+            'it does. Identifying someone "by email" means looking them up by that email, nothing more. Sending an email, ' +
+            'SMS or notification to anyone is irreversible: gate it like a delete.\n\n' +
             'Set `audience`: "customer" if the replies are read by someone outside the business, "internal" if ' +
             'they are read by an employee. Decide it from the requirement, never from the channel — a web chat ' +
             'can be a public widget or a staff tool, and the two need opposite handling.';
@@ -1436,7 +1441,9 @@ async function runBuild(job: BuildJob): Promise<void> {
             'approval setting as uncovered. When `audience` is "customer", creates and updates WITHOUT an approval ' +
             'setting are correct unless the requirement asks for a human check -- the customer could not approve them. ' +
             'Judge only the tools listed in `tools` (and `toolsReachableViaCatalog` when present): nothing else is ' +
-            'reachable, so never report that the agent can reach a tool that is not listed.\n' +
+            'reachable, so never report that the agent can reach a tool that is not listed. ' +
+            'A step the requirement did NOT ask for that the person must pass (a verification code, an extra ' +
+            'confirmation) or an org action nobody asked for is a fix: name it so the repair removes it.\n' +
             'IF THE REQUIREMENT IS A SCRIPT — numbered steps, example wording, a table of statuses — the right tools are not enough. Read the agent\'s own instructions and check they carry the order, what makes each answer valid, what happens when it is not, which field each step writes, and EVERY status transition the client named. A design with the correct tools and no script does not deliver a scripted requirement: report each missing step as uncovered.\n' +
             'Check too that options the client said come from configured data are READ at runtime rather than written into the prompt, and that a dependent picklist is read as a pair.\n' +
             'THE PLATFORM ALREADY DOES THESE, so never report them as uncovered: receiving and sending messages on the ' +

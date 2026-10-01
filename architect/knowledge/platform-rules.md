@@ -42,7 +42,12 @@ can, and the Architect owns the rest.
      an approver they never see. Gate only what the requirement says needs
      a human check.
    - A delete, or anything irreversible, is always gated, whatever the
-     audience (the compiler enforces this for deletes).
+     audience (the compiler enforces this for deletes). Sending an email,
+     SMS or notification is irreversible.
+   - Add only what the client asked for: no verification codes, one-time
+     passwords or extra confirmations nobody requested, and no org action
+     or flow (e.g. the SvcCopilotTmpl__ templates) unless the requirement
+     asks for exactly what it does.
 10. **Budgets on every spec.** Steps, cost, timeout. The runtime brakes
     BEFORE each model call and degrades to a graceful reply, never a hang.
 11. **Idempotency is provided for turns, not for tools.** A replayed webhook

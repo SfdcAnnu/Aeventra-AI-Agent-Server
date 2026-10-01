@@ -13,6 +13,7 @@ import { logger } from '../logger';
 import { ChatApprovalsRepo } from '../db/chat-approvals.repo';
 import type { AgentAction } from '../types';
 import type { ChatApproval } from '@prisma/client';
+import { argProblem } from './mcp-tools';
 
 export interface ApprovalMeta {
   orgId: string;
@@ -120,6 +121,11 @@ export function approvalGate(meta: ApprovalMeta): (t: StructuredToolInterface) =
   return (t: StructuredToolInterface) =>
     tool(
       async (args: unknown) => {
+        // The same pre-flight checks the tool runs on execution, run BEFORE
+        // the call is parked: a bad argument is bounced back now, while the
+        // agent can still fix it, not after a person approves it.
+        const problem = argProblem(args);
+        if (problem) return problem;
         try {
           const prior = await ChatApprovalsRepo.findLatestForCall(meta.orgId, meta.sessionId, t.name, args).catch(() => null);
           const verdict = prior ? priorVerdict(prior, meta.audience) : null;
