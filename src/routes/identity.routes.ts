@@ -22,7 +22,7 @@ import { ConnectorsCache } from '../db/connectors-cache';
 import { OrgIdentityPolicyRepo, RemindersRepo, ServerOverrideRepo } from '../db/identity.repo';
 import { AgentCache } from '../chat/agent-cache';
 import { listToolsCached, McpRateLimited } from '../mcp/tool-list-cache';
-import { listGroups, type GroupKeyType } from '../identity/membership';
+import { listGroups, membershipFor, type GroupKeyType } from '../identity/membership';
 import { forgetGroupConnections, resolveIdentity } from '../identity/resolver';
 import { identityInputFromConfig, policyFor, type IdentityPolicy } from '../identity/policy';
 import { sfJwtConfigured } from '../oauth/salesforce-jwt';
@@ -130,6 +130,35 @@ identityRouter.get('/api/connectors/identity-summary', sessionAuth, async (req, 
   res.json({ providers: byProvider });
 });
 
+// ── what a builder may pin on a node ───────────────────────────────
+const usableSchema = z.object({ userId: z.string().min(1), providerKey: z.string().min(1) });
+
+/** The connections THIS person can choose for a provider on the canvas:
+ *  their own, their groups', and the org's — plus the groups they belong
+ *  to, for connecting a new team account. */
+identityRouter.post('/api/connectors/usable', sessionAuth, async (req, res) => {
+  const parsed = usableSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() }); return; }
+  const orgId = req.orgId!;
+  const { userId, providerKey } = parsed.data;
+  const rows = await ConnectorsRepo.listPrincipals(orgId, providerKey);
+  let groups: Array<{ type: string; key: string; label: string }> = [];
+  try {
+    const conn = await getOrgConnection(orgId);
+    groups = (await membershipFor(conn, orgId, userId)).groups;
+  } catch (err) {
+    logger.warn({ err, orgId, userId }, 'identity_usable_membership_failed');
+  }
+  const inGroup = (r: Connector) => groups.some(g => g.type === r.subjectType && g.key === r.subjectKey);
+  const live = (r: Connector) => r.status !== 'Disconnected';
+  res.json({
+    mine: rows.filter(r => r.principalType === 'user' && r.subjectKey === userId && live(r)).map(summarise),
+    team: rows.filter(r => r.principalType === 'group' && inGroup(r) && live(r)).map(summarise),
+    org: rows.filter(r => r.principalType === 'org' && r.status === 'Connected').sort((a, b) => (b.lastConnectedAt?.getTime() ?? 0) - (a.lastConnectedAt?.getTime() ?? 0)).map(summarise)[0] ?? null,
+    groups,
+  });
+});
+
 // ── a person's own connections (self-service) ──────────────────────
 const mineSchema = z.object({ userId: z.string().min(1) });
 
@@ -159,7 +188,7 @@ identityRouter.post('/api/connectors/mine/disconnect', sessionAuth, async (req, 
 // ── the chat gate: what one person must connect for one agent ──────
 const requirementsSchema = z.object({ agentApiName: z.string().min(1), userId: z.string().min(1) });
 
-export type RequirementStatus = 'connected' | 'automatic' | 'needed' | 'expired' | 'wrong_account' | 'needs_group' | 'org';
+export type RequirementStatus = 'connected' | 'automatic' | 'needed' | 'expired' | 'wrong_account' | 'needs_group' | 'org' | 'pinned';
 
 identityRouter.post('/api/connectors/requirements', sessionAuth, async (req, res) => {
   const orgId = req.orgId!;
@@ -193,6 +222,13 @@ identityRouter.post('/api/connectors/requirements', sessionAuth, async (req, res
         continue;
       }
       const r = await resolveIdentity({ orgId, userId, provider, policy, kind: 'chat', explicitConnectorId: (cfg.connectorId as string) || null, sfAccessToken: install?.sfAccessToken ?? null, orgPolicy, agentApiName });
+      if (policy.runAs === 'connection') {
+        // The node pinned a connection: nothing to ask of the person — but
+        // a broken one stops the agent, and only its owner or an admin can fix it.
+        if (r.ok) requirements.push({ provider, displayName, runAs: 'connection', required: false, status: 'pinned', accountEmail: r.principal.accountEmail ?? r.principal.subjectLabel ?? null, message: null, connectorId: r.principal.connectorId });
+        else requirements.push({ provider, displayName, runAs: 'connection', required: true, status: 'needs_group', accountEmail: null, message: r.message, connectorId: null });
+        continue;
+      }
       if (r.ok) {
         requirements.push({ provider, displayName, runAs: policy.runAs, required: policy.required, status: r.principal.via === 'jwt' || r.principal.via === 'setup' ? 'automatic' : 'connected', accountEmail: r.principal.accountEmail ?? r.principal.subjectLabel ?? null, message: null, connectorId: r.principal.connectorId });
       } else {
@@ -200,7 +236,7 @@ identityRouter.post('/api/connectors/requirements', sessionAuth, async (req, res
         requirements.push({ provider, displayName, runAs: policy.runAs, required: policy.required, status, accountEmail: null, message: r.message, connectorId: null });
       }
     }
-    const blocking = requirements.filter(r => r.required && r.status !== 'connected' && r.status !== 'automatic' && r.status !== 'org');
+    const blocking = requirements.filter(r => r.required && r.status !== 'connected' && r.status !== 'automatic' && r.status !== 'org' && r.status !== 'pinned');
     res.json({ requirements, runsAsUser: requirements.some(r => r.runAs === 'user'), ready: blocking.length === 0, blocking: blocking.map(b => b.provider) });
   } catch (err) {
     logger.error({ err, orgId, agentApiName }, 'identity_requirements_failed');

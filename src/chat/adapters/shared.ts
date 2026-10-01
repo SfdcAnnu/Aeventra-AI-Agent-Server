@@ -415,6 +415,7 @@ export async function resolveMcpServers(
       const ranAs: RanAs = {
         type: identity.principal.type, subjectKey: identity.principal.subjectKey, subjectLabel: identity.principal.subjectLabel,
         accountEmail: identity.principal.accountEmail ?? null, via: identity.principal.via,
+        ...(identity.principal.pinned ? { pinned: true } : {}),
       };
       return { name, url, token, allowedTools, headers: Object.keys(headers).length ? headers : undefined, ranAs };
     }));
