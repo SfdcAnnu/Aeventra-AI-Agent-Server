@@ -195,7 +195,7 @@ const PLACEHOLDER_VALUE_RE = /"<[^">]{1,60}>"/;
  *  errors into self-correctable instructions (standard-object semantics,
  *  nothing agent-specific). Live-confirmed: an Account Id (001…) passed as
  *  WhoId killed an Event create with FIELD_INTEGRITY_EXCEPTION. */
-function argProblem(args: unknown): string | null {
+export function argProblem(args: unknown): string | null {
   const s = JSON.stringify(args);
   if (PLACEHOLDER_VALUE_RE.test(s)) {
     return 'REJECTED: one or more arguments are template placeholders like "<Contact Id>" or "<tomorrow\'s date>". ' +
@@ -209,6 +209,15 @@ function argProblem(args: unknown): string | null {
       return `REJECTED: WhoId "${whoId}" is not a Contact (003…) or Lead (00Q…) Id — it looks like a different object ` +
         '(001… is an Account). Look up the real Contact or Lead Id related to this record, ' +
         'then call this tool again.';
+    }
+    // The mirror case: a Lead or Contact in WhatId. Live (1 Oct 2026) a
+    // summary Task on a Lead failed FIELD_INTEGRITY_EXCEPTION after it had
+    // been approved, when the agent could no longer correct it.
+    const whatId = body.WhatId;
+    if (typeof whatId === 'string' && whatId.length >= 15 && /^(00Q|003)/.test(whatId)) {
+      return `REJECTED: WhatId "${whatId}" is a ${whatId.startsWith('00Q') ? 'Lead' : 'Contact'} (00Q…/003…). Leads and ` +
+        'Contacts go in WhoId; WhatId is for an Account, Opportunity, Case or other record. Move it to WhoId ' +
+        '(and leave WhatId empty for a Lead), then call this tool again.';
     }
     const ownerId = body.OwnerId;
     if (typeof ownerId === 'string' && ownerId.length >= 15 && !/^005/.test(ownerId)) {

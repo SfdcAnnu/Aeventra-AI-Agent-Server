@@ -669,6 +669,16 @@ export function prefetchPromptBlocks(
   };
 }
 
+/** The per-turn language line: the latest message, quoted, names the
+ *  language for every script without guessing it. Null when the message
+ *  has no words (an emoji, a number). */
+export function latestLanguageNote(query: string): string | null {
+  const latest = query.replace(/\s+/g, ' ').trim();
+  if (!/\p{L}{2,}/u.test(latest)) return null;
+  return `LANGUAGE: write this reply in the same language as the person's latest message: "${latest.slice(0, 80)}". ` +
+    'Earlier messages in another language do not change this.';
+}
+
 export async function buildSystemPromptParts(
   agent: AgentDefinition,
   aiNode: AgentNode,
@@ -722,7 +732,12 @@ export async function buildSystemPromptParts(
     'never tell the person that something does not exist, is not available or was not found because a tool ' +
     'failed — say you could not check it right now. ' +
     'Reply in the language of the person\'s LATEST message, even if earlier messages used another language. ' +
-    'Never ask again for something the person already told you in this conversation — use what they gave.',
+    'Never ask again for something the person already told you in this conversation — use what they gave. ' +
+    // A meeting at 3 pm IST was saved as 04:00 UTC -- converted twice --
+    // in one run and correctly in another (C5, 30 Sep vs 1 Oct 2026).
+    'When you write a date-time field, convert the person\'s local time to UTC yourself and send it in UTC with a ' +
+    'trailing Z (3 pm IST = 09:30:00Z); never send a value that is already UTC with an offset as well, and never ' +
+    'convert a value twice.',
   );
   stableParts.push(
     'CRITICAL — never end your turn on a narration-only sentence. ' +
@@ -768,6 +783,13 @@ export async function buildSystemPromptParts(
       'Do not attempt a phone lookup and never guess a number. Leave any Phone field empty unless the customer states their number.',
     );
   }
+  // WHICH LANGUAGE THIS REPLY IS IN, stated per turn. A standing rule
+  // ("reply in the language of the latest message") did not hold: after
+  // one Hindi question an English request still got a Hindi reply (1 Oct
+  // 2026 test run). Quoting the message itself names the language for
+  // every script without guessing it. Volatile: it is this turn's message.
+  const languageLine = latestLanguageNote(query);
+  if (languageLine) volatileParts.push(languageLine);
   if (ctx.recordContextId) {
     // Record anchoring — a runtime FACT (which record this session is
     // attached to), phrased modality-neutrally: works for an embedded

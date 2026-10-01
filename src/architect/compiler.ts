@@ -184,6 +184,56 @@ interface PlatformNode {
   enabled: boolean;
 }
 
+/** The provider an AI node runs on, in the AiEngineConnection__c.EngineType__c
+ *  vocabulary (Apex normalises the same way: gpt4 -> openai). */
+function engineTypeOf(nodeSubType: string): string {
+  const s = nodeSubType.toLowerCase();
+  if (/claude|anthropic/.test(s)) return 'claude';
+  if (/gemini|google/.test(s)) return 'gemini';
+  return 'openai';
+}
+
+/**
+ * THE KEY EACH AI NODE RUNS ON.
+ *
+ * An agent runs only on the key chosen on its AI node, with no fallback
+ * (Apex AiEngineConnectionController.resolveForRuntime). The builder used
+ * to save none, so every agent it built refused its first turn with "has
+ * no AI key" -- live in the 1 Oct 2026 test run. It now chooses, per
+ * provider: the key already on this agent when it is a rebuild, else the
+ * org's preferred active key, else the most recently validated active one.
+ * None at all is said in a note, never guessed.
+ */
+export async function chooseAiKeys(
+  conn: ReturnType<typeof pkgConn>,
+  keptKey: string | null,
+  notes: string[],
+): Promise<(nodeSubType: string) => string | null> {
+  let keys: Array<{ Id: string; EngineType__c: string | null; IsPreferred__c: boolean | null; ValidationStatus__c: string | null; LastValidatedAt__c: string | null }> = [];
+  try {
+    keys = (await conn.query<(typeof keys)[number]>(
+      'SELECT Id, EngineType__c, IsPreferred__c, ValidationStatus__c, LastValidatedAt__c FROM AiEngineConnection__c WHERE IsActive__c = true',
+    )).records;
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, 'architect_compile_keys_failed');
+  }
+  const kept = keptKey ? keys.find(k => k.Id === keptKey) : undefined;
+  const missing = new Set<string>();
+  return (nodeSubType: string) => {
+    const type = engineTypeOf(nodeSubType);
+    if (kept && kept.EngineType__c === type) return kept.Id;
+    const ofType = keys.filter(k => k.EngineType__c === type);
+    const pick = ofType.find(k => k.IsPreferred__c)
+      ?? ofType.filter(k => k.ValidationStatus__c === 'Success').sort((a, b) => String(b.LastValidatedAt__c).localeCompare(String(a.LastValidatedAt__c)))[0]
+      ?? ofType[0];
+    if (!pick && !missing.has(type)) {
+      missing.add(type);
+      notes.push(`No active ${type} AI key in this org, so this agent cannot run yet: open it in the builder, select its AI node and choose a key.`);
+    }
+    return pick?.Id ?? null;
+  };
+}
+
 /** A tool that removes data: by the crud operation, or by what the tool
  *  calls itself for MCP servers and custom actions. */
 export function isDeleteAction(toolName: string | undefined, operation: string | undefined): boolean {
@@ -620,9 +670,15 @@ export async function compileSpec(
     if (typeof defFields.Description__c === 'string' && defFields.Description__c.length > 255) defFields.Description__c = `${defFields.Description__c.slice(0, 254)}…`;
   }
 
+  // A rebuild replaces the nodes; the key a person chose on the old AI
+  // node must survive it, so it is read before they are deleted.
+  let keptKey: string | null = null;
   if (agentId) {
     await conn.sobject('AgentDefinition__c').update({ Id: agentId, ...defFields });
-    const old = await conn.query<{ Id: string }>(`SELECT Id FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`);
+    const old = await conn.query<{ Id: string; NodeType__c: string | null; AiEngineConnection__c: string | null }>(
+      `SELECT Id, NodeType__c, AiEngineConnection__c FROM AgentNode__c WHERE AgentDefinition__c = '${agentId}'`,
+    );
+    keptKey = old.records.find(r => r.NodeType__c === 'ai' && r.AiEngineConnection__c)?.AiEngineConnection__c ?? null;
     if (old.records.length > 0) {
       await conn.sobject('AgentNode__c').destroy(old.records.map(r => r.Id));
     }
@@ -632,8 +688,10 @@ export async function compileSpec(
     agentId = created.id as string;
   }
 
+  const keyFor = await chooseAiKeys(conn, keptKey, notes);
   const nodeRows = platformNodes.map((p, i) => ({
     AgentDefinition__c: agentId!,
+    ...(p.nodeType === 'ai' || p.nodeType === 'subagent' ? { AiEngineConnection__c: keyFor(p.nodeSubType) } : {}),
     Name: p.name.slice(0, 80),
     NodeType__c: p.nodeType,
     NodeSubType__c: p.nodeSubType,
