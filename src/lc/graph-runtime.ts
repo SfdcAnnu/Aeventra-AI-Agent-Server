@@ -48,6 +48,8 @@ import { InstallsCache } from '../db/installs-cache';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { continuationMessage, mergeActionsIntoConnectors } from '../chat/connector-scope';
 import { approvalOutcomeMessage, isApprovalOutcome } from '../chat/approval-outcome';
+import { handoffLineMessage, isHandoffLine } from '../chat/handoff-return';
+import { buildHandoffTools } from './handoff-tool';
 import { augmentConnectorsWithToolNodes } from '../chat/tool-node-connectors';
 import type { AgentDefinition, AgentNode, AgentAction } from '../types';
 import type { NeedsConnection, RanAs } from '../chat/adapters/types';
@@ -304,10 +306,16 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   // The session result cache goes on LAST so it sees the approval gate's
   // verdict as the call's result — a parked PENDING_APPROVAL is a
   // non-answer and is never cached (tool-result-cache.ts).
-  const routerTools = withSessionResultCache(
-    [...mcpTools, ...prebuiltTools, buildReadArtifactTool()],
-    req.sessionId,
-  ).sort((a, b) => a.name.localeCompare(b.name));
+  // A "Hand off to a person" node wired to the root gives it hand_off_to_human
+  // (lc/handoff-tool.ts). Never cached: a second call must see the state.
+  const personHandoffTools = buildHandoffTools(
+    { orgId: req.context.orgId, sessionId: req.sessionId, recordContextId: req.context.recordContextId, recordContextType: req.context.recordContextType },
+    graph, aiNode,
+  );
+  const routerTools = [
+    ...withSessionResultCache([...mcpTools, ...prebuiltTools, buildReadArtifactTool()], req.sessionId),
+    ...personHandoffTools,
+  ].sort((a, b) => a.name.localeCompare(b.name));
 
   try {
     // Answer style / Thinking effort / Longest reply, straight off the root
@@ -1089,6 +1097,11 @@ export function toLangchainMessages(
       if (isApprovalOutcome(m.content)) {
         flushTools();
         out.push(new HumanMessage(approvalOutcomeMessage(m.content)));
+      } else if (isHandoffLine(m.content)) {
+        // The other two: a person took the conversation, and gave it back
+        // (chat/handoff-return.ts).
+        flushTools();
+        out.push(new HumanMessage(handoffLineMessage(m.content)));
       }
       continue;
     }

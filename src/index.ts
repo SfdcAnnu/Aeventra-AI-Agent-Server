@@ -26,6 +26,7 @@ import { startTraceRetention } from './trace/retention';
 import { traceCaptureEnabled } from './trace/recorder';
 import { attach as attachWsGateway } from './ws/gateway';
 import { startRunPoller } from './scheduler/run-poller';
+import { startHandoffPoller } from './scheduler/handoff-poller';
 import { warnIfUnencrypted } from './lib/secret-box';
 import { failOrphanedBuilds } from './architect/build-job';
 
@@ -94,6 +95,8 @@ server.listen(config.port, () => {
   // not something nobody noticed.
   warnIfUnencrypted();
   startRunPoller();
+  // Conversations a person took and left quiet go back to their agent.
+  startHandoffPoller();
   // Builds left "running" by the previous process are orphans now.
   void failOrphanedBuilds();
 });
