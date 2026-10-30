@@ -754,7 +754,10 @@ interface Requirement {
   successCriteria: string[];
   outOfScope: string[];
   riskLevel: 'low' | 'medium' | 'high';
+  /** Only what the business owner alone can answer; each ends with the default used if unanswered. */
   openQuestions?: string[];
+  /** What the Analyst decided itself as a senior architect, one sentence each with the reason. */
+  decisions?: string[];
 }
 
 interface MatchResult {
@@ -947,15 +950,19 @@ async function runBuild(job: BuildJob): Promise<void> {
       requirement: job.requirement,
       ...(attachmentText ? { attachedDocument: attachmentText.slice(0, 30_000) } : {}),
       note:
-        'This build runs without a back-and-forth: resolve what you can from the text; anything genuinely ' +
-        'unresolvable goes in openQuestions as an assumption you made, phrased as the assumption. ' +
+        'This build runs without a back-and-forth. Decide everything a senior Salesforce architect would decide ' +
+        'and record each decision in decisions with its reason. Put in openQuestions only what the business owner ' +
+        'alone can know and that changes the design: no cap, no target, and zero is right when the text is clear. ' +
         'NEVER ask about what the platform already provides: receiving and sending messages on the channel ' +
         '(WhatsApp, SMS, web chat, email), keeping the conversation and its state across turns, identifying the ' +
         'sender and loading the record the conversation is anchored to, calling Salesforce tools in the same ' +
         'turn (create, update, Event, Task, Chatter), reading picklist values live, routing between specialists, ' +
         'and the approval gate on writes. The Org Surveyor runs next and verifies objects, fields and tools; ' +
-        'do not ask whether they exist. Ask only what a business owner must decide — at most three questions. ' +
-        'Decide as a senior Salesforce architect would and do not ask: activities are Task, Event and EmailMessage; access follows the running user\'s Salesforce permissions; users are internal unless the text says customers or partners; read-only unless writes are asked; English; "recent" is the last 7 days by LastModifiedDate unless a period is named; a reply shows the fields the question needs.',
+        'do not ask whether they exist. Standard decisions to make without asking: activities are Task, Event and EmailMessage; ' +
+        'access follows the running user\'s Salesforce permissions; users are internal unless the text says customers or partners; ' +
+        'read-only unless writes are asked; English; "recent" is the last 7 days by LastModifiedDate unless a period is named; ' +
+        'a reply shows the fields the question needs; qualification uses the fields the org already has on the object unless ' +
+        'the text names criteria. End every question with the default you will use if it goes unanswered.',
     }),
     r => ({ detail: `${r.capabilities.length} capabilities` }),
     r => { cp.requirement = r; },
@@ -1748,7 +1755,8 @@ async function runBuild(job: BuildJob): Promise<void> {
     shape: subCount === 0 ? '1 agent' : `1 agent + ${subCount} helper${subCount === 1 ? '' : 's'}`,
     prerequisites,
     estimate: { costPerRunUsd: Number(est.warmUsd.toFixed(3)), latencySeconds: est.latencySeconds },
-    assumptions: requirement.openQuestions ?? [],
+    // What the Analyst decided itself, then any question left to it ("You decide").
+    assumptions: [...(requirement.decisions ?? []), ...(requirement.openQuestions ?? [])],
     // Anything the review found missing leads the notes. A customer must
     // meet a shortfall before they meet the agent, not after.
     notes: [
@@ -1897,7 +1905,8 @@ function buildConfidence(
         : `a review returned '${(review.verdict ?? 'unclear').replace(/_/g, ' ')}'`,
     );
   }
-  if (req.openQuestions?.length) parts.push(`I assumed: ${req.openQuestions[0]}`);
+  if (req.decisions?.length) parts.push(`I decided: ${req.decisions[0]}`);
+  else if (req.openQuestions?.length) parts.push(`I assumed: ${req.openQuestions[0]}`);
   if ((match.partial?.length ?? 0) > 0) {
     parts.push('the partial capability matches are where I am least sure — read the named matches before going live');
   }

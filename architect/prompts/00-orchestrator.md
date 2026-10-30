@@ -45,7 +45,7 @@ the spec it will write tests that pass, and you will have learned nothing.
 
 ```
 1  analyse_requirement
-2  if questions remain → ask the user, at most 3 at a time → back to 1
+2  if questions remain → ask the user only what they alone can answer (no cap; usually none) → back to 1
 3  survey_org
 4  design_flow
 5  write_prompts
