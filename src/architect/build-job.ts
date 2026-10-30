@@ -950,7 +950,9 @@ async function runBuild(job: BuildJob): Promise<void> {
       requirement: job.requirement,
       ...(attachmentText ? { attachedDocument: attachmentText.slice(0, 30_000) } : {}),
       note:
-        'This build runs without a back-and-forth. Decide everything a senior Salesforce architect would decide ' +
+        'The client is not available to answer while you work; this says nothing about the agent itself, so pick ' +
+        'agentType only from the words of the requirement, communication unless it names an explicit trigger. ' +
+        'Decide everything a senior Salesforce architect would decide ' +
         'and record each decision in decisions with its reason. Put in openQuestions only what the business owner ' +
         'alone can know and that changes the design: no cap, no target, and zero is right when the text is clear. ' +
         'NEVER ask about what the platform already provides: receiving and sending messages on the channel ' +
