@@ -20,14 +20,17 @@ import type { AgentDefinition } from '../types';
 import type { ConnectorInput } from './adapters/types';
 import { METADATA_PROVIDER, PLATFORM_PROVIDER, SALESFORCE_TOKEN_PROVIDERS, providerOfAction } from './connector-scope';
 import { identityInputFromConfig } from '../identity/policy';
+import { PLATFORM_PATH } from '../mcp/endpoint';
 
 /** The Archon server's own tool endpoint. In-process client, so loopback
- *  unless an operator points it elsewhere (a multi-instance deployment). */
+ *  unless an operator points it elsewhere (a multi-instance deployment).
+ *  The path is PLATFORM_PATH so endpoint.ts knows this base is ours and
+ *  appends /mcp, wakes it and reads its catalog like any Archon server. */
 export function platformBaseUrl(): string {
   const explicit = process.env.PLATFORM_TOOLS_URL?.replace(/\/+$/, '');
   if (explicit) return explicit;
   const port = Number(process.env.PORT) > 0 ? Number(process.env.PORT) : 3000;
-  return `http://127.0.0.1:${port}/platform`;
+  return `http://127.0.0.1:${port}${PLATFORM_PATH}`;
 }
 
 /** Header the Salesforce Metadata server reads when a token has no id scope. */

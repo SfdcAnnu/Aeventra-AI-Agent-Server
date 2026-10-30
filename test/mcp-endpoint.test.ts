@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isHostedEndpoint, mcpEndpoint } from '../src/mcp/endpoint';
+import { platformBaseUrl } from '../src/chat/tool-node-connectors';
 import { KNOWN_CONNECTOR_TOOLS } from '../src/architect/connector-tools';
 import { GOOGLE_SCOPES } from '../src/oauth/google';
 
@@ -14,6 +15,21 @@ describe('an MCP server catalogued by origin, or by its full endpoint', () => {
     expect(isHostedEndpoint('https://drivemcp.googleapis.com/mcp/v1')).toBe(true);
     expect(isHostedEndpoint('https://x.onrender.com')).toBe(false);
     expect(isHostedEndpoint('not a url')).toBe(false);
+  });
+  // The server's own platform tools live under a path, but they are ours:
+  // the copilot's build_agent and inspector tools vanished on Render for a
+  // month because this base was taken for a provider-hosted endpoint and
+  // POSTed to /platform (the GET-only wake ping) instead of /platform/mcp.
+  it('treats the platform base as one of ours: /mcp appended, loopback or public', () => {
+    process.env.PORT = '10000';
+    delete process.env.PLATFORM_TOOLS_URL;
+    const base = platformBaseUrl();
+    expect(base).toBe('http://127.0.0.1:10000/platform');
+    expect(isHostedEndpoint(base)).toBe(false);
+    expect(mcpEndpoint(base)).toBe('http://127.0.0.1:10000/platform/mcp');
+    expect(isHostedEndpoint('https://aeventra-ai-agent-server.onrender.com/platform/')).toBe(false);
+    expect(mcpEndpoint('https://aeventra-ai-agent-server.onrender.com/platform/')).toBe('https://aeventra-ai-agent-server.onrender.com/platform/mcp');
+    delete process.env.PORT;
   });
 });
 
